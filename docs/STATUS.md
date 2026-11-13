@@ -30,6 +30,24 @@
 
 ## P1 内核 Mac 化 — 🔜 进行中
 
+### 已落地（2026-11-14 凌晨，第一片）
+
+| 项 | 结果 |
+|---|---|
+| Mac 平台层 `mac_platform.py` | ✅ lsof 端口探测（macOS 无 fuser）、统一内存水位（vm_stat）、预算 B=RAM−8G（`MACFABRIC_RESERVE_MB` 可覆盖） |
+| 内存账本 `memory_ledger.py` | ✅ 三规则（R1 准入+人工确认超卖 / R2 resident/on_demand 空闲休眠 / R3 压力安全网）+ 四态生命周期，纯逻辑可单测 |
+| 单元测试 | ✅ 19/19 通过（tests/unit/） |
+| CUDA 线退役（第一刀） | ✅ `gpu_state._port_pid` 走平台层；`health.gpu_used/total_mb` macOS 映射统一内存口径（total=B 预算，`wait_gpu_free` 语义正确） |
+| llama 二进制配置化 | ✅ `LlamaCppConfig.binary_path`；macOS 默认 `~/llama-cpp/build-metal/bin`，Linux 保持上游双目录 |
+| model 回显修复 | ✅ `--alias qwen3-4b --jinja`，响应 `model` 字段规范；`enable_thinking:false` 经 chat_template_kwargs 生效 |
+| 端到端回归 | ✅ switch 6.1s healthy，OpenAI/Anthropic 双协议仍通 |
+
+### P1 剩余
+
+- Anthropic→OpenAI 翻译层 + Claude Code golden replay 测试（覆盖无原生 /v1/messages 的引擎）
+- ocr-helper Swift CLI（Vision framework）
+- launchd/uv 打包、nvidia-smi reset 文案门禁（cli.py）、power_stats macOS 化
+
 ## P2 原生 App — ⏳ 未开始
 
 ## P3 能力包 — ⏳ 未开始

@@ -338,6 +338,10 @@ class LlamaCppConfig:
     context_size: int = 8192
     gpu_layers: int = 0  # 0=CPU only, -1=all GPU, N=部分
     extra_flags: str = ""  # 透传给 llama-server 的额外参数
+    # MACFABRIC P1: 显式二进制路径（Metal 构建为第一公民）。为空时回退
+    # 上游路径推断：macOS 用 ~/llama-cpp/build-metal/bin，Linux 保持
+    # build-cuda/build 双目录逻辑。
+    binary_path: str = ""
 
 
 @dataclass

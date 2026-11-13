@@ -32,10 +32,19 @@ class LlamaCppProcessManager(BaseProcessManager):
             return {"status": "error", "message": f"GGUF model not found: {model_path}"}
 
         # ── Select llama-server binary by GPU offload mode ──
-        # gpu_layers != 0 → CUDA build (GPU offload)
-        # gpu_layers == 0 → CPU-only build (no CUDA runtime overhead)
+        # MACFABRIC P1: binary_path 显式配置优先；macOS 默认 build-metal；
+        # Linux 保持上游 build-cuda/build 双目录行为。
+        import sys as _sys
         llama_cpp_base = Path.home() / "llama-cpp"
-        if cfg.gpu_layers != 0:
+        if getattr(cfg, "binary_path", ""):
+            llama_server = Path(cfg.binary_path).expanduser()
+            if not llama_server.exists():
+                return {"status": "error", "message": f"llama-server not found at {llama_server} (binary_path)"}
+        elif _sys.platform == "darwin":
+            llama_server = llama_cpp_base / "build-metal" / "bin" / "llama-server"
+            if not llama_server.exists():
+                return {"status": "error", "message": f"Metal llama-server not found at {llama_server}"}
+        elif cfg.gpu_layers != 0:
             llama_server = llama_cpp_base / "build-cuda" / "bin" / "llama-server"
             if not llama_server.exists():
                 return {"status": "error", "message": f"CUDA llama-server not found at {llama_server}"}

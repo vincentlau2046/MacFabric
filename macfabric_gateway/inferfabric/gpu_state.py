@@ -47,15 +47,13 @@ class GpuStateMachine:
 
     @staticmethod
     def _port_pid(port: int) -> Optional[int]:
-        """Return PID owning a TCP port via fuser, or None."""
-        result = subprocess.run(
-            ["fuser", str(port) + "/tcp"],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            m = re.search(r'(\d+)', result.stdout)
-            return int(m.group(1)) if m else None
-        return None
+        """Return PID owning a TCP port, or None.
+
+        MACFABRIC P1: 委托 mac_platform — macOS 用 lsof（无 fuser），
+        Linux 保持 fuser 上游行为。
+        """
+        from inferfabric.mac_platform import pid_on_port
+        return pid_on_port(port)
 
     # ── Scan / Derive ─────────────────────────────────────────────
 

@@ -17,6 +17,7 @@ from .config import (
     GPU_FREE_THRESHOLD_MB,
     STOP_SIGTERM_TIMEOUT,
 )
+from . import mac_platform
 
 log = logging.getLogger("inferfabric")
 
@@ -30,7 +31,13 @@ def _run(cmd: list[str], timeout: int = 30, **kw) -> subprocess.CompletedProcess
 # ─── GPU Memory ──────────────────────────────────────────────────
 
 def gpu_used_mb() -> int:
-    """Get total GPU memory used across all GPUs."""
+    """Get total GPU memory used across all GPUs.
+
+    MACFABRIC P1: macOS 统一内存口径 — 映射到系统内存在用水位。
+    """
+    if mac_platform.IS_MACOS:
+        used = mac_platform.mem_used_mb()
+        return used if used is not None else 0
     try:
         r = _run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"])
         total = sum(int(x.strip()) for x in r.stdout.strip().splitlines() if x.strip())
@@ -40,7 +47,13 @@ def gpu_used_mb() -> int:
 
 
 def gpu_total_mb() -> int:
-    """Get total GPU memory."""
+    """Get total GPU memory.
+
+    MACFABRIC P1: macOS 统一内存口径 — 返回预算 B = RAM − 8G（D2 裁决），
+    使 wait_gpu_free 等上游逻辑在 Mac 上有正确语义。
+    """
+    if mac_platform.IS_MACOS:
+        return mac_platform.budget_mb()
     try:
         r = _run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"])
         total = sum(int(x.strip()) for x in r.stdout.strip().splitlines() if x.strip())
