@@ -1,0 +1,404 @@
+"""
+inferfabric/token_stats.py — Token usage statistics collector.
+Polls vLLM Prometheus metrics, computes deltas, aggregates by day, persists to JSON.
+"""
+
+import json
+import logging
+import os
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.request import urlopen
+
+from inferfabric.prometheus import parse_prometheus_text
+
+log = logging.getLogger("inferfabric.token_stats")
+
+STATE_FILE = Path.home() / ".inferfabric" / "token-stats.json"
+
+
+class TokenStatsCollector:
+    """Collects token usage from active vLLM instances, aggregates by day."""
+
+    def __init__(self, manager_ref=None, interval: int = 300, db: "IFFDB | None" = None):
+        self.manager_ref = manager_ref  # callable returning manager instance
+        self.interval = interval
+        self._db = db  # v5.2: IFFDB reference for DB-backed queries
+        # 双 scope 结构：local（本地引擎 vllm/sglang/ninfer/ollama…）/ cloud（云端透传）。
+        # 每 scope = {date_str: {model: {prompt_tokens, generation_tokens, requests}}}。
+        # 云端行在 request_log.db 里带 cloud_provider 字段，据此拆分（引擎无关）。
+        self._state = {"local": {}, "cloud": {}}
+        self._snapshots = {}  # {port: {prompt_sum, gen_sum, req_total, ts}}
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread = None
+
+    # --- 端口发现 ---
+
+    def _get_active_ports(self) -> dict[int, str]:
+        """Return {port: model_name} for active metric-capable services.
+        Supports vllm and sglang engines."""
+        mapping = {}
+        if self.manager_ref is None:
+            return mapping
+        try:
+            mgr = self.manager_ref()
+            status = mgr.status()
+            for svc_name, info in status.get("services_info", {}).items():
+                if info.get("type") in ("vllm", "sglang") and info.get("port"):
+                    mapping[info["port"]] = svc_name
+        except Exception as e:
+            log.warning("Failed to get active ports: %s", e)
+        return mapping
+
+    # --- 指标拉取 ---
+
+    def _fetch_port_metrics(self, port: int, engine_type: str = "vllm") -> dict | None:
+        """Fetch Prometheus metrics using engine adapter.
+
+        Falls back to engine-agnostic raw fetch if adapter is unavailable.
+        """
+        from inferfabric.engine_adapter import get_adapter
+        try:
+            adapter = get_adapter(engine_type)
+            # Build a minimal ModelConfig surrogate so the adapter can read the port
+            from inferfabric.config import ModelConfig
+            dummy = ModelConfig(name="", type=engine_type, gpu_role="exclusive")
+            if engine_type == "sglang":
+                from inferfabric.config import SGLangConfig
+                dummy.sglang = SGLangConfig(model_dir="", served_name="", port=port)
+            elif engine_type == "vllm":
+                from inferfabric.config import VLLMConfig
+                dummy.vllm = VLLMConfig(model_dir="", served_name="", port=port,
+                                        conda_env="", max_model_len=4096,
+                                        gpu_memory_utilization=0.9)
+            result = adapter.fetch_engine_metrics(dummy)
+            if result:
+                return result
+        except Exception as e:
+            log.debug("Adapter metrics fetch failed for %s port %d: %s", engine_type, port, e)
+
+        # Fallback: engine-agnostic raw scrape (works for any Prometheus endpoint)
+        try:
+            url = f"http://127.0.0.1:{port}/metrics"
+            with urlopen(url, timeout=10) as resp:
+                text = resp.read().decode("utf-8")
+        except Exception as e:
+            log.warning("Metrics fetch failed for port %d: %s", port, e)
+            return None
+
+        _gauges, counters, histos = parse_prometheus_text(text)
+        prompt_h = histos.get("vllm:request_prompt_tokens")
+        gen_h = histos.get("vllm:request_generation_tokens")
+        # This vLLM build exposes vllm:request_success (labeled by finished_reason),
+        # not vllm:num_requests_completed — fall back so `requests` populates.
+        req_total = counters.get("vllm:num_requests_completed")
+        if req_total is None:
+            # This vLLM build exposes vllm:request_success_total (labeled by finished_reason)
+            req_total = counters.get("vllm:request_success")
+        if req_total is None:
+            req_total = counters.get("vllm:request_success")
+
+        result = {}
+        if prompt_h:
+            result["prompt_sum"] = int(prompt_h["sum"])
+        if gen_h:
+            result["gen_sum"] = int(gen_h["sum"])
+        if req_total is not None:
+            result["req_total"] = int(req_total)
+        return result if result else None
+
+    # --- Delta 计算 ---
+
+    def _compute_deltas(self, port: int, current: dict) -> dict | None:
+        """Compute deltas from previous snapshot. Return None if no valid delta."""
+        prev = self._snapshots.get(port)
+        if prev is None:
+            # First collection for this port — store as baseline, no delta
+            self._snapshots[port] = {**current, "ts": time.time()}
+            return None
+
+        delta = {}
+        for key in ("prompt_sum", "gen_sum", "req_total"):
+            cur_val = current.get(key, 0)
+            prev_val = prev.get(key, 0)
+            d = cur_val - prev_val
+            if d < 0:
+                # Counter reset (vLLM restart) — discard this round
+                log.info("Counter reset on port %d for %s (delta=%d)", port, key, d)
+                return None
+            delta[key] = d
+
+        self._snapshots[port] = {**current, "ts": time.time()}
+        return delta
+
+    # --- 聚合 ---
+
+    def _today_key(self) -> str:
+        return datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+
+    def _aggregate(self, model_name: str, delta: dict, scope: str = "local"):
+        """Legacy Prometheus 路径：计数器增量累加到指定 scope（默认 local）。"""
+        with self._lock:
+            day = self._today_key()
+            scope_state = self._state.setdefault(scope, {})
+            if day not in scope_state:
+                scope_state[day] = {}
+            day_data = scope_state[day]
+            if model_name not in day_data:
+                day_data[model_name] = {"prompt_tokens": 0, "generation_tokens": 0, "requests": 0}
+            day_data[model_name]["prompt_tokens"] += delta.get("prompt_sum", 0)
+            day_data[model_name]["generation_tokens"] += delta.get("gen_sum", 0)
+            day_data[model_name]["requests"] += delta.get("req_total", 0)
+
+    # --- 持久化 ---
+
+    def _persist(self):
+        """Atomically write state to JSON using tmp + os.replace.
+
+        Writes the full in-memory state. Since start() loads all historical data
+        from file into _state, and _state is a superset of file data during normal
+        operation, a full overwrite is safe and simpler than merge logic.
+        """
+        with self._lock:
+            data = dict(self._state)
+
+        tmp_path = str(STATE_FILE) + ".tmp"
+        try:
+            with open(tmp_path, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, str(STATE_FILE))
+        except Exception as e:
+            log.error("Persist failed: %s", e)
+
+    # --- 清理 ---
+
+    def _cleanup(self):
+        """Remove entries older than 30 days."""
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=30)
+        cutoff_str = cutoff.strftime("%Y-%m-%d")
+        with self._lock:
+            for scope in ("local", "cloud"):
+                expired = [d for d in self._state.get(scope, {}) if d < cutoff_str]
+                for d in expired:
+                    del self._state[scope][d]
+        if expired:
+            log.info("Cleaned up %d expired date(s)", len(expired))
+            # No immediate persist needed — next _collect_once() cycle will write
+            # the cleaned state. Calling _persist() here would be redundant.
+
+    # --- 查询 ---
+
+    @staticmethod
+    def _aggregate_rows(rows) -> dict:
+        """把 request_log 行聚合成双 scope 的按日结构。
+
+        返回 {"local": {date:{model:bucket}}, "cloud": {date:{model:bucket}}}。
+        云端行（带 cloud_provider）计入 cloud，其余计入 local —— 引擎无关，
+        涵盖 vllm/sglang/ninfer/ollama/… 所有本地引擎（修复 ninfer 缺口根因）。
+        """
+        local: dict[str, dict[str, dict]] = {}
+        cloud: dict[str, dict[str, dict]] = {}
+        for r in rows or []:
+            ts = r.get("timestamp")
+            if ts is None:
+                continue
+            try:
+                date_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+            except (ValueError, OSError, TypeError):
+                continue
+            model = r.get("model") or "unknown"
+            target = cloud if r.get("cloud_provider") else local
+            bucket = target.setdefault(date_str, {}).setdefault(
+                model, {"prompt_tokens": 0, "prompt_tokens_cached": 0,
+                        "generation_tokens": 0, "requests": 0})
+            try:
+                bucket["prompt_tokens"] += int(r.get("tokens_in") or 0)
+                # 缓存命中率 = prompt_tokens_cached / prompt_tokens（双协议统一口径）
+                bucket["prompt_tokens_cached"] += int(r.get("tokens_in_cached") or 0)
+                bucket["generation_tokens"] += int(r.get("tokens_out") or 0)
+            except (TypeError, ValueError):
+                pass
+            bucket["requests"] += 1
+        return {
+            "local": dict(sorted(local.items())),
+            "cloud": dict(sorted(cloud.items())),
+        }
+
+    def query_db(self, window: str = "weekly") -> dict | None:
+        """Query token stats from request_log.db (v5.2 unified path, engine-agnostic).
+
+        返回双 scope 结构 {"local":{date:{model:bucket}},"cloud":{...}}；无 db → None。
+        """
+        if not self._db:
+            return None
+        from datetime import timedelta
+        now = datetime.now(tz=timezone.utc)
+        if window == "weekly":
+            since = (now - timedelta(days=7)).timestamp()
+        elif window == "24h":
+            since = (now - timedelta(hours=24)).timestamp()
+        elif window == "1h":
+            since = (now - timedelta(hours=1)).timestamp()
+        else:
+            since = (now - timedelta(days=30)).timestamp()
+        rows = self._db.query_request_log(since=since, limit=100000)
+        return self._aggregate_rows(rows)
+
+    def query(self, window: str = "weekly") -> list[dict]:
+        """Query aggregated data for a time window.
+
+        window: 'daily' | 'weekly' | 'monthly' | 'all'
+        Returns: [{model, total_tokens, requests}]
+        """
+        self._load_from_file()  # ensure fresh
+        now = datetime.now(tz=timezone.utc)
+
+        if window == "daily":
+            since = now - timedelta(hours=24)
+        elif window == "weekly":
+            since = now - timedelta(days=7)
+        elif window == "monthly":
+            since = now - timedelta(days=30)
+        else:  # 'all'
+            since = None
+
+        all_data = self._load_full_state()
+
+        total = {}
+        for scope in ("local", "cloud"):
+            for date_str, models in all_data.get(scope, {}).items():
+                if since and date_str < since.strftime("%Y-%m-%d"):
+                    continue
+                for model, vals in models.items():
+                    if model not in total:
+                        total[model] = {"total_tokens": 0, "requests": 0}
+                    total[model]["total_tokens"] += vals.get("prompt_tokens", 0) + vals.get("generation_tokens", 0)
+                    total[model]["requests"] += vals.get("requests", 0)
+
+        return [{"model": m, "total_tokens": d["total_tokens"], "requests": d["requests"]} for m, d in total.items()]
+
+    def _load_from_file(self):
+        """Load state from JSON file into memory.
+
+        Only loads dates not already present in _state. Since start() calls this
+        when _state is empty, all file data is loaded; subsequent calls (e.g. from
+        query) skip dates already tracked in memory to avoid double-counting.
+        """
+        if not STATE_FILE.exists():
+            return
+        try:
+            with open(STATE_FILE) as f:
+                file_data = json.load(f)
+            with self._lock:
+                if "local" in file_data or "cloud" in file_data:
+                    # 双 scope 新格式
+                    for scope in ("local", "cloud"):
+                        scope_state = self._state.setdefault(scope, {})
+                        for date_str, models in (file_data.get(scope) or {}).items():
+                            if date_str not in scope_state:
+                                scope_state[date_str] = models
+                else:
+                    # 旧版扁平格式 {date:{model:bucket}} → 全部归入 local（历史仅本地引擎）
+                    scope_state = self._state.setdefault("local", {})
+                    for date_str, models in file_data.items():
+                        if date_str not in scope_state:
+                            scope_state[date_str] = models
+        except Exception as e:
+            log.warning("Load from file failed: %s", e)
+
+    def _load_full_state(self) -> dict:
+        """Return complete two-scope state (file + memory): {"local":{...},"cloud":{...}}."""
+        self._load_from_file()
+        with self._lock:
+            return {
+                "local": dict(self._state.get("local", {})),
+                "cloud": dict(self._state.get("cloud", {})),
+            }
+
+    def _get_port_engine(self, port: int) -> str:
+        """Return engine type for a given port by checking manager status."""
+        try:
+            mgr = self.manager_ref()
+            status = mgr.status()
+            for _name, info in status.get("services_info", {}).items():
+                if info.get("port") == port and info.get("type") in ("vllm", "sglang"):
+                    return info["type"]
+        except Exception as e:
+            log.warning("Token stats engine detection failed: %s", e)
+        return "vllm"
+
+    # --- 采集循环 ---
+
+    def _collect_once(self):
+        """Single collection cycle.
+
+        有 self._db → DB 聚合（引擎无关，含 ninfer/ollama，拆 local/cloud）；
+        无 db → 回退旧 Prometheus 计数器路径（仅 vllm/sglang，local only）。
+        """
+        if self._db is not None:
+            self._collect_once_from_db()
+        else:
+            ports = self._get_active_ports()
+            for port, model_name in ports.items():
+                engine_type = self._get_port_engine(port)
+                current = self._fetch_port_metrics(port, engine_type)
+                if current is None:
+                    continue
+                delta = self._compute_deltas(port, current)
+                if delta is not None:
+                    self._aggregate(model_name, delta, scope="local")
+
+        self._persist()
+        self._cleanup()
+
+    def _collect_once_from_db(self):
+        """从 request_log.db 重新聚合最近 30 天的按日 buckets（引擎无关）。
+
+        相比旧的 Prometheus 计数器增量：
+          * 覆盖所有引擎（ninfer 等不暴露 Prometheus 计数器的引擎也计入）；
+          * 自校正（每周期从 DB 重新推导，无计数器漂移/复位问题）；
+          * 按 cloud_provider 拆 local / cloud。
+        """
+        from datetime import timedelta
+        now = datetime.now(tz=timezone.utc)
+        since = (now - timedelta(days=30)).timestamp()
+        try:
+            rows = self._db.query_request_log(since=since, limit=200000)
+        except Exception as e:
+            log.warning("DB token aggregation failed: %s", e)
+            return
+        agg = self._aggregate_rows(rows)
+        with self._lock:
+            # 用最近 30 天 DB 数据重建两个 scope（比文件更完整、自校正）；
+            # 更旧的历史由随后的 _cleanup 统一按 30 天保留策略丢弃。
+            self._state["local"] = agg["local"]
+            self._state["cloud"] = agg["cloud"]
+
+    def _run_loop(self):
+        """Main collection loop."""
+        while not self._stop_event.is_set():
+            self._collect_once()
+            self._stop_event.wait(self.interval)
+
+    def start(self):
+        """Start the background collection thread."""
+        if self._thread and self._thread.is_alive():
+            return
+        # Load historical data before first collection to prevent persist() from
+        # overwriting the file with empty state.
+        self._load_from_file()
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+        log.info("Token stats collector started (interval=%ds)", self.interval)
+
+    def stop(self):
+        """Stop the collector and persist final data."""
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=10)
+        self._persist()
+        log.info("Token stats collector stopped")

@@ -1,0 +1,14 @@
+# MacFabric P0 基线模型 — Qwen3-4B Q4_K_M via llama-server (Metal)
+# 上游 schema 兼容；P1 起迁移为 mem_baseline_mb/mode/idle_timeout_min 三字段
+name: qwen3-4b
+description: "Qwen3-4B Q4_K_M — P0 基线对话模型 (llama-server Metal offload)"
+type: llama_cpp
+gpu_role: shared
+model_type: llm
+peak_vram_mb: 3100
+llama_cpp:
+  model_path: /Users/Apple/Documents/MacFabric/models/Qwen3-4B-Q4_K_M.gguf
+  port: 8010
+  threads: 8
+  context_size: 16384
+  gpu_layers: 99

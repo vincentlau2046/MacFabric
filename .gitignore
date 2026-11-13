@@ -2,3 +2,8 @@
 _design-preview/
 *.pyc
 __pycache__/
+models/
+
+engines/
+
+vendor/

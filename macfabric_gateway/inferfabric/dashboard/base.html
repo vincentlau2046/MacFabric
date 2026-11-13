@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>InferFabric</title>
+<style>
+<!-- CSS:main -->
+</style>
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- ══ 既有 symbol（id 不变） ══ -->
+    <symbol id="s-gpu" viewBox="0 0 22 22" fill="none">
+      <rect x="2" y="5" width="18" height="12" rx="2.5" stroke="currentColor" stroke-width="1.5"/>
+      <rect x="6" y="8" width="10" height="6" rx="1" fill="currentColor" opacity=".25"/>
+      <path d="M8 5V2.5h6V5M6 17v2.5h10V17" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+      <circle cx="11" cy="11" r="1.2" fill="currentColor"/>
+    </symbol>
+    <symbol id="s-memory" viewBox="0 0 22 22" fill="none">
+      <rect x="3" y="4" width="16" height="14" rx="2" stroke="currentColor" stroke-width="1.5"/>
+      <rect x="6" y="7" width="2.5" height="8" rx=".4" fill="currentColor" opacity=".35"/>
+      <rect x="10" y="7" width="2.5" height="8" rx=".4" fill="currentColor" opacity=".5"/>
+      <rect x="14" y="7" width="2.5" height="8" rx=".4" fill="currentColor" opacity=".25"/>
+    </symbol>
+    <symbol id="s-cpu" viewBox="0 0 22 22" fill="none">
+      <rect x="4.5" y="4.5" width="13" height="13" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M7.5 8.5h7v5h-7z" fill="currentColor" opacity=".25"/>
+      <path d="M11 2v3M11 17v3M2 11h3M17 11h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="s-chart" viewBox="0 0 22 22" fill="none">
+      <rect x="2" y="2" width="18" height="18" rx="3" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M6 16V10l3 3 4-5 3 2v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="s-message" viewBox="0 0 22 22" fill="none">
+      <path d="M3 11a8.5 8.5 0 0 1 16 0 8.5 8.5 0 0 1-12.5 7.5L3 19l2-3.5A8.5 8.5 0 0 1 3 11z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="s-cube" viewBox="0 0 22 22" fill="none">
+      <path d="M11 2l7 4.5v9L11 20l-7-4.5v-9L11 2z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M11 11l7-4.5M11 11v9M11 11l-7-4.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="s-cloud" viewBox="0 0 22 22" fill="none">
+      <path d="M6 14.5A5 5 0 0 1 9.5 5a6.5 6.5 0 1 1 8 9.5H6a3.5 3.5 0 0 1 0-1z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="s-swap" viewBox="0 0 22 22" fill="none">
+      <path d="M16 16l-4 4-4-4M16 6l-4-4-4 4M12 20V2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="s-gear" viewBox="0 0 22 22" fill="none">
+      <circle cx="11" cy="11" r="3" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M11 2v2.5m0 13V20m9-9h-2.5m-13 0H2m15.5-4.5l-1.8 1.8M6.3 12.7l-1.8 1.8m12.5 0l-1.8-1.8M7.5 9.3L5.7 7.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="s-bolt" viewBox="0 0 22 22" fill="none">
+      <path d="M12 2L5 12h5l-1 8 8-11h-5l1-8z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="s-check" viewBox="0 0 22 22" fill="none">
+      <circle cx="11" cy="11" r="8" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M7 11l3 3 5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="s-xmark" viewBox="0 0 22 22" fill="none">
+      <circle cx="11" cy="11" r="8" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M8 8l6 6m0-6l-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="s-alert" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M11 7v5"/>
+      <path d="M11 15.5v.5"/>
+      <circle cx="11" cy="11" r="9"/>
+    </symbol>
+
+    <!-- ══ 新增 symbol（v2 扩集） ══ -->
+    <symbol id="s-play" viewBox="0 0 22 22" fill="none">
+      <path d="M7 4l12 7-12 7V4z" fill="currentColor"/>
+    </symbol>
+    <symbol id="s-stop" viewBox="0 0 22 22" fill="none">
+      <rect x="6" y="6" width="10" height="10" rx="1.5" fill="currentColor"/>
+    </symbol>
+    <symbol id="s-pause" viewBox="0 0 22 22" fill="none">
+      <rect x="7" y="5" width="3" height="12" rx="1" fill="currentColor"/>
+      <rect x="12" y="5" width="3" height="12" rx="1" fill="currentColor"/>
+    </symbol>
+    <symbol id="s-download" viewBox="0 0 22 22" fill="none">
+      <path d="M11 3v10m0 0l-4-4m4 4l4-4M4 18h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="s-server" viewBox="0 0 22 22" fill="none">
+      <rect x="4" y="4" width="14" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+      <rect x="4" y="12" width="14" height="6" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M7 7h.5M7 15h.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="s-key" viewBox="0 0 22 22" fill="none">
+      <circle cx="7.5" cy="7.5" r="3" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M9.6 9.6L18 18m-2.5 0l2-2m-4.5-1l2-2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="s-filter" viewBox="0 0 22 22" fill="none">
+      <path d="M4 5h14l-5 6v6l-4-2v-4L4 5z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="s-trash" viewBox="0 0 22 22" fill="none">
+      <path d="M4 7h14M9 7V4h4v3M6 7l1 13h8l1-13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="s-search" viewBox="0 0 22 22" fill="none">
+      <circle cx="10" cy="10" r="6" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M14.5 14.5L19 19" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="s-wake" viewBox="0 0 22 22" fill="none">
+      <circle cx="11" cy="14" r="3.5" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M3 18h16M11 6v2M5 8l1.2 1.5M17 8l-1.2 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="s-sleep" viewBox="0 0 22 22" fill="none">
+      <path d="M15 4a8 8 0 1 0 3 13 6 6 0 0 1-3-13z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="s-release" viewBox="0 0 22 22" fill="none">
+      <path d="M8 10V7a3 3 0 0 1 5.5-1.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      <rect x="5" y="10" width="12" height="9" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M11 13.5v3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="s-shield" viewBox="0 0 22 22" fill="none">
+      <path d="M11 3l7 3v5c0 5-3.5 7.5-7 9-3.5-1.5-7-4-7-9V6l7-3z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M8 11l2 2 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="s-database" viewBox="0 0 22 22" fill="none">
+      <ellipse cx="11" cy="6" rx="6" ry="2.5" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M5 6v10c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5V6M5 11c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5" stroke="currentColor" stroke-width="1.5"/>
+    </symbol>
+    <symbol id="s-wifi" viewBox="0 0 22 22" fill="none">
+      <path d="M2 8c5-5 13-5 18 0M5 11c3.5-3.5 8.5-3.5 12 0M8 14c2-2 4-2 6 0" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      <circle cx="11" cy="17" r="1.2" fill="currentColor"/>
+    </symbol>
+    <symbol id="s-refresh" viewBox="0 0 22 22" fill="none">
+      <path d="M17 8a6 6 0 1 0 1.2 5.5M17 4.5v3.2h-3.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="s-sun" viewBox="0 0 22 22" fill="none">
+      <circle cx="11" cy="11" r="4" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M11 3v2M11 17v2M3 11h2M17 11h2M5.5 5.5l1.4 1.4M15.1 15.1l1.4 1.4M5.5 16.5l1.4-1.4M15.1 6.9l1.4-1.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="s-moon" viewBox="0 0 22 22" fill="none">
+      <path d="M15 4a8 8 0 1 0 3 13 6 6 0 0 1-3-13z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+    </symbol>
+  </defs>
+</svg>
+</head>
+<body>
+
+<div class="if-app">
+  <!-- ══ 顶栏 (topbar) ══ -->
+  <header class="if-topbar">
+    <span class="if-brand-mark">
+      <svg class="if-logo" viewBox="0 0 24 24" fill="none">
+        <rect x="2" y="2" width="20" height="20" rx="6" fill="currentColor" opacity="0.15"/>
+        <path d="M13 5l-6 8h4l-1 6 6-8h-4l1-6z" fill="currentColor"/>
+      </svg>
+      InferFabric
+    </span>
+    <span class="if-mode idle" id="modeBadge"><span class="dot"></span><span class="mode-txt">idle</span></span>
+    <span class="if-ver" id="navVer"></span>
+    <div class="if-topbar-spacer"></div>
+    <div class="if-topbar-right">
+      <span class="if-meta" id="syncMeta" title="最近同步时间 + rev">—</span>
+      <span class="if-sep"></span>
+      <button class="if-icon-btn" id="refreshNow" onclick="refreshNow()" title="立即刷新">
+        <svg><use href="#s-refresh"/></svg>
+      </button>
+      <input type="password" class="if-admin-input" id="adminToken" placeholder="admin token" autocomplete="off" spellcheck="false">
+      <span class="if-sep"></span>
+      <button class="if-icon-btn" id="themeToggle" onclick="toggleTheme()" title="切换主题"></button>
+      <a class="if-apilink if-icon-btn" href="/api/openapi.json" target="_blank" title="OpenAPI 规范">
+        <svg><use href="#s-shield"/></svg>
+      </a>
+    </div>
+  </header>
+
+  <!-- API 错误横幅（断连时显示） -->
+  <div id="apiErrorBanner" class="api-err-banner" style="display:none">
+    <span>API 连接异常</span>
+    <button onclick="window.store &amp;&amp; window.store.fetchSnapshot(true)">重试</button>
+  </div>
+
+  <div class="if-body">
+    <!-- ══ 侧边栏（56px 图标导航） ══ -->
+    <aside class="if-sidebar">
+      <nav class="if-nav">
+        <button class="if-nav-item active" data-tab="tab-overview" onclick="switchTab('tab-overview')" title="总览">
+          <svg><use href="#s-chart"/></svg><span>总览</span>
+        </button>
+        <button class="if-nav-item" data-tab="tab-inference" onclick="switchTab('tab-inference')" title="推理">
+          <svg><use href="#s-cube"/></svg><span>推理</span>
+        </button>
+        <button class="if-nav-item" data-tab="tab-monitor" onclick="switchTab('tab-monitor')" title="监控">
+          <svg><use href="#s-gpu"/></svg><span>监控</span>
+        </button>
+        <button class="if-nav-item" data-tab="tab-deploy" onclick="switchTab('tab-deploy')" title="部署">
+          <svg><use href="#s-server"/></svg><span>部署</span>
+        </button>
+        <button class="if-nav-item" data-tab="tab-cloud" onclick="switchTab('tab-cloud')" title="云端">
+          <svg><use href="#s-cloud"/></svg><span>云端</span>
+        </button>
+        <button class="if-nav-item" data-tab="tab-model-pools" onclick="switchTab('tab-model-pools')" title="模型池">
+          <svg><use href="#s-database"/></svg><span>模型池</span>
+        </button>
+        <button class="if-nav-item" data-tab="tab-anomaly" onclick="switchTab('tab-anomaly')" title="异常">
+          <svg><use href="#s-alert"/></svg><span>异常</span>
+        </button>
+      </nav>
+      <div class="if-foot">
+        <span class="sidebar-status-dot" id="sidebarStatusDot"></span>
+        <span id="sidebarSyncTxt">运行中</span>
+      </div>
+    </aside>
+
+    <!-- ══ 主区域 ══ -->
+    <main class="if-main">
+      <div class="if-main-inner">
+
+        <!-- GPU 遥测带（主角元素：5 段） -->
+        <div class="if-telemetry" id="telemetryRail">
+          <div class="tr-seg">
+            <span class="tr-label">VRAM</span>
+            <span class="tr-value"><b id="trVram">—</b><span class="tr-unit">/ 32 GB</span></span>
+            <div class="tr-bar"><div class="tr-fill" id="trVramFill" style="width:0%"></div></div>
+          </div>
+          <div class="tr-seg">
+            <span class="tr-label">利用率</span>
+            <span class="tr-value"><b id="trUtil">—</b><span class="tr-unit">%</span></span>
+            <div class="tr-bar"><div class="tr-fill" id="trUtilFill" style="width:0%"></div></div>
+          </div>
+          <div class="tr-seg">
+            <span class="tr-label">功耗</span>
+            <span class="tr-value"><b id="trPwr">—</b><span class="tr-unit">W</span></span>
+            <div class="tr-bar"><div class="tr-fill" id="trPwrFill" style="width:0%"></div></div>
+          </div>
+          <div class="tr-seg">
+            <span class="tr-label">温度</span>
+            <span class="tr-value"><b id="trTemp">—</b><span class="tr-unit">°C</span></span>
+            <div class="tr-bar"><div class="tr-fill" id="trTempFill" style="width:0%"></div></div>
+          </div>
+          <div class="tr-seg">
+            <span class="tr-label">时钟</span>
+            <span class="tr-value"><b id="trClock">—</b><span class="tr-unit">GHz</span></span>
+            <div class="tr-bar"><div class="tr-fill" id="trClockFill" style="width:0%"></div></div>
+          </div>
+        </div>
+
+        <!-- Tab 内容（fragment 拼装） -->
+        <!-- FRAGMENT:overview -->
+        <!-- FRAGMENT:inference -->
+        <!-- FRAGMENT:monitor -->
+        <!-- FRAGMENT:deploy -->
+        <!-- FRAGMENT:cloud -->
+        <!-- FRAGMENT:model-pools -->
+        <!-- FRAGMENT:anomaly -->
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- 确认弹窗容器（UI.confirm 渲染目标） -->
+<div id="confirmModal" style="display:none"></div>
+<!-- Toast -->
+<div class="toast-banner" id="toast"></div>
+<!-- Switch Overlay -->
+<div id="switchOverlay" class="switch-overlay" style="display:none">
+  <div class="switch-overlay-inner">
+    <div class="switch-spinner"></div>
+    <span id="switchOverlayMsg">正在切换模型…</span>
+  </div>
+</div>
+
+<script>
+window.switchTab = function(tabId) {
+  if (window.store && window.store.switchTab) {
+    window.store.switchTab(tabId);
+    return;
+  }
+  // Fallback: direct DOM (before Store loads)
+  document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
+  document.querySelectorAll('.if-nav-item').forEach(function(t) { t.classList.remove('active'); });
+  var tab = document.getElementById(tabId);
+  if (tab) tab.classList.add('active');
+  var btn = document.querySelector('[data-tab="' + tabId + '"]');
+  if (btn) btn.classList.add('active');
+};
+<!-- JS:echarts -->
+<!-- JS:ui -->
+<!-- JS:store -->
+<!-- JS:charts -->
+<!-- JS:overview -->
+<!-- JS:inference -->
+<!-- JS:monitor -->
+<!-- JS:deploy -->
+<!-- JS:cloud -->
+<!-- JS:model-pools -->
+<!-- JS:anomaly -->
+</script>
+</body>
+</html>

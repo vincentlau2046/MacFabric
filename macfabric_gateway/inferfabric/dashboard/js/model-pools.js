@@ -1,0 +1,2009 @@
+/* InferFabric Console — 模型池 TAB（逻辑模型池，只读 + enabled 开关）
+ * 面板内容：每池一张卡 — 逻辑名 / enabled 开关（服务端原子翻转）/ 候选卡
+ * （id、优先级、本地|云、目标、证据态；在役候选 = 卡高亮 + 调用中 pill，
+ * 2026-11-04 起取代「当前选择：X」文字行）。决策块（当前选择行 +
+ * 排除:reason 行）已整块删除（2026-11-04 用户裁决）——路由态由
+ * 在役标记 + 头部协议健康灯承载。
+ *
+ * 数据源（API 冻结）：
+ *   - GET  /admin/model-pools          → {revision, pools:{name:{enabled,…,candidates:[…]}}}
+ *   - GET  /admin/model-pools/status   → {revision, pools:{name:{protocols:{openai,anthropic}}}}
+ *   - POST /admin/model-pools/toggle   → {pool, enabled, expected_revision}（CAS）
+ *       200 → {status:'updated', revision, pool, enabled}
+ *       409 → {status:'revision_conflict', current_revision} — 提示冲突 + 重新拉取
+ *
+ * 开关契约：不做客户端读-改-写（GET 视图有损，经视图重建配置会丢数据），
+ * 只发送 pool/enabled/expected_revision，由服务端基于原始配置原子翻转。
+ *
+ * 设计纪律（spec §7，零 emoji）：原生 checkbox（无自制伪控件）；无 inline onclick
+ * （mpPools 上 change 事件委托）；数字等宽 tabular-nums。
+ *
+ * 暴露：
+ *   - window.tabRenderers['tab-model-pools'] = renderModelPools
+ *   - window.renderModelPools / window.doMpToggle(pool, enable)
+ */
+(function () {
+  'use strict';
+
+  var UI = window.UI;
+  if (!UI) {
+    console.warn('[model-pools] UI not ready — deferring');
+    return;
+  }
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  var POOLS_URL = '/admin/model-pools';
+  var STATUS_URL = '/admin/model-pools/status';
+  var RUNTIME_URL = '/admin/model-pools/runtime';
+  var LATENCY_URL = '/admin/model-pools/latency';
+  var EVENTS_URL = '/admin/model-pools/events';
+  var CATALOG_URL = '/admin/model-pools/catalog';
+  var TOGGLE_URL = '/admin/model-pools/toggle';
+  var VALIDATE_URL = '/admin/model-pools/validate';
+  var DRYRUN_URL = '/admin/model-pools/dry-run';
+  var UPDATE_URL = '/admin/model-pools';
+
+  var _revision = null;   // 最近渲染到的配置 revision（toggle CAS 用）
+  var _loading = false;   // 在途渲染去重（避免连点刷新叠发请求）
+  // v7.1.0 运营视图单一数据源：def（含 configured/load_error/raw）+ 双协议
+  // 选择视图 + 候选运行态；编辑器（Task 6）以 _state.def.raw 为读-改-写基底
+  var _state = { def: null, status: null, runtime: null, latency: null,
+                 events: null };
+  // C2：故障时间线展开态（pool → true；进 structSig — 开合是结构）
+  var _timelineOpen = {};
+  // C4：劣化提示关闭态（pool → true；进 structSig；劣化解除时清键重新武装）
+  var _degradeDismissed = {};
+  // Task 4：高级（池参数）面板展开态（pool → true；进 structSig —
+  // Ruling 3：面板输入框是结构，开合必须重建，与 C2 时间线同先例）
+  var _paramsOpen = {};
+  // C3：活体光带新鲜窗口 — last_attempt.ok 且 age_s < 此值 = 真实数据交换中
+  var BEAM_FRESH_S = 30;
+
+  /* ── 调用树 + 四组常驻卡（2026-10-26 大手术，v7.5.0）──────────────
+   * 用户 2026-10-25 判定向导式初始化为失败设计：配置窗口用完即消失、
+   * 缺失组无创建入口。重构为单一形态 — 顶部调用树（端口→角色→模型，
+   * 链路态 = 有没有被真实调用）+ 四角色常驻配置卡（未配置即待建）。
+   * 四角色固定序与描述表（原向导 _ROLE_DEFS 上移 — 树与卡共用）。 */
+  var _ROLE_ORDER = ['fast', 'premium', 'small', 'classifier'];
+  var _ROLE_DEFS = [
+    { name: 'fast', desc: '快速响应 — 日常对话与轻任务' },
+    { name: 'premium', desc: '旗舰质量 — 复杂推理与长文' },
+    { name: 'small', desc: '小模型 — 分类/抽取/批量任务' },
+    { name: 'classifier', desc: '分类判别 — 路由/打标/判别' },
+  ];
+  // 树链路流动窗：真实 ok 交换在此窗内 = flowing。比卡片光带窗
+  // （BEAM_FRESH_S=30）宽 — 树答「近期有被调用」，光带答「此刻在交换」
+  var FLOW_WINDOW_S = 60;
+
+  // 链路五态纯函数（树渲染与后续卡渲染同源）：
+  //   unconfigured 无 def（缺失组不消失，灰虚线）
+  //   fail         issues 非空，或近窗真实尝试失败且窗内无成功交换
+  //   flowing      任一候选近窗真实 ok 交换（降级服务中数据仍在流动 →
+  //                flowing 优先于 cooldown，降级细节归 C4 提示）
+  //   cooldown     无流动但有候选隔离/冷却
+  //   idle         可路由但静默
+  function linkState(def, rtPool) {
+    if (!def) return { cls: 'unconfigured', label: '未配置' };
+    if ((def.issues || []).length) {
+      return { cls: 'fail', label: '故障' };
+    }
+    var flowing = false, recentFail = false, cooling = false;
+    (((rtPool || {}).candidates) || []).forEach(function (rc) {
+      var la = rc.last_attempt;
+      if (la && typeof la.age_s === 'number' && la.age_s < FLOW_WINDOW_S) {
+        if (la.ok) flowing = true; else recentFail = true;
+      }
+      if (rc.cooling) cooling = true;
+    });
+    if (flowing) return { cls: 'flowing', label: '调用中' };
+    if (cooling) return { cls: 'cooldown', label: '冷却中' };
+    if (recentFail) return { cls: 'fail', label: '故障' };
+    return { cls: 'idle', label: '空闲' };
+  }
+
+  // 调用树渲染：每行完整链「:8999 ── iff/<角色> ── <候选链：每候选五态灯+名>」+ 态徽标。
+  // 四角色固定序 + 额外池（YAML 手工组）追加其后，不隐藏（R3）。
+  function treeHtml(defs, rt) {
+    var pools = (defs && defs.pools) || {};
+    var rtPools = (rt && rt.pools) || {};
+    var order = _ROLE_ORDER.slice();
+    Object.keys(pools).forEach(function (n) {
+      if (order.indexOf(n) < 0) order.push(n);
+    });
+    var rows = [];
+    order.forEach(function (name) {
+      var def = pools[name];
+      var ls = linkState(def, rtPools[name]);
+      // L3：完整候选链 — 池的全部候选按优先级显示（排序同 lampForProtocol），
+      // 每候选 = 五态灯 + 名。tier1-only 是「运营窗口只显示一个模型」的根因。
+      // 挂掉/未启动（off）→ 灰点 + 文字降暗；冷却/探测 → 黄（半明/呼吸）；
+      // 活着的等候（ok）/ 调用中（flow）→ 绿。点与降暗走 applyDynamic
+      // by-id 类翻转（候选结构已进 sig，零闪烁纪律不变）
+      var cands = ((def && def.candidates) || []).slice()
+        .sort(function (a, b) { return (a.priority || 0) - (b.priority || 0); });
+      var rtById = {};
+      ((rtPools[name] || {}).candidates || []).forEach(function (rc) { rtById[rc.id] = rc; });
+      var leaf;
+      if (!cands.length) {
+        leaf = '<span class="mp-tree-leaf">—</span>';
+      } else {
+        leaf = '<span class="mp-tree-cands">' + cands.map(function (c) {
+            var tgt = c.target
+              || (c.kind === 'local' ? (c.model_name || '')
+                  : ((c.provider || '') + '/' + (c.model_id || '')));
+            var rt = rtById[c.id];
+            var off = !rt || !rt.active;
+            return '<span class="mp-tree-cand' + (off ? ' mp-tree-cand-dim' : '')
+              + '" id="mp-tcand-' + esc(name) + '-' + esc(c.id) + '">'
+              + '<span class="mp-dot ' + candDotClass(rt)
+              + '" id="mp-tdot-' + esc(name) + '-' + esc(c.id) + '"></span>'
+              + esc(tgt) + '</span>';
+          }).join('') + '</span>';
+      }
+      // T5：有事件的行可点（fail/cooldown 必有事件；idle/flowing 有历史
+      // 也可查）— mp-tree-row-diag 挂 cursor 供 CSS
+      var evs = poolEvents(name);
+      rows.push('<div class="mp-tree-row'
+        + (evs.length ? ' mp-tree-row-diag' : '')
+        + '" data-mp-tree-pool="' + esc(name) + '"'
+        + (evs.length ? ' title="点击查看故障时间线"' : '')
+        + '">'
+        + '<span class="mp-tree-port">:8999</span>'
+        // 链路段/态徽标带 id — applyDynamic by-id 类翻转（同 C3 光带，
+        // 不进结构签名：轮询零闪烁）
+        + '<span class="mp-link mp-link-' + ls.cls
+        + '" id="mp-tlink-a-' + esc(name) + '"></span>'
+        + '<span class="mp-tree-role">iff/' + esc(name) + '</span>'
+        + '<span class="mp-link mp-link-' + ls.cls
+        + '" id="mp-tlink-b-' + esc(name) + '"></span>'
+        // leaf 是完整 HTML（mp-tree-cands / mp-tree-leaf）——原样插入，
+        // 候选名已在构建时 esc
+        + leaf
+        + '<span class="mp-tree-state mp-tree-state-' + ls.cls
+        + '" id="mp-tstate-' + esc(name) + '">'
+        + esc(ls.label) + '</span>'
+        + '</div>');
+      // T5：展开态在树行下渲染轴（C2 下放 — 行内诊断不跳转卡片区；
+      // 开合态进 sig → 变化即重建）
+      if (evs.length && _timelineOpen[name]) {
+        rows.push('<div class="mp-tl mp-tree-tl" id="mp-tree-tl-'
+          + esc(name) + '">' + timelineDots(name) + '</div>');
+      }
+    });
+    return '<div class="mp-tree" id="mpTree">' + rows.join('') + '</div>';
+  }
+
+  // 角色描述（四角色表查名；额外池无描述返回 null）
+  function roleDesc(name) {
+    for (var i = 0; i < _ROLE_DEFS.length; i++) {
+      if (_ROLE_DEFS[i].name === name) return _ROLE_DEFS[i].desc;
+    }
+    return null;
+  }
+
+  // 未配置卡下拉默认值（原初始化引导的预填启发式按角色吸收；仅建议值）：
+  // fast=活跃最小 / premium=最大上下文本地（无本地则首个云）/
+  // small=最小 / classifier=首个活跃。目录条目需含 active/context_window
+  // （fetchCatalog 完整形态）。额外池无启发式。
+  function cardDefault(roleName, catalog) {
+    var cat = catalog || {};
+    var llms = cat.local || [];
+    var act = llms.filter(function (m) { return !!m.active; });
+    function pick(list, wantMax) {
+      if (!list.length) {
+        return (cat.cloudValues || []).length ? cat.cloudValues[0] : null;
+      }
+      var sorted = list.slice();
+      var allSized = sorted.every(function (m) {
+        return typeof m.context_window === 'number';
+      });
+      if (allSized) {
+        sorted.sort(function (a, b) {
+          return wantMax ? b.context_window - a.context_window
+            : a.context_window - b.context_window;
+        });
+      } else if (!wantMax) {
+        sorted.reverse();   // 无尺寸信息：表尾视作小模型（models.d 惯例）
+      }
+      return 'local:' + sorted[0].name;
+    }
+    // premium/small 同 fast/classifier 优先 active — L2a 把 VL 纳入目录后，
+    // 全量按上下文选会选中平时不激活、需 iff switch 的独占 VL 模型；
+    // active 优先让文本池默认建议落在「当前可用」的模型上
+    if (roleName === 'fast') return pick(act.length ? act : llms, false);
+    if (roleName === 'premium') return pick(act.length ? act : llms, true);
+    if (roleName === 'small') return pick(act.length ? act : llms, false);
+    if (roleName === 'classifier') {
+      return act.length ? 'local:' + act[0].name : pick(llms, false);
+    }
+    return null;
+  }
+
+  // 未配置卡下拉选项（与 A2 inlineOptions 同形 + defVal 预选）
+  function configOptions(catalog, defVal) {
+    var o = '';
+    (catalog.localValues || []).forEach(function (v) {
+      o += '<option value="' + esc(v) + '"'
+        + (v === defVal ? ' selected' : '') + '>本地 · '
+        + esc(v.slice('local:'.length)) + '</option>';
+    });
+    (catalog.cloudValues || []).forEach(function (v) {
+      o += '<option value="' + esc(v) + '"'
+        + (v === defVal ? ' selected' : '') + '>云 · '
+        + esc(v.slice('cloud:'.length)) + '</option>';
+    });
+    return o;
+  }
+
+  // 未配置卡：同形态 + 「未配置」徽标 + 预填下拉（首次 apply 建池）+
+  // 高级配置直通（openEditor 对缺失池走骨架）。无候选链/开关/接入片段
+  // — 那些是「已配置」才有的动作。
+  function unconfiguredCard(name, catalog) {
+    var desc = roleDesc(name);
+    var defVal = cardDefault(name, catalog);
+    // 四态目录（与 A2 inline select 同语义）：object=就绪出选项（预填）；
+    // null=未预热（占位可选，box mouseover/focusin 即拉取，轮询重建补上）；
+    // false=拉取失败（禁用 + 明示去编辑器）；空目录=拉取成功但零条目
+    // （禁用 + 明示为空 — 终审 I4：不得渲染只剩占位的沉默死下拉）
+    var opts = catalog ? configOptions(catalog, defVal) : null;
+    var empty = !!(catalog && !(catalog.localValues || []).length
+      && !(catalog.cloudValues || []).length);
+    var selInner = empty
+      ? '<option value="">目录为空 — 无可建池模型</option>'
+      : (catalog
+          ? '<option value="">选择模型…</option>' + opts
+          : (catalog === false
+              ? '<option value="">目录不可用 — 稍后重试</option>'
+              : '<option value="">选择模型…（加载中）</option>'));
+    return '<div class="if-card mp-pool mp-unconfigured" id="mp-card-'
+      + esc(name) + '" data-mp-card="' + esc(name) + '">'
+      + '<div class="mp-beam mp-beam-dark" id="mp-beam-' + esc(name)
+      + '"></div>'
+      + '<div class="if-card-hdr">'
+      + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
+      + '<span class="mp-unconfigured-badge">未配置</span>'
+      + '</div>'
+      + (desc ? '<p class="mp-role-desc">' + esc(desc) + '</p>' : '')
+      + '<div class="mp-config-line">'
+      + '<span class="mp-diff-old mono">（未配置）</span>'
+      + '<span class="mp-diff-arrow">→</span>'
+      + '<select class="mp-inline-sel mp-config-sel" data-mp-config-pool="'
+      + esc(name) + '"' + (catalog === false || empty ? ' disabled' : '')
+      + '>'
+      + selInner
+      + '</select>'
+      + '</div>'
+      // T5：建池会话 → 同一 A2 diff 条（（未配置）→ 新目标 + 预览/应用）
+      + (_inline && _inline.pool === name ? inlineDiffBar(name, null) : '')
+      + '</div>';
+  }
+
+  // 四组常驻配置卡：_ROLE_ORDER 固定序四卡 + 额外池追加（R3）。
+  // 已配置 → 现 poolCard 全部动作；未配置 → unconfiguredCard（待建）。
+  // 面板只有这一种形态 — 不存在会消失的配置窗口。
+  function cardsHtml(defs, st, rt, catalog) {
+    var pools = (defs && defs.pools) || {};
+    var stPools = (st && st.pools) || {};
+    var rtPools = (rt && rt.pools) || {};
+    var order = _ROLE_ORDER.slice();
+    Object.keys(pools).forEach(function (n) {
+      if (order.indexOf(n) < 0) order.push(n);
+    });
+    var cards = order.map(function (name) {
+      var def = pools[name];
+      return def
+        ? poolCard(name, def, stPools[name], rtPools[name])
+        : unconfiguredCard(name, catalog);
+    });
+    return '<div class="mp-cards" id="mpCards">' + cards.join('') + '</div>';
+  }
+
+  // A3 错误即导航（UI/UX P1 Task 3）：常驻行动横幅 — toast 即时反馈，
+  // banner 承担「常驻 + 去哪修」；action = {label, run} 闭包（重试原操作）
+  var _actionError = null;
+  // B1 局部渲染（UI/UX P1 Task 4）：结构签名 + 定点更新 + 本地倒计时
+  var _lastSig = null;    // 最近一次整块重建时的结构签名
+  var _cd = {};           // 'pool|candId' → {pool, candId, total, base, rt}
+  var _rtAt = 0;          // runtime 拉取时刻（Date.now()，倒计时锚点，评审 I7）
+  var _cdTimer = null;
+  // A2 行内 diff 编辑（UI/UX P2 Task 1）：目录缓存（null=未取/不可用，
+  // 每次渲染 best-effort 重试；应用成功后置 null 触发重取）+ 行内会话
+  var _catalog = null;
+  //   _inline = {pool, anchor, kind, summary, base, work, base_revision,
+  //              validated, previewHtml, rev}
+  //     kind ∈ replace|add|move|delete|param|create — 单动作内联编辑
+  //     anchor = 受影响候选 id；null = 池级动作（add/param）→ diff 条落池底
+  //     summary = 人读变更标签（替换「旧→新」/ 新增候选 X / 删除候选 X / …）
+  //   anchor|kind|rev 进结构签名：换动作或预览完成（启用应用按钮）都重建
+  var _inline = null;
+
+  /* ── XSS-safe 转义（与 cloud.js / anomaly.js esc 一致） ── */
+  function esc(s) {
+    if (s == null) return '';
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  /* ── 运行态辅助（v7.1.0）── */
+
+  // 每协议健康灯：chosen=首选候选 → ok；chosen 非空但非首选（回退中）→ warn；
+  // chosen 空（无可用候选，请求将收 pool_unavailable）→ err
+  function lampForProtocol(def, pv) {
+    var cands = (def.candidates || []).slice()
+      .sort(function (a, b) { return (a.priority || 0) - (b.priority || 0); });
+    var first = cands.length ? cands[0].id : null;
+    if (!pv || !pv.chosen) return 'mp-lamp-err';
+    return (first && pv.chosen === first) ? 'mp-lamp-ok' : 'mp-lamp-warn';
+  }
+
+  // 秒 → m:ss（冷却/隔离倒计时）
+  function fmtRemaining(s) {
+    if (s == null || isNaN(s)) return '';
+    var sec = Math.max(0, Math.round(s));
+    return Math.floor(sec / 60) + ':' + ('0' + (sec % 60)).slice(-2);
+  }
+
+  // 候选行运行态（纯文本 — innerHTML 路径 esc 包裹，局部更新走 textContent）
+  function runtimeBadgeText(rt) {
+    if (!rt) return '—';
+    var parts = [];
+    if (rt.cooling) {
+      var label = rt.cooling.reason === 'quarantine_404' ? '隔离'
+        : (rt.cooling.probing ? '探测中' : '冷却');
+      parts.push(label + ' ' + fmtRemaining(rt.cooling.remaining_s)
+        + (rt.cooling.reason ? ' (' + rt.cooling.reason + ')' : ''));
+    }
+    parts.push(rt.active
+      ? (rt.kind === 'local' ? '服务中' : '已发现')
+      : (rt.kind === 'local' ? '未启动' : '未发现'));
+    if (rt.last_attempt && !rt.last_attempt.ok) {
+      parts.push('HTTP ' + rt.last_attempt.status);
+    }
+    return parts.join(' · ');
+  }
+
+  // 状态灯五态（UI/UX P1，用户拍板 #3）：
+  // probe（半开探测）> cool（冷却/隔离）> flow（真实数据交换：last_attempt
+  // 成功且 <30s）> ok（routable 空闲）> off（未启动/未发现，unroutable）
+  function candDotClass(rt) {
+    if (!rt) return 'mp-dot-off';
+    if (rt.cooling) {
+      return rt.cooling.probing ? 'mp-dot-probe' : 'mp-dot-cool';
+    }
+    var la = rt.last_attempt;
+    if (la && la.ok && typeof la.age_s === 'number' && la.age_s < 30) {
+      return 'mp-dot-flow';
+    }
+    return rt.active ? 'mp-dot-ok' : 'mp-dot-off';
+  }
+
+  // 协议徽章来源：声明协议优先，回退 evidence 键（GET 视图无 declared 字段时）
+  function candProtocols(c) {
+    if (Array.isArray(c.declared_protocols) && c.declared_protocols.length) {
+      return c.declared_protocols;
+    }
+    return Object.keys(c.evidence || {});
+  }
+
+  // A2 行内下拉选项（与编辑器 opts 同源同格式 — 目录是唯一元数据总线）
+  function inlineOptions() {
+    var o = '';
+    (_catalog.localValues || []).forEach(function (v) {
+      o += '<option value="' + esc(v) + '">本地 · '
+        + esc(v.slice('local:'.length)) + '</option>';
+    });
+    (_catalog.cloudValues || []).forEach(function (v) {
+      o += '<option value="' + esc(v) + '">云 · '
+        + esc(v.slice('cloud:'.length)) + '</option>';
+    });
+    return o;
+  }
+
+  // 候选显示目标：视图候选带 target；raw 候选按 kind 展开（与 structSig 同源）
+  function candTarget(c) {
+    if (!c) return '';
+    if (c.target) return c.target;
+    return c.kind === 'local' ? (c.model_name || '')
+      : ((c.provider || '') + '/' + (c.model_id || ''));
+  }
+
+  // A2 行内 diff 预览条：人读变更标签 + 自动预览结果 + 应用/撤销。
+  // 替换/建池 → 旧→新（红/绿双编码）；新增/移动/删除/参数 → 摘要标签。
+  // validated 经 _inline.rev 进结构签名 — 预览完成 → 重建以启用应用按钮
+  function inlineDiffBar(pool, oldCand) {
+    var n = _inline;
+    var wpCands = ((((n.work || {}).pools || {})[n.pool] || {}).candidates) || [];
+    function findCand(id) {
+      for (var i = 0; i < wpCands.length; i++) if (wpCands[i].id === id) return wpCands[i];
+      return null;
+    }
+    var label;
+    if (n.kind === 'replace' || n.kind === 'create') {
+      // 新目标 = 工作副本锚点候选；旧目标 = 传入视图候选，建池 →「（未配置）」
+      var newC = n.anchor ? findCand(n.anchor) : wpCands[wpCands.length - 1];
+      var newTarget = candTarget(newC);
+      var oldTarget = (n.kind === 'create' || !oldCand)
+        ? '（未配置）' : candTarget(oldCand);
+      label = '<span class="mp-diff-old mono">' + esc(oldTarget) + '</span>'
+        + '<span class="mp-diff-arrow">→</span>'
+        + '<span class="mp-diff-new mono">' + esc(newTarget) + '</span>';
+    } else {
+      label = '<span class="mp-inline-summary mono">'
+        + esc(n.summary || '') + '</span>';
+    }
+    var anchor = n.anchor || '';
+    return '<div class="mp-inline-diff" data-mp-inline-bar="' + esc(pool)
+      + '|' + esc(anchor) + '">'
+      + label
+      + '<span class="mp-inline-preview" id="mp-inline-preview-'
+      + esc(pool) + '-' + esc(anchor || 'pool') + '">'
+      + (n.previewHtml || '预览中…') + '</span>'
+      + '<button type="button" data-mp-inline-apply="' + esc(pool) + '|'
+      + esc(anchor) + '"'
+      + (n.validated ? '' : ' disabled title="需先通过预览"')
+      + '>应用</button>'
+      + '<button type="button" data-mp-inline-cancel="1">撤销</button>'
+      + '</div>';
+  }
+
+  // 候选体检卡（UI/UX P1 Task 2：表格 → 横向卡片，状态一眼可读）
+  /* ── C1 延迟心跳迷你图（P3 Task 8）── */
+  // 60×24 内联 SVG：polyline + 末点圆；x 按序铺满、y 按 TTFT 归一反演
+  //（越低越高位）。points = latency 端点该候选环（新在后）。
+  function sparkSvg(points) {
+    var W = 60, H = 24, PAD = 2;
+    var pts = (points || []).filter(function (p) {
+      return p && typeof p.ttft_ms === 'number' && isFinite(p.ttft_ms);
+    });
+    if (!pts.length) return '';
+    var lo = Infinity, hi = -Infinity;
+    pts.forEach(function (p) {
+      if (p.ttft_ms < lo) lo = p.ttft_ms;
+      if (p.ttft_ms > hi) hi = p.ttft_ms;
+    });
+    if (hi === lo) hi = lo + 1;   // 全平 → 置顶直线（不除零）
+    var n = pts.length;
+    var coords = pts.map(function (p, i) {
+      var x = (n === 1) ? W / 2 : PAD + (W - 2 * PAD) * i / (n - 1);
+      var y = PAD + (H - 2 * PAD) * (1 - (p.ttft_ms - lo) / (hi - lo));
+      return [x, y];
+    });
+    var last = coords[n - 1];
+    return '<svg class="mp-spark" width="' + W + '" height="' + H
+      + '" viewBox="0 0 ' + W + ' ' + H + '" aria-hidden="true">'
+      + '<polyline points="' + coords.map(function (cd) {
+          return cd[0].toFixed(1) + ',' + cd[1].toFixed(1);
+        }).join(' ')
+      + '" fill="none" style="stroke:var(--accent)" stroke-width="1.5"'
+      + ' stroke-linecap="round" stroke-linejoin="round"/>'
+      + '<circle cx="' + last[0].toFixed(1) + '" cy="' + last[1].toFixed(1)
+      + '" r="2" fill="var(--accent)"/></svg>';
+  }
+
+  // 候选延迟环（新在后，端点已按 20 封顶）；无数据 → []
+  function latRing(pool, candId) {
+    var lat = _state.latency;
+    var ring = (lat && lat.pools && lat.pools[pool] && lat.pools[pool][candId]);
+    return Array.isArray(ring) ? ring : [];
+  }
+
+  /* ── C2 失败时间线（P3 Task 9）── */
+  // 池事件列表（新在后，端点已按 50 封顶）；无数据 → []
+  function poolEvents(pool) {
+    var ev = _state.events;
+    var list = (ev && ev.pools && ev.pools[pool]);
+    return Array.isArray(list) ? list : [];
+  }
+
+  // 轴内事件点（不含外壳）：最近 30min 窗口，新在右；
+  // left% = (1 - age/1800)·100，越界夹紧；title 原生气泡（YAGNI）
+  function timelineDots(pool) {
+    return poolEvents(pool).map(function (e) {
+      var age = (typeof e.age_s === 'number' && isFinite(e.age_s))
+        ? e.age_s : 1800;
+      var left = Math.max(0, Math.min(100, (1 - age / 1800) * 100));
+      var title = (e.type || '') + ' · ' + (e.target || '')
+        + (e.reason ? ' · ' + e.reason : '')
+        + ' · ' + Math.round(age) + 's 前';
+      return '<span class="mp-tl-dot mp-tl-' + esc(e.type || 'cooldown')
+        + '" style="left:' + left.toFixed(1) + '%" title="' + esc(title)
+        + '"></span>';
+    }).join('');
+  }
+
+  // 7.9.0：能力归模型，池侧不再有能力约束（候选 features 退役，编辑器
+  // 能力列已删）。候选卡「视觉」小标 = 只读展示，数据源 runtime 端点
+  // 每候选 vision bool（本地 models.d model_type=vl / 云 supports_vision
+  // =true — 同 selector 判定源，随轮询自动更新，无目录缓存一致性问题）；
+  // 声明入口在模型侧（models.d / 云面板视觉 chip），不在池编辑器
+  function visionBadge(rt) {
+    return (rt && rt.vision)
+      ? '<span class="mp-feat mp-feat-vision"'
+        + ' title="模型声明视觉能力（能看图）— 带图请求可路由到该候选">'
+        + '视觉</span>'
+      : '';
+  }
+
+  function candCard(pool, c, rt, idx, total, chosenIds) {
+    var dot = candDotClass(rt);
+    var ev = c.evidence || {};
+    // 三行结构（长度无关对齐；2026-11-03 单动作内联编辑）：
+    //  行1 .mp-cand-idline   — dot + 身份徽标（target/云/P1/协议/视觉），占满整卡宽，
+    //                          与状态解耦，正常卡宽下不换行；
+    //  行2 .mp-cand-status   — 左：运行态 + 延迟心跳 + 冷却环；右：「替换为…」下拉。
+    //  行3 .mp-cand-ops      — [↑][↓][删除] 单动作内联编辑（首↑/末↓ 禁用 affordance）。
+    // 三行均锚定卡片左右边，文字长短只改行内中部，不漂移（与卡片等高法同源）。
+    // 2026-11-04 用户裁决：「当前选择：X」两行文字删除 — 在役模型直接在
+    // 候选卡上区分。chosenIds = 该池各协议 chosen 的 id 集合（池级一次算好，
+    // candCard 只读）；卡片高亮类 + 调用中 pill 由 applyDynamic by-id 翻转
+    //（chosen 不进 structSig — 零闪烁契约不变，同头部灯哲学）。
+    var isChosen = !!(chosenIds && chosenIds[c.id]);
+    var html = '<div class="mp-cand-card'
+      + (isChosen ? ' mp-cand-active' : '')
+      + ((rt && rt.cooling) ? ' mp-cand-degraded' : '')
+      + '" data-mp-cand-card="' + esc(c.id) + '"'
+      + ' id="mp-cand-' + esc(pool) + '-' + esc(c.id) + '"'
+      + (isChosen ? ' title="调用中（当前池路由选中的候选）"' : '') + '>'
+      + '<div class="mp-cand-idline">'
+      + '<span class="mp-dot ' + dot + '" id="mp-dot-'
+      + esc(pool) + '-' + esc(c.id) + '"></span>'
+      + '<span class="mp-cand-main">'
+      + '<span class="mono mp-cand-target">' + esc(c.target) + '</span>'
+      + '<span class="mp-cand-kind">'
+      + esc(c.kind === 'local' ? '本地' : '云') + '</span>'
+      + '<span class="mono mp-cand-pri">P' + esc(c.priority) + '</span>'
+      + candProtocols(c).map(function (p) {
+          return '<span class="mp-proto-badge" title="'
+            + (ev[p] ? esc(ev[p]) : '') + '">' + esc(p) + '</span>';
+        }).join('')
+      + visionBadge(rt)
+      // 2026-11-04：在役标记 pill — CSS 默认 display:none，仅
+      // .mp-cand-active 卡内显示（chosen 翻转走 applyDynamic 类切换）
+      + '<span class="mp-cand-inuse mono" data-mp-inuse="' + esc(c.id)
+      + '">调用中</span>'
+      + '</span>'
+      + '</div>'
+      + '<div class="mp-cand-status">'
+      // C1：延迟心跳迷你图容器常驻（by-id 更新锚点），有数据才出 SVG
+      + '<span class="mp-cand-rt mono" id="mp-rt-' + esc(pool) + '-'
+      + esc(c.id) + '">' + esc(runtimeBadgeText(rt)) + '</span>'
+      + '<span class="mp-spark-wrap" id="mp-spark-' + esc(pool) + '-'
+      + esc(c.id) + '">' + sparkSvg(latRing(pool, c.id).slice(-20))
+      + '</span>';
+      // 环是 mp-rt 的兄弟节点（评审 I1）：textContent 定点更新不得删除环
+      if (rt && rt.cooling) {
+        html += '<span class="mp-ring" id="mp-ring-' + esc(pool) + '-'
+          + esc(c.id) + '" data-mp-ring="' + esc(pool) + '|'
+          + esc(c.id) + '"></span>';
+      }
+      // A2 行内编辑入口：行2右端「替换为…」下拉。目录手势惰性预热（Task 1
+      // 裁决）：null=未预热（占位可选，mouseover/focusin 即拉取）；
+      // false=拉取失败（禁用 + 明示）；object=就绪出选项
+      html += '<select class="mp-inline-sel" data-mp-inline-replace="'
+        + esc(pool) + '|' + esc(c.id) + '"'
+        + (_catalog === false ? ' disabled' : '') + '>'
+        + (_catalog
+            ? '<option value="">替换为…</option>' + inlineOptions()
+            : _catalog === false
+              ? '<option value="">目录不可用</option>'
+              : '<option value="">替换为…</option>')
+        + '</select></div>';
+      // 行3：单动作内联编辑（↑上移 / ↓下移 / 删除）。首候选 ↑ 禁用、
+      // 末候选 ↓ 禁用（affordance；handler 内另有边界守卫双保险）
+      var isFirst = idx <= 0;
+      var isLast = idx >= (total || 1) - 1;
+      html += '<div class="mp-cand-ops">'
+        + '<button type="button" class="mp-cand-op" data-mp-cand-op="up"'
+        + ' data-mp-cand="' + esc(c.id) + '" data-mp-pool="' + esc(pool) + '"'
+        + (isFirst ? ' disabled title="已在链首"' : ' title="上移（提高优先级）"')
+        + '>↑</button>'
+        + '<button type="button" class="mp-cand-op" data-mp-cand-op="down"'
+        + ' data-mp-cand="' + esc(c.id) + '" data-mp-pool="' + esc(pool) + '"'
+        + (isLast ? ' disabled title="已在链尾"' : ' title="下移（降低优先级）"')
+        + '>↓</button>'
+        + '<button type="button" class="mp-cand-op mp-cand-op-del"'
+        + ' data-mp-cand-op="del" data-mp-cand="' + esc(c.id) + '"'
+        + ' data-mp-pool="' + esc(pool) + '" title="删除候选">✕</button>'
+        + '</div>';
+    html += '</div>';
+    return html;
+  }
+
+  /* ── C3 活体光带（P3 Task 10）：三态纯函数（渲染/applyDynamic 同源） ── */
+  // flow：任一候选 last_attempt.ok 且新鲜（<BEAM_FRESH_S）— 真实数据交换中；
+  // dark：全协议无 chosen（不可路由/全冷却）；idle：其余（可路由但静默）
+  function beamClass(stP, rtP) {
+    // 不可路由优先于新鲜交换（unroutable 是当前事实，交换是 30s 内历史）
+    var protocols = ((stP || {}).protocols) || {};
+    var anyChosen = ['openai', 'anthropic'].some(function (p) {
+      return protocols[p] && protocols[p].chosen;
+    });
+    if (!anyChosen) return 'mp-beam-dark';
+    var fresh = false;
+    (((rtP || {}).candidates) || []).forEach(function (rc) {
+      var la = rc.last_attempt;
+      if (la && la.ok && typeof la.age_s === 'number'
+          && la.age_s < BEAM_FRESH_S) fresh = true;
+    });
+    return fresh ? 'mp-beam-flow' : 'mp-beam-idle';
+  }
+
+  /* ── C4 劣化判定（纯函数）：首候选冷却/隔离 && 任一协议仍有 chosen
+     （服务由回退候选提供 — 用户应知道首选已降级）── */
+  function isDegraded(poolDef, stP, rtP) {
+    var cands = (poolDef && poolDef.candidates) || [];
+    if (!cands.length) return false;
+    var rtById = {};
+    (((rtP || {}).candidates) || []).forEach(function (rc) {
+      rtById[rc.id] = rc;
+    });
+    var rtC = rtById[cands[0].id];
+    if (!rtC || !rtC.cooling) return false;
+    var protocols = ((stP || {}).protocols) || {};
+    return ['openai', 'anthropic'].some(function (p) {
+      return protocols[p] && protocols[p].chosen;
+    });
+  }
+
+  /* ── 池卡片 ── */
+  function poolCard(name, def, st, rt) {
+    var checked = def.enabled ? ' checked' : '';
+    var html = '<div class="if-card mp-pool" id="mp-card-' + esc(name)
+      + '" data-mp-card="' + esc(name) + '">'
+      // C3：池顶活体光带（三态由 beamClass 纯函数定，applyDynamic 同源更新）
+      + '<div class="mp-beam ' + beamClass(st, rt) + '" id="mp-beam-'
+      + esc(name) + '"></div>'
+      + '<div class="if-card-hdr">'
+      + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
+      + (roleDesc(name)
+          ? '<span class="mp-role-desc">' + esc(roleDesc(name)) + '</span>'
+          : '')
+      + '<span class="mp-lamps">'
+      + ['openai', 'anthropic'].map(function (proto) {
+          var cls = lampForProtocol(def, ((st || {}).protocols || {})[proto]);
+          return '<span class="mp-lamp ' + cls + '" id="mp-lamp-' + esc(name)
+            + '-' + esc(proto) + '" data-mp-lamp="' + esc(proto)
+            + '" title="' + esc(proto) + '"></span>';
+        }).join('')
+      + '</span>'
+      + '<span class="mp-toggle-wrap">'
+      + '<button type="button" class="mp-edit-btn" data-mp-params-toggle="'
+      + esc(name) + '">高级</button>'
+      + '<button type="button" class="mp-edit-btn" data-mp-snippet="' + esc(name)
+      + '">接入片段</button>'
+      + '<label class="mp-toggle"><input type="checkbox" data-mp-pool="' + esc(name)
+      + '"' + checked + '><span>启用</span></label>'
+      + '</span>'
+      + '</div>';
+    // C4：首候选降级而服务仍由回退候选提供 → 引导条（关闭后同态不重现）
+    if (isDegraded(def, st, rt) && !_degradeDismissed[name]) {
+      html += '<div class="mp-degrade"><span>首选已降级 — 当前服务经回退候选提供</span>'
+        + '<button type="button" class="mp-edit-btn" data-mp-degrade-view="'
+        + esc(name) + '">查看回退链</button>'
+        + '<button type="button" class="mp-degrade-x" data-mp-degrade-dismiss="'
+        + esc(name) + '" title="关闭">×</button></div>';
+    }
+
+    // 候选链（id / 优先级 / 类型 / 目标 / 证据态 / 运行态）
+    var cands = def.candidates || [];
+    var rtById = {};
+    (((rt || {}).candidates) || []).forEach(function (rc) { rtById[rc.id] = rc; });
+    if (cands.length) {
+      // 2026-11-04：在役候选标记 — 各协议 chosen 的 id 集合（池级一次算好）
+      var protocolsAll = (st && st.protocols) || {};
+      var chosenIds = {};
+      ['openai', 'anthropic'].forEach(function (proto) {
+        var pv = protocolsAll[proto] || {};
+        if (pv.chosen) chosenIds[pv.chosen] = true;
+      });
+      html += '<div class="mp-cands">';
+      cands.forEach(function (c, idx) {
+        html += candCard(name, c, rtById[c.id], idx, cands.length, chosenIds);
+        // A2/A3：行内编辑会话命中锚点候选 → 卡后渲染 diff 预览条
+        if (_inline && _inline.pool === name && _inline.anchor === c.id) {
+          html += inlineDiffBar(name, c);
+        }
+      });
+      html += '</div>';
+    } else {
+      html += '<p class="mp-empty">无可解析候选（目标悬空或未配置）</p>';
+    }
+    // 新增候选：目录四态下拉（与替换下拉同预热语义）；session 在池级
+    // （anchor=null）时 diff 条渲染在本行之后
+    html += '<div class="mp-add-row"><select class="mp-inline-sel"'
+      + ' data-mp-inline-add="' + esc(name) + '"'
+      + (_catalog === false ? ' disabled' : '') + '>'
+      + (_catalog
+          ? '<option value="">+ 新增候选…</option>' + inlineOptions()
+          : _catalog === false
+            ? '<option value="">目录不可用</option>'
+            : '<option value="">+ 新增候选…</option>')
+      + '</select></div>';
+    // A3：池级会话（add/param，anchor=null）→ diff 条渲染在候选列表下方
+    if (_inline && _inline.pool === name && !_inline.anchor) {
+      html += inlineDiffBar(name, null);
+    }
+
+    // Task 4：高级（池参数）面板 — 展开态渲染在 diff 条之后；初值取
+    // 当前视图 def（预览基底仍是 raw，承编辑器语义：视图有损防丢数据）
+    if (_paramsOpen[name]) {
+      html += '<div class="mp-params" data-mp-params="' + esc(name) + '">'
+        + '<label class="mp-param-item">max_attempts'
+        + '<input type="number" class="mp-param-in" data-mp-param="max_attempts" value="'
+        + esc(String(def.max_attempts != null ? def.max_attempts : ''))
+        + '"></label>'
+        + '<label class="mp-param-item">deadline_ms'
+        + '<input type="number" class="mp-param-in" data-mp-param="deadline_ms" value="'
+        + esc(String(def.deadline_ms != null ? def.deadline_ms : ''))
+        + '"></label>'
+        + '<label class="mp-param-item mp-param-check">'
+        + '<input type="checkbox" data-mp-param="accept_declared"'
+        + (def.accept_declared ? ' checked' : '') + '> accept_declared</label>'
+        + '<button type="button" class="mp-edit-btn" data-mp-params-preview="'
+        + esc(name) + '">预览</button>'
+        + '</div>';
+    }
+
+    // 悬空目标 / 校验问题
+    (def.issues || []).forEach(function (i) {
+      html += '<p class="mp-issue">注意：' + esc(i) + '</p>';
+    });
+
+    // 2026-11-04 用户裁决（二次）：决策块整块删除 —「当前选择」行与
+    // 排除:reason 行都不再渲染（卡上调用中标记 + 头部健康灯已承载全部
+    // 路由态；排除原因是诊断噪音）。structSig 同步摘除 decisions 键：
+    // 无渲染面的数据留在签名里只会在 decisions 变化时引发无谓整块重建。
+
+    // C2：故障时间线（池有事件才出 toggle；展开态重建出轴）
+    var evs = poolEvents(name);
+    if (evs.length) {
+      html += '<div class="mp-tl-row">'
+        + '<button type="button" class="mp-edit-btn" id="mp-tl-toggle-'
+        + esc(name) + '" data-mp-tl-toggle="' + esc(name)
+        + '">故障时间线 · ' + evs.length + '</button>'
+        + (_timelineOpen[name]
+            ? '<div class="mp-tl" id="mp-tl-' + esc(name) + '">'
+              + timelineDots(name) + '</div>'
+            : '')
+        + '</div>';
+    }
+
+    html += '</div>';
+    return html;
+  }
+
+  /* ── B1 局部渲染（Task 4）：结构签名 + applyDynamic 定点更新 + 本地倒计时 ── */
+
+  // 结构签名（评审 I2/I3 扩展；2026-11-04 收缩）：池名 + enabled + issues
+  // 全文 + 每候选（id/kind/优先级/目标/声明协议/能力/冷却在否）+ 冷却在否
+  // + 高级面板展开态。protocols 整体出签名（决策块删除后无渲染面 —
+  // chosen 由 applyDynamic 类翻转、协议健康由头部灯承载）。运行态展示
+  // 字段 applyDynamic 不全更新的（issues/target/环/降级）一律进签名 →
+  // 变化即重建。签名不变 → 不重写 mpPools.innerHTML（轮询零闪烁）。
+  function structSig(def, stPools, rtPools) {
+    return Object.keys(def.pools || {}).map(function (n) {
+      var p = def.pools[n];
+      var stP = (stPools || {})[n] || {};
+      var rtP = (rtPools || {})[n] || {};
+      var rtById = {};
+      (rtP.candidates || []).forEach(function (rc) { rtById[rc.id] = rc; });
+      return n + ':' + (p.enabled ? 1 : 0)
+        + ':' + (p.issues || []).join(';')
+        + ':' + (p.candidates || []).map(function (c) {
+            var rt = rtById[c.id];
+            var tgt = c.target
+              || (c.kind === 'local' ? (c.model_name || '')
+                  : ((c.provider || '') + '/' + (c.model_id || '')));
+            return [c.id, c.kind || '', c.priority || 0, tgt,
+                    (c.declared_protocols || []).join(','),
+                    (rt && rt.vision) ? 'v' : '',
+                    (rt && rt.cooling) ? 'cool' : 'live'].join('~');
+          }).join(',')
+        // 2026-11-04：决策块删除后 protocols 不再有渲染面（chosen 由
+        // applyDynamic 类翻转 + 头部灯承载）→ 整个 protocols 键出签名
+        //（decisions 留在签名只会在无渲染面数据变化时引发无谓重建）
+        // Task 4：高级面板展开态进签名（Ruling 3 — 开合是结构）
+        + '|params' + (_paramsOpen[n] ? '1' : '0');
+    }).join('#');
+  }
+
+  // 冷却快照：首见锚定总时长 total；runtime 重取 → base 重锚（评审 I8a：
+  // 更长剩余 = 新一轮冷却 → 重锚 total，环形百分比不超 100%）+ 锚点时刻刷新；
+  // 冷却结束的条目清除。
+  function cdSnapshot(rtPools) {
+    var live = {};
+    Object.keys(rtPools || {}).forEach(function (n) {
+      ((rtPools[n] || {}).candidates || []).forEach(function (rc) {
+        if (!rc.cooling || typeof rc.cooling.remaining_s !== 'number') return;
+        var key = n + '|' + rc.id;
+        live[key] = true;
+        if (!_cd[key]) {
+          _cd[key] = {pool: n, candId: rc.id, total: rc.cooling.remaining_s,
+                      base: rc.cooling.remaining_s, rt: rc};
+        } else {
+          if (rc.cooling.remaining_s > _cd[key].base) {
+            _cd[key].total = rc.cooling.remaining_s;
+          }
+          _cd[key].base = rc.cooling.remaining_s;
+          _cd[key].rt = rc;
+        }
+      });
+    });
+    Object.keys(_cd).forEach(function (k) { if (!live[k]) delete _cd[k]; });
+    _rtAt = Date.now();   // 评审 I7：以 runtime 拉取时刻为锚
+  }
+
+  // 按 id 定点更新（签名不变的轮询路径）：灯 className / 状态灯 / 运行态文本 /
+  // 在役候选标记（mp-cand-active 类 + title）/ revision — 零 innerHTML 重写
+  function applyDynamic(def, stPools, rtPools) {
+    Object.keys(def.pools || {}).forEach(function (n) {
+      var poolDef = def.pools[n];
+      var protocols = (stPools[n] && stPools[n].protocols) || {};
+      // 2026-11-04：各协议 chosen 的 id 集合（在役标记翻转的数据源）
+      var chosenIds = {};
+      ['openai', 'anthropic'].forEach(function (proto) {
+        var pv = protocols[proto] || {};
+        if (pv.chosen) chosenIds[pv.chosen] = true;
+      });
+      ['openai', 'anthropic'].forEach(function (proto) {
+        var lamp = $('mp-lamp-' + n + '-' + proto);
+        if (lamp) {
+          lamp.className = 'mp-lamp '
+            + lampForProtocol(poolDef, protocols[proto]);
+        }
+      });
+      var rtById = {};
+      ((rtPools[n] || {}).candidates || []).forEach(function (rc) {
+        rtById[rc.id] = rc;
+      });
+      (poolDef.candidates || []).forEach(function (c) {
+        var rt = rtById[c.id];
+        // 2026-11-04：在役标记翻转（chosen 变化 → 摘旧挂新，by-id 零重写）。
+        // 双协议任一选中即标记（卡上不区分协议 — 头部灯承载协议健康态）
+        var card = $('mp-cand-' + n + '-' + c.id);
+        if (card) {
+          var on = !!chosenIds[c.id];
+          var cls = String(card.className || '').replace(/\s*mp-cand-active\b/g, '');
+          if (on && cls.indexOf('mp-cand-active') < 0) cls += ' mp-cand-active';
+          card.className = cls;
+          card.title = on ? '调用中（当前池路由选中的候选）' : '';
+        }
+        var dot = $('mp-dot-' + n + '-' + c.id);
+        if (dot) dot.className = 'mp-dot ' + candDotClass(rt);
+        // L3：树行候选灯同态 by-id 更新 + 挂掉降暗（候选结构进 sig，
+        // 灯态/降暗是轮询动态，不进 sig — 同卡片灯哲学）
+        var tdot = $('mp-tdot-' + n + '-' + c.id);
+        if (tdot) tdot.className = 'mp-dot ' + candDotClass(rt);
+        var tcand = $('mp-tcand-' + n + '-' + c.id);
+        if (tcand) tcand.className = 'mp-tree-cand'
+          + ((!rt || !rt.active) ? ' mp-tree-cand-dim' : '');
+        var rtEl = $('mp-rt-' + n + '-' + c.id);
+        if (rtEl) rtEl.textContent = runtimeBadgeText(rt);
+        // C1：延迟数据不进签名（变化不重建）→ spark by-id 更新
+        var spark = $('mp-spark-' + n + '-' + c.id);
+        if (spark) spark.innerHTML = sparkSvg(latRing(n, c.id).slice(-20));
+      });
+      // C2：事件数据不进签名 → toggle 计数 + 展开轴 by-id 更新
+      var evsN = poolEvents(n).length;
+      var tgl = $('mp-tl-toggle-' + n);
+      if (tgl && evsN) tgl.textContent = '故障时间线 · ' + evsN;
+      if (_timelineOpen[n]) {
+        var tl = $('mp-tl-' + n);
+        if (tl) tl.innerHTML = timelineDots(n);
+        // T5：树行下轴同态刷新（展开是状态 — 两渲染点数据一致）
+        var ttl = $('mp-tree-tl-' + n);
+        if (ttl) ttl.innerHTML = timelineDots(n);
+      }
+      // C3：光带三态数据驱动 → by-id className 更新（不进 sig）
+      var beam = $('mp-beam-' + n);
+      if (beam) beam.className = 'mp-beam ' + beamClass(stPools[n], rtPools[n]);
+      // 调用树：链路态 by-id（同哲学 — 类翻转是动态更新非结构变化，
+      // 不进 sig；未配置行态恒定无需更新）
+      var tls = linkState(poolDef, rtPools[n]);
+      var tla = $('mp-tlink-a-' + n), tlb = $('mp-tlink-b-' + n);
+      if (tla) tla.className = 'mp-link mp-link-' + tls.cls;
+      if (tlb) tlb.className = 'mp-link mp-link-' + tls.cls;
+      var tst = $('mp-tstate-' + n);
+      if (tst) {
+        tst.className = 'mp-tree-state mp-tree-state-' + tls.cls;
+        tst.textContent = tls.label;
+      }
+    });
+    var revEl = $('mpRevision');
+    if (revEl && typeof def.revision !== 'undefined') {
+      revEl.textContent = String(def.revision);
+    }
+  }
+
+  // 本地倒计时（1s interval）：以 runtime 拉取时刻为锚按流逝秒数递减
+  // remaining_s，更新 mp-rt-* 文本与环形 --p，不发出任何 fetch
+  function applyCountdown(elapsed) {
+    Object.keys(_cd).forEach(function (key) {
+      var e = _cd[key];
+      if (!e.rt) return;
+      var remaining = Math.max(0, e.base - elapsed);
+      var rt2 = Object.assign({}, e.rt, {
+        cooling: Object.assign({}, e.rt.cooling, {remaining_s: remaining}),
+      });
+      var rtEl = $('mp-rt-' + e.pool + '-' + e.candId);
+      if (rtEl) rtEl.textContent = runtimeBadgeText(rt2);
+      var ring = $('mp-ring-' + e.pool + '-' + e.candId);
+      if (ring && ring.style && ring.style.setProperty) {
+        // (e.total || 1)：remaining_s=0 首见时 total=0，除零防护（评审 I8b）
+        ring.style.setProperty('--p',
+          String(Math.round(remaining / (e.total || 1) * 100)));
+      }
+    });
+  }
+
+  function cdTick() {
+    try {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (window.store && typeof window.store.get === 'function'
+          && window.store.get('tab_active') !== 'tab-model-pools') return;
+      // 评审 I7：按真实流逝时间递减（非执行次数计数——隐藏/切 tab 期间
+      // 计时器被节流，锚点差值仍反映真实时间）
+      var elapsed = Math.floor((Date.now() - _rtAt) / 1000);
+      if (elapsed <= 0) return;
+      applyCountdown(elapsed);
+    } catch (e) { /* 倒计时失败静默 — 下个滴答重试 */ }
+  }
+
+  // 懒启动：首次整块重建后才开始（无池渲染不空转）
+  function startCountdown() {
+    if (_cdTimer || typeof setInterval !== 'function') return;
+    _cdTimer = setInterval(cdTick, 1000);
+  }
+
+  /* ── A3 行动横幅（Task 3）：常驻 + 去哪修；样式复用 mp-error-banner ── */
+  function setActionError(message, hint, action) {
+    _actionError = {message: message, hint: hint || null, action: action || null};
+    return renderModelPools();   // 立即可见（不等 5s 轮询）
+  }
+
+  function clearActionError() {
+    _actionError = null;
+  }
+
+  function bannerHtml() {
+    var a = _actionError;
+    var html = '<div class="mp-error-banner mp-action-banner" id="mp-action-banner">'
+      + '<p><span class="mp-action-msg">' + esc(a.message) + '</span>'
+      + (a.hint ? ' <span class="mp-action-hint">' + esc(a.hint) + '</span>' : '')
+      + '</p>';
+    if (a.action) {
+      html += '<button type="button" data-mp-banner-action="1">'
+        + esc(a.action.label || '重试') + '</button>';
+    }
+    html += '<button type="button" data-mp-banner-dismiss="1">关闭</button>';
+    return html + '</div>';
+  }
+
+  async function doMpBannerAction() {
+    if (!_actionError || !_actionError.action) return;
+    var run = _actionError.action.run;
+    _actionError = null;   // 先清（重试成功保持清；失败会重新置）
+    await run();
+  }
+
+  function doMpBannerDismiss() {
+    _actionError = null;
+    return renderModelPools();
+  }
+
+  /* ── 渲染（拉取：定义 + 双协议状态 + 运行态；三态空态分支） ── */
+  async function renderModelPools() {
+    var box = $('mpPools');
+    if (!box || _loading) return;
+    _loading = true;
+    try {
+      var defRes = await fetch(POOLS_URL, { headers: UI.adminHeaders() });
+      var stRes = await fetch(STATUS_URL, { headers: UI.adminHeaders() });
+      var rtRes = await fetch(RUNTIME_URL, { headers: UI.adminHeaders() });
+      // C1：延迟环 best-effort（同 rt 模式 — 失败 → null 降级，不挡面板）
+      var latRes = await fetch(LATENCY_URL, { headers: UI.adminHeaders() });
+      // C2：事件时间线 best-effort（同上）
+      var evRes = await fetch(EVENTS_URL, { headers: UI.adminHeaders() });
+      if (!defRes.ok || !stRes.ok) {
+        _lastSig = null;   // 评审 I5：错误页替换了面板 → 失效签名，恢复后必须重建
+        box.innerHTML = '<p class="mp-empty">拉取失败 · HTTP '
+          + esc(defRes.status) + '/' + esc(stRes.status) + '</p>';
+        return;
+      }
+      var def = await defRes.json();
+      var st = await stRes.json();
+      var rt = null;
+      if (rtRes.ok) {
+        try { rt = await rtRes.json(); } catch (e) { rt = null; }
+      }
+      var lat = null;
+      if (latRes.ok) {
+        try { lat = await latRes.json(); } catch (e) { lat = null; }
+      }
+      var evs = null;
+      if (evRes.ok) {
+        try { evs = await evRes.json(); } catch (e) { evs = null; }
+      }
+      _state.def = def;
+      _state.status = st;
+      _state.runtime = rt;
+      _state.latency = lat;
+      _state.events = evs;
+      _revision = def.revision;
+      var revEl = $('mpRevision');
+      if (revEl) revEl.textContent = String(def.revision);
+
+      // 单一形态（2026-10-26 大手术）：无空态分支 — 零池 = 四张未配置卡
+      // （未配置即待建）；load_error → 横幅 + 同布局降级渲染（registry
+      // 保留最后有效快照，树上照常显示现有池）
+      // A2：目录不做渲染期拉取（Task 1 裁决 — 既有轮询 GET 计数是契约），
+      // 手势惰性预热：box mouseover/focusin → primeInline()
+      var stPools = (st && st.pools) || {};
+      var rtPools = (rt && rt.pools) || {};
+      cdSnapshot(rtPools);
+      // C4 重新武装：劣化解除（首候选恢复健康/无 chosen）→ 清关闭键，
+      // 下次劣化再现引导条
+      Object.keys(def.pools || {}).forEach(function (n) {
+        if (_degradeDismissed[n]
+            && !isDegraded(def.pools[n], stPools[n], rtPools[n])) {
+          delete _degradeDismissed[n];
+        }
+      });
+      // B1 局部渲染（Task 4）：结构签名不变 → 只走 applyDynamic 定点更新，
+      // 不重写 innerHTML（轮询零闪烁）；banner 消息/提示计入签名（评审 I6 —
+      // 内容变了的横幅必须重建，否则旧原因配新行动闭包）；A2 目录在否与
+      // 行内会话（池|候选|spec|rev）计入签名 — 下拉出现/diff 条/应用按钮
+      // 启用都是结构变化
+      var sig = structSig(def, stPools, rtPools)
+        // 终审 I2：load_error 进签名 — 首渲染后才拉到的加载失败/修复
+        // 都必须重建（横幅只在重建路径渲染，池形未变不算「无变化」）
+        + '|le:' + (def.load_error || '')
+        + '|cat:' + (_catalog ? '1' : _catalog === false ? '2' : '0')
+        // C2：toggle 在否（池事件有无）+ 展开池列表都是结构 — 变化即重建；
+        // 事件数据本身不进 sig（by-id 更新）
+        + '|tl:' + Object.keys(def.pools || {}).filter(function (n) {
+            return poolEvents(n).length > 0;
+          }).join(',')
+          + '/' + Object.keys(_timelineOpen).join(',')
+        // C4：引导条在否（劣化在 + 未关闭）与关闭态都是结构 — 变化即重建
+        + '|dg:' + Object.keys(def.pools || {}).filter(function (n) {
+            return isDegraded(def.pools[n], stPools[n], rtPools[n]);
+          }).join(',')
+          + '/' + Object.keys(_degradeDismissed).join(',')
+        + '|inline:' + (_inline
+            ? _inline.pool + '|' + (_inline.anchor || '') + '|'
+              + _inline.kind + '|' + _inline.rev
+            : '')
+        + '|'
+        + (_actionError
+            ? 'banner:' + _actionError.message + '|' + (_actionError.hint || '')
+            : '');
+      if (sig === _lastSig) {
+        applyDynamic(def, stPools, rtPools);
+        return;
+      }
+      _lastSig = sig;
+      var html = '';
+      if (def.load_error) {
+        html += '<div class="mp-error-banner">'
+          + '<p><b>model_pools.yaml 加载失败</b>（registry 保留最后有效快照）：</p>'
+          + '<p class="mono">' + esc(def.load_error) + '</p>'
+          + '<p>修复文件后点击「重载配置」，或直接编辑 YAML。</p>'
+          + '</div>';
+      }
+      if (_actionError) html += bannerHtml();   // A3：行动横幅常驻
+      html += treeHtml(def, rt);
+      html += cardsHtml(def, st, rt, _catalog);
+      box.innerHTML = html;
+      startCountdown();
+    } catch (e) {
+      _lastSig = null;   // 评审 I5：异常页替换面板 → 失效签名
+      box.innerHTML = '<p class="mp-empty">拉取异常：' + esc(e && e.message) + '</p>';
+    } finally {
+      _loading = false;
+    }
+  }
+
+  /* ── 单池 enabled 开关（服务端原子翻转 + CAS） ── */
+  /* ── B2 乐观 UI + 切换中骨架态（UI/UX P2 Task 2）──
+     请求在途：池卡外壳 mp-busy（CSS 微光扫过）+ 协议灯直写乐观目标类；
+     响应到达（fetch 段 finally）即清除 — 成败均由后续重渲染回服务端真值
+     （真实浏览器全量重建自然覆盖；签名不变的局部渲染路径由清除兜底）。 */
+
+  function markBusy(pool) {
+    var c = $('mp-card-' + pool);
+    if (c && (' ' + c.className + ' ').indexOf(' mp-busy ') < 0) {
+      c.className = (c.className ? c.className + ' ' : '') + 'mp-busy';
+    }
+  }
+
+  function clearBusy(pool) {
+    var c = $('mp-card-' + pool);
+    if (c) {
+      c.className = (' ' + c.className + ' ')
+        .split(' mp-busy ').join(' ').trim();
+    }
+  }
+
+  // 乐观灯：与 lampForProtocol 同词表（启用→ok / 停用→warn）
+  var _optLamps = null;
+
+  function optimisticLamps(pool, enable) {
+    var prev = [];
+    ['openai', 'anthropic'].forEach(function (proto) {
+      var id = 'mp-lamp-' + pool + '-' + proto;
+      var e = $(id);
+      if (!e) return;
+      prev.push({ id: id, cls: e.className });
+      e.className = 'mp-lamp ' + (enable ? 'mp-lamp-ok' : 'mp-lamp-warn');
+    });
+    _optLamps = prev.length ? prev : null;
+  }
+
+  function restoreLamps() {
+    if (!_optLamps) return;
+    _optLamps.forEach(function (o) {
+      var e = $(o.id);
+      if (e) e.className = o.cls;
+    });
+    _optLamps = null;
+  }
+
+  // C2：故障时间线开合 — 展开态变化走重建（轴出现/消失是结构变化）
+  async function doMpTimelineToggle(pool) {
+    if (_timelineOpen[pool]) delete _timelineOpen[pool];
+    else _timelineOpen[pool] = true;
+    await renderModelPools();
+  }
+
+  // T5：树行点击 → 行内诊断。有事件才展开（fail/cooldown 必有事件；
+  // idle/flowing 有历史也可查）；无事件行无可诊断，静默不动。
+  async function doMpTreeDiag(pool) {
+    if (!poolEvents(pool).length) return;
+    await doMpTimelineToggle(pool);
+  }
+
+  // C4：查看回退链 — 池卡加高亮类（定位滚动交给 CSS scroll-margin）
+  function doMpDegradeView(pool) {
+    var card = $('mp-card-' + pool);
+    if (!card) return;
+    card.className = (card.className + ' mp-highlight').trim();
+  }
+
+  // C4：关闭引导条 — 同态不重现；劣化解除后清键重新武装（见渲染主路径）
+  async function doMpDegradeDismiss(pool) {
+    if (!_degradeDismissed[pool]) _degradeDismissed[pool] = true;
+    await renderModelPools();
+  }
+
+  async function doMpToggle(pool, enable) {
+    if (_revision == null) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return;
+    }
+    markBusy(pool);
+    optimisticLamps(pool, enable);
+    try {
+      var res, d = null;
+      try {
+        res = await fetch(TOGGLE_URL, {
+          method: 'POST',
+          headers: UI.adminHeaders(),
+          body: JSON.stringify({
+            pool: pool,
+            enabled: enable,
+            expected_revision: _revision,
+          }),
+        });
+        try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      } finally {
+        // B2：响应到达即清骨架 + 回滚乐观灯 — 成败分支的重渲染前完成
+        clearBusy(pool);
+        restoreLamps();
+      }
+      if (res.ok) {
+        clearActionError();
+        _revision = d && typeof d.revision === 'number' ? d.revision : _revision;
+        UI.toast('已' + (enable ? '启用' : '停用') + ' iff/' + pool, 'ok');
+        await renderModelPools();
+        return;
+      }
+      if (res.status === 409) {
+        // revision 冲突：配置已被其他修改更新 — 常驻横幅（重试原操作）+ 重新拉取
+        await setActionError('配置已被其他修改更新（冲突）',
+          '已刷新，基于最新配置重试',
+          {label: '重试', run: function () { return doMpToggle(pool, enable); }});
+        UI.toast('配置已被其他修改更新（冲突），已刷新，请重试', 'error');
+        return;
+      }
+      var msg = (d && d.error) || ('开关失败 · HTTP ' + res.status);
+      UI.toast(msg, 'error');
+      await setActionError(msg, null,
+        {label: '重试', run: function () { return doMpToggle(pool, enable); }});
+    } catch (e) {
+      UI.toast('开关请求异常：' + (e && e.message), 'error');
+      await setActionError('开关请求异常：' + (e && e.message), null,
+        {label: '重试', run: function () { return doMpToggle(pool, enable); }});
+    }
+  }
+
+  /* ── A2 行内 diff 编辑（UI/UX P2 Task 1）：两步换模，不离开列表 ── */
+
+  // 目录惰性预热（Task 1 裁决）：并发共享一个在途 promise；
+  // 成功 → object，失败 → false（下次手势可重试）
+  var _catPromise = null;
+
+  function ensureCatalog() {
+    if (_catalog) return Promise.resolve(_catalog);
+    if (!_catPromise) {
+      _catPromise = fetchCandidateCatalog()
+        // null（fetchCatalog 层失败 — 404/解析失败等）与 false 同义：
+        // 目录不可用，不得回落「未预热」占位态（真实浏览器 404 即此路径）
+        .then(function (c) { _catalog = c || false; _catPromise = null; return _catalog; })
+        .catch(function () {
+          _catalog = false; _catPromise = null; return false;
+        });
+    }
+    return _catPromise;
+  }
+
+  // 目录失败冷却（终审 I3）：目录不可用时 mouseover 高频触发不得逐次
+  // 重放 fetch+render — 失败后 5s（= 轮询周期）内至多重试一次
+  var PRIME_RETRY_MS = 5000;
+  var _catFailTs = null;   // 失败时刻（null=未失败；0 是合法时钟值，不作哨兵）
+
+  // 手势入口（box mouseover/focusin）：取目录 → 重渲染出选项
+  async function primeInline() {
+    if (_catalog) return;
+    if (_catPromise) return;   // 在途不叠加（首个手势已发起）
+    if (_catFailTs !== null
+        && Date.now() - _catFailTs < PRIME_RETRY_MS) return;
+    var ok = await ensureCatalog();
+    if (!ok) _catFailTs = Date.now();
+    await renderModelPools();   // 失败也当轮渲染禁用态（契约不变）
+  }
+
+  async function doMpInlineSelect(pool, candId, spec) {
+    if (!_state.def) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return;
+    }
+    var cat = await ensureCatalog();
+    if (!cat) {
+      UI.toast('目录不可用 — 无法替换候选，稍后重试', 'error');
+      return;
+    }
+    var base = _state.def.raw ? deepCopy(_state.def.raw)
+      : { schema_version: 1, pools: {} };
+    if (!base.pools || typeof base.pools !== 'object') base.pools = {};
+    var cands = (base.pools[pool] || {}).candidates;
+    if (!Array.isArray(cands)) {
+      UI.toast('候选不存在：' + candId, 'error');
+      return;
+    }
+    var i = cands.findIndex(function (c) { return c.id === candId; });
+    if (i < 0) {
+      UI.toast('候选不存在：' + candId, 'error');
+      return;
+    }
+    var nc = candFromCatalogValue(spec, candId, _catalog);
+    nc.priority = cands[i].priority;   // D4 一键换模：继承原优先级
+    var work = deepCopy(base);
+    work.pools[pool].candidates[i] = deepCopy(nc);
+    // CAS 基点在选中时捕获（与编辑器打开时固定基点同语义 — 后台刷新
+    // 推进 revision 不得让陈旧 work 借新基点覆盖他人修改）
+    var summary = candTarget(cands[i]) + ' → ' + candTarget(nc);
+    await beginInline(pool, { kind: 'replace', anchor: candId,
+                              summary: summary }, base, work);
+  }
+
+  // A2 会话公共尾段（泛化版）：设 _inline → 重建出 diff 条 → 自动预览
+  // （三段式门禁）→ 预览结果进签名重建（启用/禁用应用按钮）。
+  // act = {kind, anchor, summary} — 单动作内联描述符（A3 泛化）。
+  // 令牌必须在首个 await 前同步捕获：预演在途时用户再选一次会同步接管
+  // _inline，若令牌取自渲染恢复之后，旧会话的迟到结果会通过身份校验
+  // 写进新会话（validated/previewHtml 与 work 错位 → 门禁被绕过）
+  // 预览核心（模态编辑器与 A2 行内编辑共用）：validate（静态）→ 不通过
+  // 阻止一切；通过 → dry-run×2 携带编辑态 config。
+  // 返回 {validated, code, html, message}；code ∈ ok | invalid | http_fail |
+  // none_chosen | error（调用方决定 toast 文案与容器前缀）。
+  // spec §3.2 门：HTTP 失败或两协议均无可用候选 → 阻止应用
+  // （单协议无候选 = 黄灯，属合法状态，不阻止）
+  async function previewWork(work, pool) {
+    try {
+      var res = await fetch(VALIDATE_URL, {
+        method: 'POST', headers: UI.adminHeaders(),
+        body: JSON.stringify(work),
+      });
+      var d = null;
+      try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      // 2026-11-04：validate 非 2xx → 展示真实 HTTP 错误，绝不冒充空「校验未
+      // 通过」。只读预览等中间层挡 POST 时 body 无 valid 字段（{"error":…}），
+      // 旧实现只读 d.valid（undefined→!valid）→ 误走 invalid 分支 + 空
+      // issues 列表，真实原因（HTTP 403）被完全吞掉（用户报障：空「校验未
+      // 通过」误导为配置不合法，实为环境挡写）
+      if (!res.ok) {
+        return {
+          validated: false, code: 'http_fail',
+          html: '<p class="mp-issue">预览请求失败 · HTTP '
+            + esc(res.status)
+            + ((d && d.error) ? ' · ' + esc(d.error) : '')
+            + ' — 已阻止应用</p>',
+        };
+      }
+      if (!d.valid) {
+        return {
+          validated: false, code: 'invalid',
+          html: '<p class="mp-issue">校验未通过（已阻止预览与应用）：</p>'
+            + '<ul class="mp-decisions">'
+            + (d.issues || []).map(function (i) {
+                return '<li class="mono">' + esc(i) + '</li>';
+              }).join('')
+            + '</ul>',
+        };
+      }
+      var outs = [];
+      for (var k = 0; k < ['openai', 'anthropic'].length; k++) {
+        var proto = ['openai', 'anthropic'][k];
+        var r = await fetch(DRYRUN_URL, {
+          method: 'POST', headers: UI.adminHeaders(),
+          body: JSON.stringify({ pool: pool, protocol: proto,
+                                 config: work }),
+        });
+        var b = null;
+        try { b = await r.json(); } catch (e) { /* 非 JSON 响应体 */ }
+        outs.push({ proto: proto, ok: r.ok, body: b || {} });
+      }
+      var html = outs.map(function (o) {
+        var b = o.body || {};
+        return '<p class="mono">' + esc(o.proto) + ' → '
+          + (b.chosen ? ('选择 <b>' + esc(b.chosen) + '</b>')
+             : ('<span class="mp-nochosen">' + esc(b.error || '无可用候选')
+                + '</span>'))
+          + '</p>';
+      }).join('');
+      var failed = outs.filter(function (o) { return !o.ok; });
+      if (failed.length) {
+        return { validated: false, code: 'http_fail',
+                 html: html + '<p class="mp-issue">预览请求失败 · HTTP '
+                   + esc(failed.map(function (o) { return o.proto; })
+                         .join('/'))
+                   + ' — 已阻止应用</p>' };
+      }
+      var noneChosen = outs.filter(function (o) { return !o.body.chosen; });
+      if (noneChosen.length === outs.length) {
+        return { validated: false, code: 'none_chosen',
+                 html: html + '<p class="mp-issue">两个协议均无可用候选'
+                   + ' — 已阻止应用</p>' };
+      }
+      return { validated: true, code: 'ok', html: html };
+    } catch (e) {
+      return { validated: false, code: 'error', html: '',
+               message: (e && e.message) || String(e) };
+    }
+  }
+
+  async function beginInline(pool, act, base, work) {
+    var session = { pool: pool, anchor: act.anchor || null,
+                    kind: act.kind || 'replace', summary: act.summary || '',
+                    base: base, work: work,
+                    base_revision: _state.def.revision,
+                    validated: false, previewHtml: '', rev: 0 };
+    _inline = session;
+    await renderModelPools();
+    var out = await previewWork(work, pool);
+    if (_inline !== session) return;
+    _inline.previewHtml = out.code === 'error'
+      ? '<span class="mp-issue">预览请求异常：' + esc(out.message) + '</span>'
+      : out.html;
+    _inline.validated = out.validated;
+    _inline.rev += 1;
+    await renderModelPools();
+  }
+
+  // T5：未配置卡选模型即建池 — 骨架 + 首候选（id/priority 承旧向导约定
+  // <pool>-1/1；协议/能力来自目录），走同一 A2 预览→应用链。CAS 基点 =
+  // 当前 revision（同编辑器语义 — 池创建与其他池修改同语义，不是旧向导
+  // 整体替换的硬编码 expected_revision=0；零配置时基点自然为 0）。
+  async function doMpConfigSelect(pool, spec) {
+    if (!spec) return;
+    if (!_state.def) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return;
+    }
+    var cat = await ensureCatalog();
+    if (!cat) {
+      UI.toast('目录不可用 — 无法创建池，稍后重试', 'error');
+      return;
+    }
+    var base = _state.def.raw ? deepCopy(_state.def.raw)
+      : { schema_version: 1, pools: {} };
+    if (!base.pools || typeof base.pools !== 'object') base.pools = {};
+    if (base.pools[pool]) return;   // 已配置池不走未配置卡（竞态防御）
+    var work = deepCopy(base);
+    var c = candFromCatalogValue(spec, pool + '-1', _catalog);
+    c.priority = 1;
+    var sk = newPoolSkeleton();
+    sk.candidates = [deepCopy(c)];
+    work.pools[pool] = sk;
+    await beginInline(pool, { kind: 'create', anchor: pool + '-1',
+                              summary: '' }, base, work);
+  }
+
+  /* ── 卡片单动作内联编辑（2026-11-03 用户裁决：模态 → 卡片）──────────
+   * 新增/上移/下移/删除 各自构建整配置 work → beginInline 门禁（预览→
+   * CAS 应用）。语义承旧模态 mutator（mpEditAddCandidate/mpEditMove/
+   * mpEditRemove）。move/delete 不依赖目录（ruling 2）；add 需要。 */
+
+  // 公共头：raw 深拷贝基底 + 池/候选定位。返回 {base, work, cands, i}
+  // 或 null（已 toast）。raw 缺失（未配置池边缘态）→ 空骨架防御。
+  function inlineWorkBase(pool, candId) {
+    if (!_state.def) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return null;
+    }
+    var base = _state.def.raw ? deepCopy(_state.def.raw)
+      : { schema_version: 1, pools: {} };
+    if (!base.pools || typeof base.pools !== 'object') base.pools = {};
+    if (!base.pools[pool]) {
+      UI.toast('候选不存在：' + candId, 'error');
+      return null;
+    }
+    var cands = base.pools[pool].candidates;
+    if (!Array.isArray(cands)) {
+      UI.toast('候选不存在：' + candId, 'error');
+      return null;
+    }
+    var i = cands.findIndex(function (c) { return c.id === candId; });
+    if (i < 0) {
+      UI.toast('候选不存在：' + candId, 'error');
+      return null;
+    }
+    return { base: base, cands: cands, i: i };
+  }
+
+  // 上移/下移：交换相邻候选并交换 priority（承 mpEditMove — 链序与
+  // 优先级一致）；越界静默返回（按钮 affordance 已禁用，双保险）
+  async function doMpInlineMove(pool, candId, dir) {
+    var w = inlineWorkBase(pool, candId);
+    if (!w) return;
+    var j = dir === 'up' ? w.i - 1 : w.i + 1;
+    if (j < 0 || j >= w.cands.length) return;
+    var work = deepCopy(w.base);
+    var cs = work.pools[pool].candidates;
+    var a = cs[w.i], b = cs[j];
+    cs[w.i] = b; cs[j] = a;
+    var p = a.priority; a.priority = b.priority; b.priority = p;
+    var verb = dir === 'up' ? '上移' : '下移';
+    await beginInline(pool, { kind: 'move', anchor: candId,
+      summary: verb + ' ' + candTarget(a) + ' → P' + a.priority },
+      w.base, work);
+  }
+
+  // 删除：splice 移除。末候选可删 — validate 对 0 候选不报 issue（
+  // config.py 只静默 enabled=false）；实际拦下的是 dry-run 双协议
+  // chosen=null → previewWork code=none_chosen「已阻止应用」（ruling 1，
+  // cross-review I1 修正机制描述）
+  async function doMpInlineDelete(pool, candId) {
+    var w = inlineWorkBase(pool, candId);
+    if (!w) return;
+    var work = deepCopy(w.base);
+    var removed = work.pools[pool].candidates.splice(w.i, 1)[0];
+    await beginInline(pool, { kind: 'delete', anchor: candId,
+      summary: '删除候选 ' + candTarget(removed) }, w.base, work);
+  }
+
+  // 新增：目录项 → 链尾 push，priority = maxP+1（承 mpEditAddCandidate）
+  async function doMpInlineAdd(pool, spec) {
+    if (!spec) return;
+    if (!_state.def) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return;
+    }
+    var cat = await ensureCatalog();
+    if (!cat) {
+      UI.toast('目录不可用 — 无法新增候选', 'error');
+      return;
+    }
+    var base = _state.def.raw ? deepCopy(_state.def.raw)
+      : { schema_version: 1, pools: {} };
+    if (!base.pools || typeof base.pools !== 'object') base.pools = {};
+    if (!base.pools[pool] || !Array.isArray(base.pools[pool].candidates)) {
+      UI.toast('候选不存在：' + pool, 'error');
+      return;
+    }
+    var work = deepCopy(base);
+    var cs = work.pools[pool].candidates;
+    var maxP = cs.reduce(function (m, c) {
+      return Math.max(m, c.priority || 0);
+    }, 0);
+    var id = mpMintCandidateId();
+    var c = candFromCatalogValue(spec, id, _catalog);
+    c.priority = maxP + 1;   // 链尾 = 最低优先级
+    cs.push(c);
+    await beginInline(pool, { kind: 'add', anchor: null,
+      summary: '新增候选 ' + candTarget(c) + ' (P' + c.priority + ')' },
+      base, work);
+  }
+
+  // Task 4：高级面板开合（展开态进 structSig → 开合即重建，Ruling 3）
+  async function doMpParamsToggle(pool) {
+    if (!pool) return;
+    if (_paramsOpen[pool]) delete _paramsOpen[pool];
+    else _paramsOpen[pool] = true;
+    await renderModelPools();
+  }
+
+  // 池级基底（param 会话）：raw 深拷贝 + 池存在性检查（无候选查找 —
+  // 承 inlineWorkBase 头部语义，候选定位是候选级动作专属）
+  function inlinePoolBase(pool) {
+    if (!_state.def) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return null;
+    }
+    var base = _state.def.raw ? deepCopy(_state.def.raw)
+      : { schema_version: 1, pools: {} };
+    if (!base.pools || typeof base.pools !== 'object') base.pools = {};
+    if (!base.pools[pool]) {
+      UI.toast('池不存在：' + pool, 'error');
+      return null;
+    }
+    return base;
+  }
+
+  // Task 4：池参数（高级面板 预览钮）— 读面板输入（或显式 overrides，
+  // 单测直驱路径）→ work 变更 → param 会话（anchor=null → diff 条池底）。
+  // summary 只列变更项 旧→新；数字解析失败/字段未变不写入。
+  // 应用走同一 CAS 门禁（doMpInlineApply）。
+  async function doMpInlineParams(pool, overrides) {
+    var base = inlinePoolBase(pool);
+    if (!base) return;
+    var wp = base.pools[pool];
+    var panel = (typeof document !== 'undefined' && document.querySelector)
+      ? document.querySelector('[data-mp-params="' + pool + '"]') : null;
+    var read = function (name) {
+      if (overrides && Object.prototype.hasOwnProperty.call(overrides, name))
+        return overrides[name];
+      if (panel) {
+        var el = panel.querySelector('[data-mp-param="' + name + '"]');
+        if (el) return name === 'accept_declared' ? !!el.checked : el.value;
+      }
+      return undefined;
+    };
+    var toNum = function (v) {
+      var n = parseInt(v, 10);
+      return isNaN(n) ? undefined : n;
+    };
+    var changes = [];
+    var ma = toNum(read('max_attempts'));
+    if (ma !== undefined && wp.max_attempts !== ma) {
+      changes.push('max_attempts ' + wp.max_attempts + ' → ' + ma);
+      wp.max_attempts = ma;
+    }
+    var dm = toNum(read('deadline_ms'));
+    if (dm !== undefined && wp.deadline_ms !== dm) {
+      changes.push('deadline_ms ' + wp.deadline_ms + ' → ' + dm);
+      wp.deadline_ms = dm;
+    }
+    var ad = read('accept_declared');
+    if (typeof ad === 'boolean' && !!wp.accept_declared !== ad) {
+      changes.push('accept_declared ' + (wp.accept_declared ? 'true' : 'false')
+        + ' → ' + (ad ? 'true' : 'false'));
+      wp.accept_declared = ad;
+    }
+    await beginInline(pool, { kind: 'param', anchor: null,
+      summary: changes.length ? '池参数：' + changes.join('；')
+                              : '池参数：无变更' },
+      base, base);
+  }
+
+  async function doMpInlineApply() {
+    if (!_inline) return;
+    if (!_inline.validated) {
+      UI.toast('请先通过预览，再应用', 'error');
+      return;
+    }
+    var session = _inline;   // 会话令牌：在途时可能被取消/重选
+    var poolName = session.pool;
+    var body = deepCopy(session.work);
+    body.expected_revision = session.base_revision;
+    markBusy(poolName);      // B2：应用在途骨架态
+    try {
+      var res, d = null;
+      try {
+        res = await fetch(UPDATE_URL, {
+          method: 'POST', headers: UI.adminHeaders(),
+          body: JSON.stringify(body),
+        });
+        try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      } finally {
+        clearBusy(poolName);   // B2：响应到达即清（分支渲染前）
+      }
+      if (_inline !== session) {
+        // 陈旧完成：请求已发出并生效，但行内会话已换 — 只提示 + 刷新
+        if (res.ok) {
+          UI.toast('已更新 iff/' + poolName, 'ok');
+          await renderModelPools();
+        }
+        return;
+      }
+      if (res.ok) {
+        // 回滚机制已删（2026-11-03 用户裁决）：单动作小影响面 + 可反向
+        // 操作撤销，独立「回滚上次编辑」不再提供
+        _inline = null;
+        _catalog = null;   // 配置已变 → 目录缓存失效，下次手势重取
+        clearActionError();
+        UI.toast('已更新 iff/' + poolName, 'ok');
+        await renderModelPools();
+        return;
+      }
+      if (res.status === 409) {
+        // 基点过期：本 work 不可再应用（重试仍 409）— 横幅引导基于最新
+        // 配置重新选择；diff 条保留供对照
+        await setActionError('配置已被其他修改更新（冲突）',
+          '已刷新，请重新选择替换目标',
+          {label: '重新选择', run: function () {
+             _inline = null;
+             return renderModelPools();
+           }});
+        UI.toast('配置已被其他修改更新（冲突），请重新选择', 'error');
+        await renderModelPools();
+        return;
+      }
+      var msg = (d && d.error) || ('更新失败 · HTTP ' + res.status);
+      UI.toast(msg, 'error');
+      await setActionError(msg, null,
+        {label: '重试', run: function () { return doMpInlineApply(); }});
+    } catch (e) {
+      UI.toast('更新请求异常：' + (e && e.message), 'error');
+      await setActionError('更新请求异常：' + (e && e.message), null,
+        {label: '重试', run: function () { return doMpInlineApply(); }});
+    }
+  }
+
+  async function doMpInlineCancel() {
+    if (!_inline) return;
+    _inline = null;
+    await renderModelPools();
+  }
+
+  /* ── 三段式编辑器（Task 6）：编辑 → 预览 → 应用/回滚 ── */
+
+  function deepCopy(o) { return JSON.parse(JSON.stringify(o)); }
+
+  // 默认池骨架（编辑器新建池 / 向导创建共用）
+  function newPoolSkeleton() {
+    return {
+      enabled: true, strategy: 'priority',
+      allowed_locations: ['local', 'cloud'],
+      accept_declared: true, allow_cross_location: false,
+      max_attempts: 2, deadline_ms: 60000, candidates: [],
+    };
+  }
+
+  // 候选目录（best-effort：拉取失败 → 手填降级，编辑器不因此不可用）
+  /* 候选目录（v7.1.2）：唯一数据源 = GET /admin/model-pools/catalog。
+     旧版前端自行刮 /models 与 /admin/cloud/providers 逆向猜 schema，
+     云目录曾因字段不符静默断掉 — 目录是池域概念，由后端权威构建。 */
+  async function fetchCatalog() {
+    var r = await fetch(CATALOG_URL, { headers: UI.adminHeaders() });
+    if (!r.ok) return null;
+    var d = await r.json();
+    if (!d || !Array.isArray(d.local) || !Array.isArray(d.cloud)) return null;
+    // 派生选择键（HTML select value）：'local:<served_name>' /
+    // 'cloud:<provider>/<model_id>'；index 供候选生成查协议/能力
+    var index = {};
+    d.local.forEach(function (e) {
+      e._value = 'local:' + e.name;
+      index[e._value] = e;
+    });
+    d.cloud.forEach(function (e) {
+      e._value = 'cloud:' + e.provider + '/' + e.model_id;
+      index[e._value] = e;
+    });
+    d.localValues = d.local.map(function (e) { return e._value; });
+    d.cloudValues = d.cloud.map(function (e) { return e._value; });
+    d.index = index;
+    return d;
+  }
+
+  // 候选目录消费形态：字符串数组（下拉）+ index（候选生成）+ 完整条目
+  // （local/cloud — cardDefault 角色预填启发式读 active/context_window；
+  // 终审 I1：裁剪掉 local 曾让四卡预填全部塌到「首个云」）
+  async function fetchCandidateCatalog() {
+    var cat = await fetchCatalog();
+    if (!cat) return null;
+    return { localValues: cat.localValues, cloudValues: cat.cloudValues,
+             index: cat.index, local: cat.local, cloud: cat.cloud };
+  }
+
+  // 候选 id 生成：时间戳 + 随机后缀。候选 id 命名空间自 v7.7.1 起跨池全局
+  // （服务端全局唯一校验），纯 Date.now() 在同毫秒批量/程序化添加时可碰撞
+  // 跨池 → 追加随机段保唯一（非安全用途，Math.random 足够；万一仍碰撞由
+  // 服务端 load_pools_dict 全局唯一校验兜底拒绝）。
+  function mpMintCandidateId() {
+    return 'cand-' + Date.now().toString(36) + '-' +
+           Math.random().toString(36).slice(2, 8);
+  }
+
+  // 目录项 → 候选对象（'local:qwen-small' / 'cloud:prov/model-id'）
+  // 7.9.0：能力归模型 — 候选不再携带 features（池 = 纯路由表：
+  // 模型引用 + 优先级）；vision 由模型本体声明，不经池候选
+  function candFromCatalogValue(spec, id, catalog) {
+    var entry = (catalog && catalog.index) ? catalog.index[spec] : null;
+    // 协议来自目录（云=发现结果，本地=引擎映射）；目录缺失时保守
+    // 只声明 openai（declared 态，证据系统可探实）
+    var protocols = (entry && entry.protocols) || ['openai'];
+    var i = spec.indexOf(':');
+    var kind = spec.slice(0, i);
+    var target = spec.slice(i + 1);
+    if (kind === 'cloud') {
+      var j = target.indexOf('/');
+      return { id: id, kind: 'cloud', provider: target.slice(0, j),
+               model_id: target.slice(j + 1),
+               declared_protocols: protocols };
+    }
+    return { id: id, kind: 'local', model_name: target,
+             declared_protocols: protocols };
+  }
+
+  // 接入片段：#mpModal 只承载 doMpSnippet 的复制钮（编辑器已退役 2026-11-03）
+  function onModalClick(ev) {
+    var t = ev.target;
+    if (!t || !t.getAttribute) return;
+    var cp = t.getAttribute('data-mp-copy');
+    if (cp) { doMpSnippetCopy(cp); return; }
+  }
+
+  var modal = $('mpModal');
+  if (modal && typeof modal.addEventListener === 'function') {
+    modal.addEventListener('click', onModalClick);
+  }
+
+  /* ── 事件委托：mpPools 上 checkbox change → doMpToggle（无 inline onclick） ── */
+  function onBoxChange(ev) {
+    var t = ev.target;
+    if (!t || !t.getAttribute) return;
+    var pool = t.getAttribute('data-mp-pool');
+    if (pool) { doMpToggle(pool, !!t.checked); return; }
+    // T5：未配置卡下拉 → 建池会话（空值=占位项，忽略）
+    var cfgPool = t.getAttribute('data-mp-config-pool');
+    if (cfgPool && t.value) { doMpConfigSelect(cfgPool, t.value); return; }
+    var inl = t.getAttribute('data-mp-inline-replace');
+    if (inl && t.value) {
+      var bar = inl.split('|');   // 'pool|candId'
+      doMpInlineSelect(bar[0], bar[1], t.value);
+      return;
+    }
+    // 单动作内联：新增候选（目录下拉；空值=占位项，忽略）
+    var addPool = t.getAttribute('data-mp-inline-add');
+    if (addPool && t.value) { doMpInlineAdd(addPool, t.value); return; }
+  }
+
+  /* ── 接入片段（Task 8）：客户端复制即用代码 ── */
+
+  var _snippet = null;   // {pool, openai, anthropic} — copy 按钮的文本源
+
+  function snippetText(pool, proto) {
+    var host = '127.0.0.1';
+    var scheme = 'http:';
+    try {
+      if (typeof location !== 'undefined' && location) {
+        if (location.hostname) host = location.hostname;
+        // 协议跟随 dashboard 自身来源：反代 TLS 终结时片段保持 https，
+        // 不把已加密的管理面降级成明文 http
+        if (location.protocol) scheme = location.protocol;
+      }
+    } catch (e) { /* 非浏览器环境 → 缺省本机 http */ }
+    var base = scheme + '//' + host + ':8999';
+    // model 字面量用 JSON.stringify 生成（Python 兼容转义）：池名含引号/
+    // 反斜杠/换行也只是一个完整字符串参数，无法注入到复制的代码（安全评审）
+    var modelLit = JSON.stringify('iff/' + pool);
+    if (proto === 'anthropic') {
+      return 'from anthropic import Anthropic\n\n'
+        + 'client = Anthropic(\n'
+        + '    base_url=' + JSON.stringify(base) + ',   # 裸端口，不要加 /v1\n'
+        + '    api_key="<你的 IFF API key>",\n'
+        + ')\n'
+        + 'resp = client.messages.create(\n'
+        + '    model=' + modelLit + ',\n'
+        + '    max_tokens=1024,\n'
+        + '    messages=[{"role": "user", "content": "你好"}],\n'
+        + ')\n'
+        + 'print(resp.content[0].text)';
+    }
+    return 'from openai import OpenAI\n\n'
+      + 'client = OpenAI(\n'
+      + '    base_url=' + JSON.stringify(base + '/v1') + ',\n'
+      + '    api_key="<你的 IFF API key>",\n'
+      + ')\n'
+      + 'resp = client.chat.completions.create(\n'
+      + '    model=' + modelLit + ',\n'
+      + '    messages=[{"role": "user", "content": "你好"}],\n'
+      + ')\n'
+      + 'print(resp.choices[0].message.content)';
+  }
+
+  function doMpSnippet(pool) {
+    var modal = $('mpModal');
+    if (!modal) return;
+    var openai = snippetText(pool, 'openai');
+    var anthropic = snippetText(pool, 'anthropic');
+    _snippet = { pool: pool, openai: openai, anthropic: anthropic };
+    modal.innerHTML = '<div class="mp-editor">'
+      + '<div class="mp-editor-hdr"><b class="mono">iff/' + esc(pool)
+      + '</b><span>接入片段 — 复制即用，之后换模型无需改客户端</span></div>'
+      + '<p class="mp-hint">注意：若 API key 配置了 models ACL，需包含'
+      + '<span class="mono">iff/' + esc(pool) + '</span>，否则会 401。</p>'
+      + '<p class="mp-snippet-title">OpenAI 协议</p>'
+      + '<pre class="mp-snippet">' + esc(openai) + '</pre>'
+      + '<button type="button" data-mp-copy="openai">复制 OpenAI 片段</button>'
+      + '<p class="mp-snippet-title">Anthropic 协议</p>'
+      + '<pre class="mp-snippet">' + esc(anthropic) + '</pre>'
+      + '<button type="button" data-mp-copy="anthropic">复制 Anthropic 片段</button>'
+      + '<p class="mp-hint">OpenAI SDK 的 base_url 要带 /v1；Anthropic SDK 用裸端口'
+      + ' — 再加会叠成 /v1/v1。</p>'
+      + '</div>';
+  }
+
+  async function doMpSnippetCopy(proto) {
+    if (!_snippet || !_snippet[proto]) {
+      UI.toast('请先打开接入片段', 'error');
+      return;
+    }
+    try {
+      if (typeof navigator !== 'undefined' && navigator
+          && navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(_snippet[proto]);
+        UI.toast('片段已复制到剪贴板', 'ok');
+      } else {
+        UI.toast('当前环境不支持剪贴板 — 请手动选择文本复制', 'error');
+      }
+    } catch (e) {
+      UI.toast('复制失败：' + (e && e.message), 'error');
+    }
+  }
+
+  function onBoxClick(ev) {
+    var t = ev.target;
+    if (!t || !t.getAttribute) return;
+    // A3：行动横幅（重试原操作 / 关闭）
+    if (t.getAttribute('data-mp-banner-action')) { doMpBannerAction(); return; }
+    if (t.getAttribute('data-mp-banner-dismiss')) { doMpBannerDismiss(); return; }
+    // A2：行内 diff 条（应用 / 撤销）
+    if (t.getAttribute('data-mp-inline-apply')) { doMpInlineApply(); return; }
+    if (t.getAttribute('data-mp-inline-cancel')) { doMpInlineCancel(); return; }
+    // 单动作内联：候选卡动作行 [↑][↓][删除]
+    var op = t.getAttribute('data-mp-cand-op');
+    if (op) {
+      var cand = t.getAttribute('data-mp-cand');
+      var pool = t.getAttribute('data-mp-pool');
+      if (op === 'del' && cand && pool) { doMpInlineDelete(pool, cand); return; }
+      if ((op === 'up' || op === 'down') && cand && pool) {
+        doMpInlineMove(pool, cand, op);
+        return;
+      }
+    }
+    // Task 4：高级面板开合 + 面板内预览
+    var pt = t.getAttribute('data-mp-params-toggle');
+    if (pt) { doMpParamsToggle(pt); return; }
+    var pp = t.getAttribute('data-mp-params-preview');
+    if (pp) { doMpInlineParams(pp); return; }
+    var snip = t.getAttribute('data-mp-snippet');
+    if (snip) { doMpSnippet(snip); return; }
+    // C2：故障时间线开合（展开态进 sig → 重建出轴/收起轴）
+    var tlPool = t.getAttribute('data-mp-tl-toggle');
+    if (tlPool) { doMpTimelineToggle(tlPool); return; }
+    // T5：树行点击 → C2 行内诊断（target 可能是行内 span → closest 爬行）
+    var treeRow = (typeof t.closest === 'function')
+      ? t.closest('[data-mp-tree-pool]') : null;
+    if (treeRow) {
+      doMpTreeDiag(treeRow.getAttribute('data-mp-tree-pool'));
+      return;
+    }
+    // C4：劣化引导条（查看回退链 / 关闭）
+    var dgView = t.getAttribute('data-mp-degrade-view');
+    if (dgView) { doMpDegradeView(dgView); return; }
+    var dgDismiss = t.getAttribute('data-mp-degrade-dismiss');
+    if (dgDismiss) { doMpDegradeDismiss(dgDismiss); return; }
+  }
+
+  var box = $('mpPools');
+  if (box && typeof box.addEventListener === 'function') {
+    box.addEventListener('change', onBoxChange);
+    box.addEventListener('click', onBoxClick);
+    // A2 目录惰性预热（Task 1 裁决）：鼠标掠过/键盘聚焦面板即拉取，
+    // 用户点开下拉前选项已就绪 — 普通渲染/轮询不产生目录请求
+    box.addEventListener('mouseover', function () { primeInline(); });
+    box.addEventListener('focusin', function () { primeInline(); });
+  }
+
+  /* ── B4 键盘流（UI/UX P2 Task 4）：E 进编辑 / Esc 分级退出 ──
+     仅本 tab 激活、焦点不在表单控件、无修饰键时生效；
+     向导/成果卡在屏时忽略（那里没有池卡上下文）。 */
+  function onKeyDown(ev) {
+    if (!ev || !ev.key) return;
+    if (window.store && typeof window.store.get === 'function'
+        && window.store.get('tab_active') !== 'tab-model-pools') return;
+    var t = ev.target;
+    if (t && t.tagName
+        && ['INPUT', 'SELECT', 'TEXTAREA']
+            .indexOf(t.tagName.toUpperCase()) >= 0) return;
+    if (ev.key === 'Escape') {
+      if (_inline) return doMpInlineCancel();   // 一级：行内 diff 条
+      // 二级：收起高级面板（展开态进 sig → 收起即重建）
+      var opened = Object.keys(_paramsOpen);
+      if (opened.length) {
+        opened.forEach(function (p) { delete _paramsOpen[p]; });
+        renderModelPools();
+        return;
+      }
+      return;
+    }
+    if ((ev.key === 'e' || ev.key === 'E')
+        && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+      if (!_state.def) return;
+      var card = (t && typeof t.closest === 'function')
+        ? t.closest('[data-mp-card]') : null;
+      var pool = (card && typeof card.getAttribute === 'function')
+        ? card.getAttribute('data-mp-card') : null;
+      if (pool) return doMpParamsToggle(pool);   // E = 展开/收起高级面板
+    }
+  }
+
+  if (typeof document !== 'undefined'
+      && typeof document.addEventListener === 'function') {
+    document.addEventListener('keydown', onKeyDown);
+  }
+
+  /* ── 5s 轮询（spec §6）：与首屏同一刷新函数（定义+状态+运行态合并拉取）。
+     store.js 的周期快照不触发 tabRenderers，故本模块自持定时器；
+     页面隐藏 / 非本 TAB / 向导开启（避免清掉选择框）时跳过。 ── */
+  var _pollStarted = false;
+
+  function pollTick() {
+    try {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (window.store && typeof window.store.get === 'function'
+          && window.store.get('tab_active') !== 'tab-model-pools') return;
+      return renderModelPools();   // 返回 promise 供测试/调用方等待
+    } catch (e) { /* 轮询失败静默 — 下个滴答重试 */ }
+  }
+
+  function startRuntimePolling() {
+    if (_pollStarted || typeof setInterval !== 'function') return;
+    _pollStarted = true;
+    setInterval(pollTick, 5000);
+  }
+
+  startRuntimePolling();
+
+  /* ── 注册 ── */
+  window.tabRenderers = window.tabRenderers || {};
+  window.tabRenderers['tab-model-pools'] = renderModelPools;
+  window.renderModelPools = renderModelPools;
+  window.mpLinkState = linkState;
+  window.mpTreeHtml = treeHtml;
+  window.mpCardsHtml = cardsHtml;
+  window.doMpToggle = doMpToggle;
+  window.doMpBannerAction = doMpBannerAction;
+  window.doMpBannerDismiss = doMpBannerDismiss;
+  window.doMpInlineSelect = doMpInlineSelect;
+  window.doMpInlineApply = doMpInlineApply;
+  window.doMpInlineCancel = doMpInlineCancel;
+  window.doMpInlineMove = doMpInlineMove;
+  window.doMpInlineDelete = doMpInlineDelete;
+  window.doMpInlineAdd = doMpInlineAdd;
+  window.doMpParamsToggle = doMpParamsToggle;
+  window.doMpInlineParams = doMpInlineParams;
+  window.doMpConfigSelect = doMpConfigSelect;
+  window.doMpTreeDiag = doMpTreeDiag;
+  window.mpPrimeInline = primeInline;
+  window.doMpTimelineToggle = doMpTimelineToggle;
+  window.doMpDegradeView = doMpDegradeView;
+  window.doMpDegradeDismiss = doMpDegradeDismiss;
+  window.doMpSnippet = doMpSnippet;
+  window.doMpSnippetCopy = doMpSnippetCopy;
+})();

@@ -1,0 +1,65 @@
+<div class="tab-content" id="tab-anomaly">
+  <!-- 异常事件：结构化事件表 + 类别/严重度过滤 + 全文搜索（anomaly.js 渲染，无 inline onclick） -->
+  <div class="if-card" id="anomCard">
+    <div class="if-card-hdr">
+      <span class="if-card-title">异常</span>
+      <span class="if-card-sub">环缓冲 · 结构化事件表</span>
+    </div>
+    <div class="if-card-body">
+      <!-- 过滤栏：类别/严重度（服务端 query 参数）+ 全文搜索（客户端 200ms debounce） -->
+      <div class="anom-filterbar">
+        <select class="if-field-select" id="anomCatFilter" aria-label="按类别过滤">
+          <option value="">全部类别</option>
+          <option value="routing">routing</option>
+          <option value="model">model</option>
+          <option value="auth">auth</option>
+          <option value="config">config</option>
+          <option value="cloud">cloud</option>
+        </select>
+        <select class="if-field-select" id="anomSevFilter" aria-label="按严重度过滤">
+          <option value="">全部严重度</option>
+          <option value="info">info</option>
+          <option value="warning">warning</option>
+          <option value="error">error</option>
+          <option value="critical">critical</option>
+        </select>
+        <input class="if-field-input" id="anomSearch" type="search"
+               placeholder="搜索 消息 / 模型 / 类别…"
+               aria-label="全文搜索" autocomplete="off">
+        <span class="anom-count mono" id="anomCount">0 条</span>
+      </div>
+      <!-- 严重度摘要：4 等宽 tile（点击 = 应用该严重度过滤，复用服务端过滤）。
+           给"原始事件表"一个焦点与层级——先看分布，再钻表。 -->
+      <div class="anom-summary" id="anomSummary">
+        <button type="button" class="anom-sum sev-crit" data-sev="critical">
+          <span class="anom-sum-n mono" id="anomSumCrit">—</span><span class="anom-sum-l">critical</span>
+        </button>
+        <button type="button" class="anom-sum sev-err" data-sev="error">
+          <span class="anom-sum-n mono" id="anomSumErr">—</span><span class="anom-sum-l">error</span>
+        </button>
+        <button type="button" class="anom-sum sev-warn" data-sev="warning">
+          <span class="anom-sum-n mono" id="anomSumWarn">—</span><span class="anom-sum-l">warning</span>
+        </button>
+        <button type="button" class="anom-sum sev-info" data-sev="info">
+          <span class="anom-sum-n mono" id="anomSumInfo">—</span><span class="anom-sum-l">info</span>
+        </button>
+      </div>
+      <!-- 事件表：时间 / 严重度（图标+标签）/ 类别 / 消息（critical 行整行高亮 row-crit） -->
+      <div class="cp-table-wrap">
+        <table class="if-table" id="anomTable">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>严重度</th>
+              <th>类别</th>
+              <th>消息</th>
+            </tr>
+          </thead>
+          <tbody id="anomTbody">
+            <tr class="anom-skel"><td colspan="4"><div class="skeleton"><div class="skeleton-row"></div></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
