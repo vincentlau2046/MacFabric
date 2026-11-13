@@ -53,10 +53,18 @@
 | 端到端验证 | ✅ 网关 :8999 打 /v1/messages：native 透传 ✅，translation 桥非流式+流式 ✅（临时翻转开关实测后恢复） |
 | 单元测试 | ✅ 31/31 通过 |
 
-### P1 剩余
+### 已落地（第三片：OCR + 打包）
 
-- ocr-helper Swift CLI（Vision framework）
-- launchd/uv 打包、nvidia-smi reset 文案门禁（cli.py）、power_stats macOS 化
+| 项 | 结果 |
+|---|---|
+| `tools/ocr-helper.swift` | ✅ Vision framework OCR CLI（中英准确级识别），swiftc 编译通过，`--selftest` 冒烟通过（渲染"MacFabric OCR 2026"→识别回读） |
+| launchd/uv 打包 | ✅ `scripts/macfabric-gateway.sh`（唯一入口）+ `scripts/install-launchd.sh`（install/uninstall/status，RunAtLoad+KeepAlive 重启自愈）。**未激活**：开机持久化需用户亲自执行 `scripts/install-launchd.sh install` 批准 |
+| 最终回归 | ✅ 网关重启后 OpenAI 通道 content 正常返回（"7"），翻译桥/透传双模式均验证过 |
+
+### P1 剩余（低优先，不阻塞 P2）
+
+- cli.py gpu-clear 文案 macOS 化（仅提示文案，无功能影响）
+- power_stats macOS 化（功耗曲线，Mac 无 nvidia-smi 口径，需 IOKit 探索）
 
 ## P2 原生 App — ⏳ 未开始
 
