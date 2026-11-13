@@ -66,7 +66,22 @@
 - cli.py gpu-clear 文案 macOS 化（仅提示文案，无功能影响）
 - power_stats macOS 化（功耗曲线，Mac 无 nvidia-smi 口径，需 IOKit 探索）
 
-## P2 原生 App — ⏳ 未开始
+## P2 原生 App — 🔜 骨架完成（2026-11-14 凌晨）
+
+| 项 | 结果 |
+|---|---|
+| SwiftUI App（无 Xcode） | ✅ `macfabric-app/build.sh` → swiftc 直编 `build/MacFabric.app`。绕开 CLT 缺 `SwiftUIMacros` 宏插件的硬限制：AppKit 引导（NSStatusItem + NSWindow）承载 SwiftUI，状态集中 ObservableObject + 手动 Binding |
+| 界面 | ✅ 菜单栏常驻（网关状态图标）+ 三页：总览（统一内存织物条 + 网关状态）、模型服务（活服务列表）、本地推理（发消息走网关 OpenAI 通道） |
+| 数据源 | ✅ `/api/snapshot` 3s 轮询（统一内存口径 B=RAM−8G 已直观呈现：实测 22.9/28.7GB） |
+| 冒烟 | ✅ 启动存活、退出干净 |
+
+**启动方式**：`open macfabric-app/build/MacFabric.app`（关窗后菜单栏常驻，菜单栏图标退出）。
+
+### P2 剩余（下一晚）
+
+- 模型池页（池树 + 候选链排序拖拽）、监控台页（Swift Charts 曲线）
+- 模型服务页操作（switch/stop 按钮、内存不足弹窗、首启向导）
+- DMG 打包在 P4
 
 ## P3 能力包 — ⏳ 未开始
 
