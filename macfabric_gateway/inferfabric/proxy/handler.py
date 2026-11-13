@@ -716,9 +716,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if _selected_port:
                 model_obj = dataclasses.replace(model_obj, port=_selected_port)
 
-        status = forwarder.forward_anthropic_local(
-            self, pm, data, auth_header, model_obj, original_model
-        )
+        # MACFABRIC P1: 无原生 /v1/messages 的引擎走翻译桥（Anthropic→OpenAI）。
+        if not getattr(model_obj, "anthropic_native", False):
+            from inferfabric.proxy.anthropic_bridge import forward_anthropic_via_openai
+            status = forward_anthropic_via_openai(
+                self, pm, data, auth_header, model_obj, original_model
+            )
+        else:
+            status = forwarder.forward_anthropic_local(
+                self, pm, data, auth_header, model_obj, original_model
+            )
         try:
             if status is not None:
                 usage = getattr(self, '_usage', {}) or {}

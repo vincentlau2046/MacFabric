@@ -8,6 +8,7 @@ gpu_role: shared
 model_type: llm
 peak_vram_mb: 3100
 served_name: qwen3-4b
+anthropic_native: true   # llama-server b12361 原生 /v1/messages → 透传（翻译桥供 vLLM/MLX 等用）
 llama_cpp:
   model_path: /Users/Apple/Documents/MacFabric/models/Qwen3-4B-Q4_K_M.gguf
   binary_path: /Users/Apple/Documents/MacFabric/engines/llama-b12361/llama-server

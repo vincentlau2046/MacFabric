@@ -42,9 +42,19 @@
 | model 回显修复 | ✅ `--alias qwen3-4b --jinja`，响应 `model` 字段规范；`enable_thinking:false` 经 chat_template_kwargs 生效 |
 | 端到端回归 | ✅ switch 6.1s healthy，OpenAI/Anthropic 双协议仍通 |
 
+### 已落地（第二片：翻译层）
+
+| 项 | 结果 |
+|---|---|
+| `anthropic_translate.py` 纯翻译层 | ✅ 请求（system/多模态/tools/tool_use/tool_result/tool_choice/stop/stream_options）+ 非流式响应 + 流式 SSE 事件机（thinking/text/tool_use 三类块，增亮聚合） |
+| `proxy/anthropic_bridge.py` 桥接 | ✅ 网关内旁路：Anthropic 入口 → OpenAI 上游 → 转回 Anthropic（chunked SSE 写回），不动 forwarder 核心 |
+| 配置开关 | ✅ `ModelConfig.anthropic_native`（llama-server=true 透传；vLLM/MLX=false 走桥） |
+| Golden replay 测试 | ✅ 用真实 llama-server 双协议录制件（tests/golden/）回放断言事件序列骨架一致 |
+| 端到端验证 | ✅ 网关 :8999 打 /v1/messages：native 透传 ✅，translation 桥非流式+流式 ✅（临时翻转开关实测后恢复） |
+| 单元测试 | ✅ 31/31 通过 |
+
 ### P1 剩余
 
-- Anthropic→OpenAI 翻译层 + Claude Code golden replay 测试（覆盖无原生 /v1/messages 的引擎）
 - ocr-helper Swift CLI（Vision framework）
 - launchd/uv 打包、nvidia-smi reset 文案门禁（cli.py）、power_stats macOS 化
 

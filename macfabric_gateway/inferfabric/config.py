@@ -441,6 +441,9 @@ class ModelConfig:
 
     type: str = "vllm"  # 'vllm' | 'sglang' | 'comfyui' | 'ollama' | 'llama_cpp' | 'ollama_daemon' | 'tts_server' | 'asr_server'
     deployment: str = ""  # '' (auto-derive) | 'docker' | 'conda' | 'process' — 部署方式显式声明
+    # MACFABRIC P1: 上游引擎是否原生支持 Anthropic /v1/messages。
+    # true → 透传（llama-server b12361）；false → 走 anthropic_bridge 翻译层。
+    anthropic_native: bool = False
     vllm: Optional[VLLMConfig] = None
     sglang: Optional[SGLangConfig] = None
     comfyui: Optional[ComfyUIConfig] = None
@@ -900,6 +903,7 @@ def load_models(models_dir: Path = MODELS_DIR, include_applied: bool = True) -> 
             modality=raw.get("modality", ""),
             replicas=raw.get("replicas", []),
             deployment=raw.get("deployment", ""),
+            anthropic_native=bool(raw.get("anthropic_native", False)),
         )
         # 场景预设（iff tune）: 顶层 presets（内联兜底）+ 源 YAML 路径。
         # active_preset 不从 YAML 读——应用层（APPLIED_SCENARIOS_FILE）是单一来源。
