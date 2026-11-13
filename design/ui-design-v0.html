@@ -1,0 +1,984 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MacFabric 界面设计稿</title>
+<style>
+/* ── 设计计划 ─────────────────────────────────────────────
+   概念：织物（Fabric）——每个常驻模型是织进统一内存的一根线，
+   内存织物条是全局心脏，出现在总览/菜单栏/拒绝弹窗三处。
+   单一暗色视觉世界（macOS 深色，原生质感）。
+   色彩：石墨底 + 织物蓝主色 + 八根能力线色（语义色，非装饰）。
+   字体：系统栈（SF Pro / PingFang SC）——设计稿本身就要像原生 App。
+   布局：每屏一个 macOS 窗口高保真稿 + 侧注设计决策。
+────────────────────────────────────────────────────────── */
+:root {
+  color-scheme: dark;
+  --desk: #101014;          /* 页面桌面 */
+  --panel: #17171c;         /* 窗口面板 */
+  --chrome: #1e1e25;        /* 窗口标题栏 */
+  --glass: rgba(255,255,255,.055);
+  --glass2: rgba(255,255,255,.09);
+  --line: rgba(255,255,255,.10);
+  --line2: rgba(255,255,255,.16);
+  --ink: #f5f5f7;
+  --dim: #a3a3ad;
+  --faint: #6d6d78;
+  --accent: #5f7dff;        /* 织物蓝 */
+  --accent-soft: rgba(95,125,255,.16);
+  --ok: #32d74b; --warn: #ffd60a; --err: #ff453a; --info: #64b5ff;
+  /* 能力线色（八根线 = 八类能力） */
+  --th-judge:#c79bff; --th-llm:#7a8cff; --th-vl:#ff7fa3; --th-emb:#4fd8b8;
+  --th-rerank:#66b8ff; --th-asr:#ffc266; --th-tts:#ff8f6b; --th-ocr:#a8e063; --th-img:#6fe0e0;
+  --r-lg: 14px; --r-md: 10px; --r-sm: 7px;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--desk); color: var(--ink);
+  font: 15px/1.65 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI", "Microsoft YaHei", sans-serif;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 72px;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1128px; margin: 0 auto; }
+.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; }
+
+/* ── 开场 ── */
+.hero { padding: 26px 0 8px; }
+.hero h1 { font-size: 34px; font-weight: 700; letter-spacing: -.02em; margin: 0 0 6px; }
+.hero p.lede { color: var(--dim); max-width: 62ch; margin: 0; }
+.hero p.lede b { color: var(--ink); font-weight: 600; }
+
+/* ── 分区 ── */
+.sec { margin-top: 64px; }
+.sec > h2 { font-size: 21px; font-weight: 700; letter-spacing: -.01em; margin: 0 0 4px; }
+.sec > p.sub { color: var(--dim); margin: 0 0 20px; max-width: 66ch; }
+.screen { margin-top: 26px; }
+.screen h3 { font-size: 15px; font-weight: 600; color: var(--ink); margin: 0 0 10px; }
+.screen h3 .tag { color: var(--faint); font-weight: 400; }
+
+/* 设计决策注记 */
+.notes { margin: 14px 0 0; padding: 0; list-style: none; max-width: 78ch; }
+.notes li { display: flex; gap: 9px; padding: 3px 0; color: var(--dim); font-size: 13.5px; }
+.notes li::before { content: "▪"; color: var(--accent); flex: 0 0 auto; line-height: 1.65; }
+.notes li b { color: var(--ink); font-weight: 600; }
+
+/* ── macOS 窗口骨架 ── */
+.sc { overflow-x: auto; padding: 4px 2px 8px; }
+.win {
+  min-width: 860px; border-radius: var(--r-lg); overflow: hidden;
+  border: 1px solid var(--line2); background: var(--panel);
+  box-shadow: 0 30px 80px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.4);
+}
+.tbar {
+  display: flex; align-items: center; padding: 11px 14px;
+  background: var(--chrome); border-bottom: 1px solid var(--line);
+}
+.dots { display: flex; gap: 8px; }
+.dots i { width: 12px; height: 12px; border-radius: 50%; }
+.dots i:nth-child(1){background:#ff5f57}.dots i:nth-child(2){background:#febc2e}.dots i:nth-child(3){background:#28c840}
+.ttl { flex: 1; text-align: center; font-size: 13px; color: var(--dim); margin-right: 48px; }
+.wbody { display: flex; min-height: 420px; }
+
+/* 侧栏 */
+.sbar { width: 188px; flex: 0 0 auto; background: rgba(255,255,255,.028); border-right: 1px solid var(--line); padding: 12px 10px; }
+.sbar .grp { font-size: 11px; color: var(--faint); padding: 10px 10px 4px; letter-spacing: .04em; }
+.sit { display: flex; align-items: center; gap: 9px; padding: 6px 10px; border-radius: var(--r-sm); color: var(--dim); font-size: 13.5px; }
+.sit.on { background: var(--accent-soft); color: var(--ink); }
+.sit i { width: 8px; height: 8px; border-radius: 3px; background: var(--faint); flex: 0 0 auto; }
+.sit.on i { background: var(--accent); }
+
+/* 主区 */
+.mn { flex: 1; min-width: 0; padding: 18px 20px; }
+.mn h4 { margin: 0 0 12px; font-size: 16px; font-weight: 700; }
+
+/* ── 内存织物条（心脏组件）── */
+.weave { display: flex; height: 34px; border-radius: 9px; overflow: hidden; border: 1px solid var(--line2); background: rgba(255,255,255,.035); }
+.wseg { min-width: 7px; box-shadow: inset 2px 0 0 rgba(0,0,0,.4); }
+.wseg.free { background: rgba(255,255,255,.05); }
+.wseg.res { background: repeating-linear-gradient(135deg, rgba(255,255,255,.11) 0 5px, rgba(255,255,255,.02) 5px 10px); box-shadow: inset 2px 0 0 rgba(0,0,0,.4); }
+.wleg { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 9px; font-size: 12px; color: var(--dim); }
+.wleg span { display: inline-flex; align-items: center; gap: 6px; }
+.wleg i { width: 9px; height: 9px; border-radius: 3px; }
+.weave.mini { height: 12px; border-radius: 5px; }
+.wnum { font-size: 12.5px; color: var(--dim); margin-top: 8px; }
+.wnum b { color: var(--ink); }
+
+/* ── 通用元件 ── */
+.card { background: var(--glass); border: 1px solid var(--line); border-radius: var(--r-md); }
+.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--dim); border: 1px solid var(--line); border-radius: 99px; padding: 2px 9px; background: rgba(255,255,255,.03); }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; border-radius: 99px; padding: 2.5px 10px; font-weight: 500; }
+.pill i { width: 7px; height: 7px; border-radius: 50%; }
+.pill.run { background: rgba(50,215,75,.13); color: #6fe87e; } .pill.run i { background: var(--ok); }
+.pill.load { background: rgba(100,181,255,.13); color: #8cc5ff; } .pill.load i { background: var(--info); }
+.pill.sleep { background: rgba(255,214,10,.12); color: #ffe269; } .pill.sleep i { background: var(--warn); }
+.pill.stop { background: rgba(255,255,255,.07); color: var(--dim); } .pill.stop i { background: var(--faint); }
+.pill.errp { background: rgba(255,69,58,.14); color: #ff8a80; } .pill.errp i { background: var(--err); }
+.btn { display: inline-flex; align-items: center; font-size: 12.5px; padding: 5px 13px; border-radius: var(--r-sm); border: 1px solid var(--line2); color: var(--ink); background: rgba(255,255,255,.06); }
+.btn.pri { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.btn.sm { padding: 3px 9px; font-size: 11.5px; }
+.dotc { width: 10px; height: 10px; border-radius: 4px; flex: 0 0 auto; }
+
+/* 总览·能力卡格 */
+.cgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.ccard { padding: 13px 14px; display: flex; flex-direction: column; gap: 7px; }
+.ccard .nm { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 8px; }
+.ccard .md { font-size: 12px; color: var(--dim); }
+.ccard .ft { display: flex; align-items: center; justify-content: space-between; margin-top: auto; }
+.statrow { display: flex; gap: 12px; margin: 0 0 16px; }
+.stat { flex: 1; padding: 10px 14px; }
+.stat .v { font-size: 19px; font-weight: 700; letter-spacing: -.01em; }
+.stat .k { font-size: 11.5px; color: var(--faint); }
+
+/* 推理·模型行 */
+.mrow { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.mrow + .mrow { margin-top: 9px; }
+.mrow .nm { font-weight: 600; font-size: 13.5px; min-width: 0; }
+.mrow .meta { font-size: 12px; color: var(--faint); }
+.mrow .act { display: flex; gap: 7px; margin-left: auto; flex: 0 0 auto; }
+
+/* 模型池·调用树 */
+.tree { font-size: 13px; }
+.trow { display: flex; align-items: center; gap: 10px; padding: 9px 6px; border-bottom: 1px solid var(--line); }
+.trow:last-child { border-bottom: none; }
+.lk { height: 2px; border-radius: 2px; flex: 0 0 auto; }
+.poolname { font-weight: 600; }
+.cand { display: inline-flex; align-items: center; gap: 7px; padding: 3px 10px; border-radius: 99px; border: 1px solid var(--line); font-size: 12.5px; background: rgba(255,255,255,.03); }
+.cand.live { border-color: rgba(50,215,75,.4); }
+.cnum { color: var(--faint); font-size: 11px; }
+
+/* 监控 */
+.pgrid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 12px; }
+.pane { padding: 14px 16px; }
+.pane h5 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--ink); }
+.pane h5 span { color: var(--faint); font-weight: 400; }
+.bars { display: flex; align-items: flex-end; gap: 7px; height: 96px; }
+.bar { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; border-radius: 4px 4px 0 0; overflow: hidden; }
+.bar .lc { background: var(--accent); }
+.bar .cd { background: rgba(255,255,255,.18); }
+.xaxis { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--faint); margin-top: 6px; }
+.tlog { width: 100%; border-collapse: collapse; font-size: 12px; }
+.tlog th { text-align: left; color: var(--faint); font-weight: 500; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+.tlog td { padding: 5.5px 8px; border-bottom: 1px solid var(--line); color: var(--dim); }
+.tlog td:first-child { color: var(--ink); }
+.tlog tr:last-child td { border-bottom: none; }
+
+/* 能力包 */
+.sgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.scard { padding: 15px 16px; display: flex; flex-direction: column; gap: 6px; }
+.scard .nm { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+.scard .ds { font-size: 12.5px; color: var(--dim); }
+.scard .ft { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+
+/* 设置 */
+.setrow { display: flex; align-items: center; gap: 12px; padding: 12px 4px; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.setrow:last-child { border-bottom: none; }
+.setrow .lb b { display: block; font-weight: 600; }
+.setrow .lb span { font-size: 12px; color: var(--faint); }
+.tgl { margin-left: auto; width: 38px; height: 22px; border-radius: 99px; background: var(--ok); position: relative; flex: 0 0 auto; }
+.tgl::after { content: ""; position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; }
+.tgl.off { background: rgba(255,255,255,.14); }
+.tgl.off::after { right: auto; left: 2px; }
+.path { font-size: 12px; color: var(--dim); background: rgba(255,255,255,.04); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; }
+
+/* 菜单栏 */
+.mbar { display: flex; align-items: center; gap: 18px; height: 30px; padding: 0 14px; background: rgba(28,28,34,.92); border: 1px solid var(--line2); border-radius: 8px; font-size: 13px; color: var(--dim); min-width: 760px; position: relative; }
+.mbar .ap { color: var(--ink); }
+.mitem { position: relative; }
+.mitem.hot { color: var(--ink); font-weight: 600; }
+.mitem.hot .gdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); margin-right: 6px; }
+.drop { position: absolute; top: 34px; right: -40px; width: 300px; background: rgba(38,38,46,.97); border: 1px solid var(--line2); border-radius: 12px; box-shadow: 0 18px 50px rgba(0,0,0,.6); padding: 6px; z-index: 5; }
+.drow { display: flex; align-items: center; gap: 9px; padding: 7px 11px; border-radius: 7px; font-size: 13px; color: var(--ink); }
+.drow.dim { color: var(--dim); }
+.drow.act:hover { background: rgba(255,255,255,.07); }
+.drow .mem { margin-left: auto; color: var(--faint); font-size: 11.5px; }
+.dsep { height: 1px; background: var(--line); margin: 5px 8px; }
+
+/* ── 模型池 v3：系统设置式分组 + 下拉切换的管理器 ── */
+.poolwrap { display: flex; gap: 0; align-items: stretch; }
+.pgroups { flex: 1.5; min-width: 0; padding: 14px 20px; }
+.pinsp { flex: 1; min-width: 0; padding: 14px 20px; border-left: 1px solid var(--line); background: rgba(255,255,255,.022); }
+.poolcard { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: rgba(255,255,255,.03); }
+.poolcard + .poolcard { margin-top: 12px; }
+.phead { display: flex; align-items: center; gap: 9px; padding: 9px 14px; background: rgba(255,255,255,.035); border-bottom: 1px solid var(--line); font-size: 13px; }
+.pname { font-weight: 650; }
+.puse { font-size: 11.5px; color: var(--faint); }
+.psum { margin-left: auto; font-size: 11px; color: var(--faint); }
+.psum.on { color: #6fe87e; }
+.crow2 { display: flex; align-items: center; gap: 10px; padding: 7.5px 14px; font-size: 12.5px; color: var(--dim); }
+.crow2 + .crow2 { border-top: 1px solid var(--line); }
+.crow2 .cnm { color: var(--ink); font-weight: 550; min-width: 0; }
+.crow2.active { background: color-mix(in srgb, var(--tint, #5f7dff) 9%, transparent); box-shadow: inset 2.5px 0 0 var(--tint, #5f7dff); }
+.cdot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); opacity: .45; flex: 0 0 auto; }
+.cdot.on { background: var(--ok); opacity: 1; }
+.cstate { margin-left: auto; font-size: 11px; color: var(--faint); flex: 0 0 auto; }
+.cstate.on { color: #6fe87e; }
+.pnote { font-size: 11px; color: var(--faint); flex: 0 0 auto; }
+.icbtn { width: 22px; height: 22px; border-radius: 6px; border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; color: var(--dim); background: rgba(255,255,255,.04); flex: 0 0 auto; }
+.icbtn.dim { color: var(--faint); border-style: dashed; }
+.prio { width: 20px; height: 20px; border-radius: 6px; background: rgba(255,255,255,.06); border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; color: var(--dim); flex: 0 0 auto; }
+.prow { display: flex; align-items: center; gap: 9px; padding: 8px 2px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.prow:last-of-type { border-bottom: none; }
+.prow .pn { color: var(--ink); font-weight: 550; }
+.prow .act { margin-left: auto; display: flex; gap: 5px; }
+.addrow { margin-top: 8px; display: flex; gap: 9px; align-items: center; padding: 9px 2px; font-size: 12.5px; color: var(--accent); }
+.ptip { font-size: 11.5px; color: var(--faint); margin-top: 12px; }
+.selbox { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line2); border-radius: 7px; padding: 7px 12px; font-size: 13px; background: rgba(255,255,255,.05); }
+.selbox .chev { margin-left: auto; color: var(--faint); font-size: 10px; }
+.pstatic { margin-top: 14px; padding: 10px 14px; border: 1px dashed var(--line2); border-radius: 10px; font-size: 12px; color: var(--faint); line-height: 1.6; }
+.pstatic b { color: var(--dim); font-weight: 600; }
+.prov { display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
+.prov + .prov { border-top: 1px solid var(--line); }
+.prov .pd { width: 26px; height: 26px; border-radius: 8px; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: #fff; }
+.prov .pn { font-weight: 600; font-size: 13px; color: var(--ink); }
+.prov .pm { font-size: 11.5px; color: var(--faint); }
+.prov .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.caps { display: inline-flex; gap: 5px; }
+.capdot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); opacity: .35; }
+.capdot.on { background: var(--accent); opacity: 1; }
+.poolbadge { font-size: 10.5px; color: var(--dim); border: 1px solid var(--line); border-radius: 5px; padding: 1.5px 7px; white-space: nowrap; }
+
+/* ── 模型服务 ── */
+.hubbar { display: flex; align-items: center; gap: 10px; padding: 11px 15px; margin-bottom: 14px; flex-wrap: wrap; }
+.hubbar .url { color: var(--ink); font-size: 13px; }
+.hubbar .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.tabs { display: flex; gap: 6px; }
+.tab { font-size: 11.5px; padding: 3px 12px; border-radius: 99px; border: 1px solid var(--line); color: var(--dim); }
+.tab.on { background: var(--accent-soft); color: var(--ink); border-color: rgba(95,125,255,.4); }
+.hubrow { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: rgba(255,255,255,.03); }
+.hubrow + .hubrow { margin-top: 10px; }
+.hubhead { display: flex; align-items: center; gap: 10px; padding: 10px 14px; }
+.hubhead .hn { font-weight: 600; font-size: 13.5px; }
+.hubhead .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.hubzone { border-top: 1px solid var(--line); background: rgba(0,0,0,.18); }
+.hubzone .zt { font-size: 11px; color: var(--faint); padding: 8px 13px 0; }
+.fld { display: flex; align-items: center; gap: 10px; padding: 6.5px 13px; font-size: 12px; }
+.fld + .fld { border-top: 1px solid rgba(255,255,255,.05); }
+.fld .fk { width: 62px; color: var(--faint); flex: 0 0 auto; }
+.fld .fv { flex: 1; min-width: 0; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fld .cp { font-size: 11px; color: var(--accent); flex: 0 0 auto; }
+.copybtn { font-size: 11.5px; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--line2); color: var(--dim); background: rgba(255,255,255,.04); white-space: nowrap; }
+.copybtn.pri { color: #fff; background: var(--accent); border-color: var(--accent); font-weight: 600; }
+.zfoot { display: flex; align-items: center; gap: 8px; padding: 10px 13px; flex-wrap: wrap; }
+.znote { font-size: 11px; color: var(--faint); margin-left: auto; }
+
+/* 首启向导 */
+.wiz { text-align: center; padding: 26px 30px 30px; }
+.wsteps { display: flex; justify-content: center; gap: 26px; margin: 18px 0 24px; }
+.wstep { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--faint); }
+.wstep .n { width: 22px; height: 22px; border-radius: 50%; border: 1.5px solid var(--line2); display: inline-flex; align-items: center; justify-content: center; font-size: 11.5px; }
+.wstep.done { color: var(--dim); } .wstep.done .n { background: var(--accent); border-color: var(--accent); color: #fff; }
+.wstep.now { color: var(--ink); font-weight: 600; } .wstep.now .n { border-color: var(--accent); color: var(--accent); }
+.wlist { max-width: 460px; margin: 0 auto 22px; text-align: left; }
+.wrow { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+.wrow + .wrow { margin-top: 8px; }
+.wrow .bx { width: 18px; height: 18px; border-radius: 5px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; }
+.wrow .bx.on { background: var(--accent); color: #fff; }
+.wrow .bx.off { border: 1.5px solid var(--line2); }
+.wrow .nm { font-weight: 600; font-size: 13.5px; }
+.wrow .ds { font-size: 12px; color: var(--faint); }
+.wrow .sz { margin-left: auto; color: var(--dim); font-size: 12px; }
+
+/* 拒绝弹窗 */
+.dlg { width: 380px; border-radius: 14px; border: 1px solid var(--line2); background: rgba(40,40,48,.98); box-shadow: 0 22px 60px rgba(0,0,0,.6); padding: 20px 22px 18px; }
+.dlg h5 { margin: 0 0 8px; font-size: 14.5px; }
+.dlg p { margin: 0 0 14px; font-size: 13px; color: var(--dim); }
+.dlg p b { color: var(--ink); }
+.dlg .btns { display: flex; gap: 10px; justify-content: flex-end; }
+
+/* 令牌表 */
+.tok { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tok th { text-align: left; color: var(--faint); font-weight: 500; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.tok td { padding: 7px 10px; border-bottom: 1px solid var(--line); color: var(--dim); }
+.sw { display: inline-flex; align-items: center; gap: 8px; }
+.sw i { width: 13px; height: 13px; border-radius: 4px; flex: 0 0 auto; }
+.pillrow { display: flex; flex-wrap: wrap; gap: 10px; }
+
+/* 页脚导航 */
+.foot { margin-top: 70px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12.5px; }
+
+@media (max-width: 720px) {
+  .cgrid, .sgrid { grid-template-columns: repeat(2, 1fr); }
+  .pgrid { grid-template-columns: 1fr; }
+  .statrow { flex-wrap: wrap; } .stat { flex: 1 1 40%; }
+  .poolwrap { flex-direction: column; }
+  .pinsp { border-left: none; border-top: 1px solid var(--line); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .pill.load i { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .crow2.active .cdot.on { animation: pulse 1.6s ease-in-out infinite; }
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header class="hero">
+  <h1>MacFabric 界面设计稿</h1>
+  <p class="lede">Apple Silicon 上的小模型聚合平台 · 原生 SwiftUI · v0.1 提案。设计概念取自名字本身：<b>织物</b>——每个常驻模型是织进统一内存的一根线，<b>内存织物条</b>是全局心脏，在总览、菜单栏、内存不足弹窗三处以同一组件出现。</p>
+</header>
+
+<!-- ═══ 设计原则 ═══ -->
+<section class="sec">
+  <h2>四条设计原则</h2>
+  <ul class="notes">
+    <li><b>状态即色彩。</b>模型生命周期五态（运行中／加载中／睡眠／已停止／异常）全局只用一套色，任何页面看到同色即同义。</li>
+    <li><b>织物条是心脏。</b>统一内存是这台机器唯一的稀缺资源，预算条常驻总览页顶与菜单栏，内存不足弹窗复用同一组件——用户只需学会读一个东西。</li>
+    <li><b>少即是多。</b>每屏一个主操作；设置不超一屏；v1 没有图表仪表盘堆砌，监控台只回答"谁在耗、耗了多少、快不快"。</li>
+    <li><b>原生材质。</b>跟随系统亮暗、SF Symbols、Liquid Glass 轻磨砂；无 WebView。设计稿以深色呈现，亮色为同构令牌翻转。</li>
+    <li><b>接出去和跑起来一样重要。</b>每个模型自带即拷即用的接入配置——聚合平台的交付物不是界面，是「让别的工具用上这些模型」。</li>
+  </ul>
+</section>
+
+<!-- ═══ 菜单栏 ═══ -->
+<section class="sec">
+  <h2>菜单栏常驻</h2>
+  <p class="sub">聚合平台是基础设施，基础设施要始终在场。状态灯 + 预算微缩条 + 五个运行中模型的即停即睡。</p>
+  <div class="screen">
+    <div class="sc">
+      <div class="mbar">
+        <span class="ap"></span>
+        <span>MacFabric</span><span>文件</span><span>编辑</span><span>显示</span><span>窗口</span><span>帮助</span>
+        <span style="margin-left:auto"></span><span>⌘</span><span>▦</span><span>⌥</span>
+        <span class="mitem hot"><span class="gdot"></span>MacFabric
+          <div class="drop">
+            <div class="drow dim">网关运行中 · 127.0.0.1:8999</div>
+            <div style="padding:7px 11px 4px"><div class="weave mini">
+              <div class="wseg" style="width:5%;background:var(--th-judge)"></div>
+              <div class="wseg" style="width:11%;background:var(--th-llm)"></div>
+              <div class="wseg" style="width:4.3%;background:var(--th-emb)"></div>
+              <div class="wseg" style="width:4.3%;background:var(--th-rerank)"></div>
+              <div class="wseg" style="width:2.1%;background:var(--th-tts)"></div>
+              <div class="wseg free" style="width:44.6%"></div>
+              <div class="wseg res" style="width:28.7%"></div>
+            </div></div>
+            <div class="drow dim" style="padding-top:0;font-size:11.5px">内存 7.5 / 28 GB</div>
+            <div class="dsep"></div>
+            <div class="drow act">qwen3-4b <span class="mem mono">3.1 GB · 停止</span></div>
+            <div class="drow act">qwen3-1.7b 判官 <span class="mem mono">1.4 GB · 停止</span></div>
+            <div class="drow act">bge-m3 <span class="mem mono">1.2 GB · 停止</span></div>
+            <div class="drow act">bge-reranker-v2-m3 <span class="mem mono">1.2 GB · 停止</span></div>
+            <div class="drow act">kokoro-82m <span class="mem mono">0.6 GB · 停止</span></div>
+            <div class="drow dim">qwen3-vl-4b <span class="mem">睡眠中</span></div>
+            <div class="dsep"></div>
+            <div class="drow act">打开 MacFabric…</div>
+            <div class="drow act">关闭网关</div>
+          </div>
+        </span>
+      </div>
+    </div>
+    <ul class="notes">
+      <li><b>状态灯三色：</b>绿=一切正常；黄=内存压力高（安全网已介入）；红=网关异常。灯在，App 不用开。</li>
+      <li><b>微缩织物条</b>直接复用总览组件等比缩小，不加第二套可视化。</li>
+      <li>停止动作只对"按需"模型出现；<b>常驻模型的菜单项是"停止"，点击后弹确认</b>——常驻是能力包的承诺，不因误触打破。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══ 首启向导 ═══ -->
+<section class="sec">
+  <h2>首启向导</h2>
+  <p class="sub">安装体验的唯一入口：dmg 拖入 → 打开 → 三步向导。全程零终端。</p>
+  <div class="screen">
+    <div class="sc">
+      <div class="win" style="min-width:640px">
+        <div class="tbar"><div class="dots"><i></i><i></i><i></i></div><div class="ttl">欢迎</div></div>
+        <div class="wiz">
+          <div style="font-size:20px;font-weight:700;letter-spacing:-.01em">选择要启用的引擎</div>
+          <div style="font-size:13px;color:var(--dim);margin-top:4px">勾选后自动下载，模型稍后按需获取</div>
+          <div class="wsteps">
+            <span class="wstep done"><span class="n">✓</span>选目录</span>
+            <span class="wstep now"><span class="n">2</span>选引擎</span>
+            <span class="wstep"><span class="n">3</span>选能力包</span>
+          </div>
+          <div class="wlist">
+            <div class="wrow card"><span class="bx on">✓</span><span><span class="nm">llama.cpp <span class="chip">Metal</span></span><br><span class="ds">GGUF 模型运行时，嵌入与重排序也用它</span></span><span class="sz mono">24 MB</span></div>
+            <div class="wrow card"><span class="bx on">✓</span><span><span class="nm">MLX 套件</span><br><span class="ds">Apple 官方框架，对话与视觉模型首选</span></span><span class="sz mono">310 MB</span></div>
+            <div class="wrow card"><span class="bx off"></span><span><span class="nm">whisper.cpp <span class="chip">Metal</span></span><br><span class="ds">本地语音转写，可随时在设置里补装</span></span><span class="sz mono">38 MB</span></div>
+            <div class="wrow card"><span class="bx on">✓</span><span><span class="nm">系统能力</span><br><span class="ds">文字识别与系统语音，随 macOS 内置，零下载</span></span><span class="sz mono">内置</span></div>
+          </div>
+          <span class="btn pri" style="padding:8px 26px">继续</span>
+        </div>
+      </div>
+    </div>
+    <ul class="notes">
+      <li><b>体积先亮出来</b>再勾选——下载是多重要的决定，就在多重要的位置告知代价。</li>
+      <li>"系统能力"永远勾上且不可取消：这是 OCR 与 TTS 的零模型兜底，装完即可用。</li>
+      <li>第三步能力包默认预选三个（嵌入／判官／语音合成），走完向导即有一个<b>能跑通全链路的最小系统</b>，而不是空壳。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══ 总览 ═══ -->
+<section class="sec">
+  <h2>主窗口 · 总览</h2>
+  <p class="sub">全局心脏在这里最大幅出现：织物条 + 八类能力一屏读完。其余所有页面都为它服务。</p>
+  <div class="screen">
+    <div class="sc">
+      <div class="win">
+        <div class="tbar"><div class="dots"><i></i><i></i><i></i></div><div class="ttl">MacFabric</div></div>
+        <div class="wbody">
+          <div class="sbar">
+            <div class="grp">平台</div>
+            <div class="sit on"><i></i>总览</div>
+            <div class="sit"><i></i>模型服务</div>
+            <div class="sit"><i></i>本地推理</div>
+            <div class="sit"><i></i>模型池</div>
+            <div class="sit"><i></i>监控台</div>
+            <div class="grp">获取</div>
+            <div class="sit"><i></i>能力包</div>
+            <div class="sit"><i></i>云端接入</div>
+            <div class="grp"></div>
+            <div class="sit"><i></i>设置</div>
+          </div>
+          <div class="mn">
+            <h4>总览</h4>
+            <div class="weave">
+              <div class="wseg" style="width:5%;background:var(--th-judge)" title="qwen3-1.7b 1.4GB"></div>
+              <div class="wseg" style="width:11.1%;background:var(--th-llm)" title="qwen3-4b 3.1GB"></div>
+              <div class="wseg" style="width:4.3%;background:var(--th-emb)"></div>
+              <div class="wseg" style="width:4.3%;background:var(--th-rerank)"></div>
+              <div class="wseg" style="width:2.1%;background:var(--th-tts)"></div>
+              <div class="wseg free" style="width:44.6%"></div>
+              <div class="wseg res" style="width:28.6%"></div>
+            </div>
+            <div class="wleg">
+              <span><i style="background:var(--th-judge)"></i>判官 1.4</span>
+              <span><i style="background:var(--th-llm)"></i>qwen3-4b 3.1</span>
+              <span><i style="background:var(--th-emb)"></i>bge-m3 1.2</span>
+              <span><i style="background:var(--th-rerank)"></i>reranker 1.2</span>
+              <span><i style="background:var(--th-tts)"></i>kokoro 0.6</span>
+              <span><i style="background:rgba(255,255,255,.14)"></i>空闲 12.5</span>
+              <span><i style="background:repeating-linear-gradient(135deg,rgba(255,255,255,.3) 0 3px,transparent 3px 6px)"></i>系统保留 8.0</span>
+            </div>
+            <div class="wnum mono"><b>7.5</b> / 28 GB · MacBook Pro M3 Pro 36 GB</div>
+            <div class="statrow">
+              <div class="stat card"><div class="v mono">5</div><div class="k">运行中 · 1 睡眠</div></div>
+              <div class="stat card"><div class="v mono">1,842</div><div class="k">24h 请求</div></div>
+              <div class="stat card"><div class="v mono">2.4M</div><div class="k">24h 本地 tokens</div></div>
+              <div class="stat card"><div class="v mono">180ms</div><div class="k">TTFT P50</div></div>
+            </div>
+            <div class="cgrid">
+              <div class="ccard card"><div class="nm"><span class="dotc" style="background:var(--th-llm)"></span>对话</div><div class="md">qwen3-4b · MLX</div><div class="ft"><span class="pill run"><i></i>运行中</span><span class="mono" style="font-size:11.5px;color:var(--faint)">3.1 GB</span></div></div>
+              <div class="ccard card"><div class="nm"><span class="dotc" style="background:var(--th-vl)"></span>看图</div><div class="md">qwen3-vl-4b · MLX</div><div class="ft"><span class="pill sleep"><i></i>睡眠</span><span class="mono" style="font-size:11.5px;color:var(--faint)">唤醒约 2s</span></div></div>
+              <div class="ccard card"><div class="nm"><span class="dotc" style="background:var(--th-judge)"></span>决策判官</div><div class="md">qwen3-1.7b · MLX</div><div class="ft"><span class="pill run"><i></i>运行中</span><span class="mono" style="font-size:11.5px;color:var(--faint)">1.4 GB</span></div></div>
+              <div class="ccard card"><div class="nm"><span class="dotc" style="background:var(--th-emb)"></span>嵌入</div><div class="md">bge-m3 · llama.cpp</div><div class="ft"><span class="pill run"><i></i>运行中</span><span class="mono" style="font-size:11.5px;color:var(--faint)">1.2 GB</span></div></div>
+              <div class="ccard card"><div class="nm"><span class="dotc" style="background:var(--th-rerank)"></span>重排</div><div class="md">bge-reranker-v2-m3 · llama.cpp</div><div class="ft"><span class="pill run"><i></i>运行中</span><span class="mono" style="font-size:11.5px;color:var(--faint)">1.2 GB</span></div></div>
+              <div class="ccard card"><div class="nm"><span class="dotc" style="background:var(--th-asr)"></span>语音转写</div><div class="md">whisper-v3-turbo · whisper.cpp</div><div class="ft"><span class="pill stop"><i></i>已停止</span><span class="mono" style="font-size:11.5px;color:var(--faint)">按需</span></div></div>
+              <div class="ccard card"><div class="nm"><span class="dotc" style="background:var(--th-tts)"></span>语音合成</div><div class="md">kokoro-82m · mlx-audio</div><div class="ft"><span class="pill run"><i></i>运行中</span><span class="mono" style="font-size:11.5px;color:var(--faint)">0.6 GB</span></div></div>
+              <div class="ccard card"><div class="nm"><span class="dotc" style="background:var(--th-ocr)"></span>文字识别</div><div class="md">macOS 视觉框架 · 系统内置</div><div class="ft"><span class="pill run"><i></i>就绪</span><span class="mono" style="font-size:11.5px;color:var(--faint)">0 GB</span></div></div>
+              <div class="ccard card"><div class="nm"><span class="dotc" style="background:var(--th-img)"></span>文生图</div><div class="md">mflux-schnell · MLX</div><div class="ft"><span class="pill stop"><i></i>已停止</span><span class="mono" style="font-size:11.5px;color:var(--faint)">按需 8.0 GB</span></div></div>
+              <div class="ccard card"><div class="nm"><span class="dotc" style="background:var(--th-img)"></span>图生图</div><div class="md">mflux-schnell · 编辑模式</div><div class="ft"><span class="pill stop"><i></i>已停止</span><span class="mono" style="font-size:11.5px;color:var(--faint)">按需</span></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <ul class="notes">
+      <li><b>能力名用人话说：</b>"看图"不是 "VL 推理服务"，"决策判官"不是 "router agent"。模型真名放小字，供开发者核对。</li>
+      <li>织物条 hover 任一线段浮出"模型名 · 基线/实测"——<b>预算与实测同位显示</b>，偏差超 20% 该段出现黄点。</li>
+      <li>"系统保留"一段用斜纹织法，视觉上与模型线区分：这 8 GB 不属于你，也不属于模型。</li>
+      <li>睡眠卡显示"唤醒约 2s"——把 L2 睡眠机制翻译成用户可感知的承诺。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══ 模型服务 ═══ -->
+<section class="sec">
+  <h2>主窗口 · 模型服务</h2>
+  <p class="sub">整条体验链补上的一环：「装好」与「管好」之间是「接出去」。本机与云端所有可调用模型一页列全，每个模型自带即拷即用的接入配置——所有调用都走 :8999，云端密钥永远不出网关。</p>
+  <div class="screen">
+    <div class="sc">
+      <div class="win">
+        <div class="tbar"><div class="dots"><i></i><i></i><i></i></div><div class="ttl">MacFabric — 模型服务</div></div>
+        <div class="wbody">
+          <div class="sbar">
+            <div class="grp">平台</div>
+            <div class="sit"><i></i>总览</div>
+            <div class="sit on"><i></i>模型服务</div>
+            <div class="sit"><i></i>本地推理</div>
+            <div class="sit"><i></i>模型池</div>
+            <div class="sit"><i></i>监控台</div>
+            <div class="grp">获取</div>
+            <div class="sit"><i></i>能力包</div>
+            <div class="sit"><i></i>云端接入</div>
+            <div class="grp"></div>
+            <div class="sit"><i></i>设置</div>
+          </div>
+          <div class="mn">
+            <h4>模型服务</h4>
+            <div class="hubbar card">
+              <span class="chip">接入地址</span><span class="url mono">http://127.0.0.1:8999</span>
+              <span class="chip">鉴权未启用</span>
+              <span class="right"><span class="copybtn">复制 Base URL</span><span class="copybtn">启用鉴权…</span></span>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:14px;flex-wrap:wrap">
+              <div class="tabs"><span class="tab on">全部</span><span class="tab">对话</span><span class="tab">看图</span><span class="tab">嵌入</span><span class="tab">重排</span><span class="tab">语音</span><span class="tab">生图</span><span class="tab">OCR</span></div>
+              <span class="chip" style="margin-left:auto">本机 6 · 云端 4</span>
+            </div>
+            <div class="hubrow">
+              <div class="hubhead"><span class="dotc" style="background:var(--th-llm)"></span><span class="hn">qwen3-4b</span><span class="chip">本机 · MLX · 对话</span><span class="pill run"><i></i>运行中</span><span class="right"><span class="copybtn pri">复制全部配置 · JSON</span><span class="copybtn">复制 cURL</span></span></div>
+              <div class="hubzone">
+                <div class="zt">接入配置 <span class="tabs" style="display:inline-flex;margin-left:8px"><span class="tab on">OpenAI 协议</span><span class="tab">Anthropic 协议</span></span></div>
+                <div class="fld"><span class="fk">Base URL</span><span class="fv mono">http://127.0.0.1:8999/v1</span><span class="cp">复制</span></div>
+                <div class="fld"><span class="fk">模型 ID</span><span class="fv mono">qwen3-4b</span><span class="cp">复制</span></div>
+                <div class="fld"><span class="fk">API Key</span><span class="fv" style="color:var(--faint)">未启用鉴权 — 设置中开启后此处生成，仅展示一次</span></div>
+                <div class="zfoot"><span class="copybtn">复制环境变量（ANTHROPIC_BASE_URL 方式）</span><span class="znote">已停止的按需模型照样能调 —— 首请求自动唤醒，约 2s</span></div>
+              </div>
+            </div>
+            <div class="hubrow">
+              <div class="hubhead"><span class="dotc" style="background:#8a8a95"></span><span class="hn">glm-5</span><span class="chip">云端 · 智谱AI · 对话</span><span class="chip">双协议直通</span><span class="pill sleep"><i></i>云端常在</span><span class="right"><span class="copybtn">复制配置</span></span></div>
+              <div class="hubzone">
+                <div class="fld"><span class="fk">Base URL</span><span class="fv mono">http://127.0.0.1:8999/v1</span><span class="cp">复制</span></div>
+                <div class="fld"><span class="fk">模型 ID</span><span class="fv mono">glm-5</span><span class="cp">复制</span></div>
+                <div class="fld"><span class="fk">API Key</span><span class="fv" style="color:var(--faint)">由网关持有 · 永不外露 — 换云商、换模型，客户端配置不变</span></div>
+              </div>
+            </div>
+            <div class="hubrow">
+              <div class="hubhead"><span class="dotc" style="background:var(--th-emb)"></span><span class="hn">bge-m3</span><span class="chip">本机 · 嵌入</span><span class="pill run"><i></i>运行中</span><span class="right"><span class="copybtn">复制配置</span></span></div>
+              <div class="hubzone">
+                <div class="fld"><span class="fk">端点</span><span class="fv mono">http://127.0.0.1:8999/v1/embeddings</span><span class="cp">复制</span></div>
+                <div class="fld"><span class="fk">模型 ID</span><span class="fv mono">bge-m3</span><span class="cp">复制</span></div>
+              </div>
+            </div>
+            <div class="hubrow">
+              <div class="hubhead"><span class="dotc" style="background:var(--th-tts)"></span><span class="hn">kokoro-82m</span><span class="chip">本机 · 语音合成</span><span class="pill run"><i></i>运行中</span><span class="fv mono" style="flex:1;color:var(--faint);font-size:11.5px">/v1/audio/speech</span><span class="right"><span class="copybtn">复制配置</span></span></div>
+            </div>
+            <div class="hubrow">
+              <div class="hubhead"><span class="dotc" style="background:var(--th-img)"></span><span class="hn">seedream-4.0</span><span class="chip">云端 · 生图</span><span class="pill stop"><i></i>云端常在</span><span class="fv mono" style="flex:1;color:var(--faint);font-size:11.5px">/v1/images/generations</span><span class="right"><span class="copybtn">复制配置</span></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <ul class="notes">
+      <li><b>位置：侧栏「平台」组第二位，总览之下。</b>用户旅程是 装→看→接→管→修，模型服务补「接出去」；它比本地推理/模型池使用频率更高（每次给新工具配模型都要来），排位应更高。菜单栏后续加"复制接入配置"子菜单，做零窗口快捷路径。</li>
+      <li><b>所有模型一个地址：</b>本机与云端都经 :8999 调用，接入配置里永远只有一个 Base URL——客户端不感知背后是谁，换模型、换云商、模型池内部故障回退，客户端零改动。</li>
+      <li><b>密钥永不外露：</b>云端 API Key 由网关持有，拷出去的配置里没有云商密钥；本机鉴权未启用时连 Key 都不用填。「启用鉴权」生成一次性的网关 Key。</li>
+      <li><b>配置永远有效：</b>已停止的按需模型照样能拷能调——首请求自动唤醒。接入动作不需要"先把模型跑起来"，这是状态机设计给 Hub 的底气。</li>
+      <li><b>复制动作即文案：</b>「复制 Base URL」「复制模型 ID」「复制全部配置 · JSON」「复制 cURL」「复制环境变量」——按目标工具的习惯给格式，不做万能但难懂的单一格式。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══ 推理 ═══ -->
+<section class="sec">
+  <h2>主窗口 · 本地推理</h2>
+  <p class="sub">模型全生命周期管理。一行一模型：状态、装载模式、内存账、三个动作，没有更多。</p>
+  <div class="screen">
+    <div class="sc">
+      <div class="win">
+        <div class="tbar"><div class="dots"><i></i><i></i><i></i></div><div class="ttl">MacFabric — 本地推理</div></div>
+        <div class="wbody">
+          <div class="sbar">
+            <div class="grp">平台</div>
+            <div class="sit"><i></i>总览</div>
+            <div class="sit"><i></i>模型服务</div>
+            <div class="sit on"><i></i>本地推理</div>
+            <div class="sit"><i></i>模型池</div>
+            <div class="sit"><i></i>监控台</div>
+            <div class="grp">获取</div>
+            <div class="sit"><i></i>能力包</div>
+            <div class="sit"><i></i>云端接入</div>
+            <div class="grp"></div>
+            <div class="sit"><i></i>设置</div>
+          </div>
+          <div class="mn">
+            <h4>本地推理 <span style="float:right"><span class="btn sm">＋ 添加模型</span></span></h4>
+            <div class="mrow card"><span class="dotc" style="background:var(--th-llm)"></span>
+              <span class="nm">qwen3-4b<br><span class="meta mono">MLX · 4B Q4 · :8010</span></span>
+              <span class="pill run"><i></i>运行中</span><span class="chip">按需 · 空闲10min卸载</span>
+              <span class="meta mono" style="color:var(--dim)">基线 3.0 → 实测 3.1 GB</span>
+              <span class="act"><span class="btn sm">睡眠</span><span class="btn sm">停止</span></span></div>
+            <div class="mrow card"><span class="dotc" style="background:var(--th-vl)"></span>
+              <span class="nm">qwen3-vl-4b<br><span class="meta mono">MLX · VL 4B · :8011</span></span>
+              <span class="pill sleep"><i></i>睡眠</span><span class="chip">按需</span>
+              <span class="meta mono" style="color:var(--dim)">基线 3.8 GB</span>
+              <span class="act"><span class="btn sm">唤醒</span></span></div>
+            <div class="mrow card"><span class="dotc" style="background:var(--th-judge)"></span>
+              <span class="nm">qwen3-1.7b<br><span class="meta mono">MLX · 判官 · :8009</span></span>
+              <span class="pill run"><i></i>运行中</span><span class="chip">常驻</span>
+              <span class="meta mono" style="color:var(--dim)">基线 1.4 → 实测 1.4 GB</span>
+              <span class="act"><span class="btn sm">停止</span></span></div>
+            <div class="mrow card"><span class="dotc" style="background:var(--th-emb)"></span>
+              <span class="nm">bge-m3<br><span class="meta mono">llama.cpp · GGUF · :8012</span></span>
+              <span class="pill run"><i></i>运行中</span><span class="chip">常驻</span>
+              <span class="meta mono" style="color:var(--dim)">基线 1.2 → 实测 1.2 GB</span>
+              <span class="act"><span class="btn sm">停止</span></span></div>
+            <div class="mrow card"><span class="dotc" style="background:var(--th-asr)"></span>
+              <span class="nm">whisper-large-v3-turbo<br><span class="meta mono">whisper.cpp · GGML · :8013</span></span>
+              <span class="pill stop"><i></i>已停止</span><span class="chip">按需</span>
+              <span class="meta mono" style="color:var(--dim)">基线 1.6 GB</span>
+              <span class="act"><span class="btn sm pri">启动</span></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <ul class="notes">
+      <li><b>装载模式做成 chip 而非开关：</b>"常驻／按需"是能力包带来的属性，用户在能力包页理解它，这里只展示。</li>
+      <li>"基线 → 实测"并排即审查结论的自学习呈现：<b>偏差超 20% 行尾亮黄点</b>，点开建议改 YAML——人来改，不自动写。</li>
+      <li>启动按钮只在启动动作上是实心主色：每屏一个主操作。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══ 模型池 ═══ -->
+<section class="sec">
+  <h2>主窗口 · 模型池</h2>
+  <p class="sub">默认池五件套：fast / small / premium / 文生图 / 图生图，全部支持本机+云端混合候选，本机排前即"本地优先"；嵌入与重排不入池——基本不更换的能力走静态直连。左侧分组列表看全局，右侧候选管理下拉切换池。</p>
+  <div class="screen">
+    <div class="sc">
+      <div class="win">
+        <div class="tbar"><div class="dots"><i></i><i></i><i></i></div><div class="ttl">MacFabric — 模型池</div></div>
+        <div class="wbody">
+          <div class="sbar">
+            <div class="grp">平台</div>
+            <div class="sit"><i></i>总览</div>
+            <div class="sit"><i></i>模型服务</div>
+            <div class="sit"><i></i>本地推理</div>
+            <div class="sit on"><i></i>模型池</div>
+            <div class="sit"><i></i>监控台</div>
+            <div class="grp">获取</div>
+            <div class="sit"><i></i>能力包</div>
+            <div class="sit"><i></i>云端接入</div>
+            <div class="grp"></div>
+            <div class="sit"><i></i>设置</div>
+          </div>
+          <div class="mn">
+            <h4>模型池 <span style="float:right"><span class="btn sm">＋ 新建池</span></span></h4>
+            <div class="poolwrap">
+              <div class="pgroups">
+                <div class="poolcard">
+                  <div class="phead"><span class="pname">iff/fast</span><span class="puse">快速对话</span><span class="psum on">● 调用中</span></div>
+                  <div class="crow2 active" style="--tint:var(--th-llm)"><span class="prio mono">1</span><span class="cdot on"></span><span class="cnm">qwen3-4b</span><span class="chip">本机 · MLX</span><span class="cstate on">调用中</span></div>
+                  <div class="crow2"><span class="prio mono">2</span><span class="cdot"></span><span class="cnm">glm-5</span><span class="chip">云端</span><span class="cstate">待命</span></div>
+                </div>
+                <div class="poolcard">
+                  <div class="phead"><span class="pname">iff/small</span><span class="puse">轻量任务 · 意图分类</span><span class="psum">1 就绪</span></div>
+                  <div class="crow2"><span class="prio mono">1</span><span class="cdot on"></span><span class="cnm">qwen3-1.7b</span><span class="chip">本机 · MLX</span><span class="cstate" style="color:var(--dim)">就绪</span></div>
+                  <div class="crow2"><span class="prio mono">2</span><span class="cdot"></span><span class="cnm">glm-5-flash</span><span class="chip">云端</span><span class="cstate">待命</span></div>
+                </div>
+                <div class="poolcard">
+                  <div class="phead"><span class="pname">iff/premium</span><span class="puse">长文写作</span><span class="psum">待命</span></div>
+                  <div class="crow2"><span class="prio mono">1</span><span class="cdot"></span><span class="cnm">glm-5</span><span class="chip">云端</span><span class="cstate">待命</span><span class="pnote">本地 ≤4B 不入此池</span></div>
+                </div>
+                <div class="poolcard">
+                  <div class="phead"><span class="pname">iff/txt2img</span><span class="puse">文生图</span><span class="psum">按需</span></div>
+                  <div class="crow2"><span class="prio mono">1</span><span class="cdot"></span><span class="cnm">mflux-schnell</span><span class="chip">本机 · MLX</span><span class="cstate">已停止</span></div>
+                  <div class="crow2"><span class="prio mono">2</span><span class="cdot"></span><span class="cnm">seedream-4.0</span><span class="chip">云端</span><span class="cstate">待命</span></div>
+                </div>
+                <div class="poolcard">
+                  <div class="phead"><span class="pname">iff/img2img</span><span class="puse">图生图</span><span class="psum">按需</span></div>
+                  <div class="crow2"><span class="prio mono">1</span><span class="cdot"></span><span class="cnm">mflux-schnell</span><span class="chip">本机 · 编辑模式</span><span class="cstate">已停止</span></div>
+                  <div class="crow2"><span class="prio mono">2</span><span class="cdot"></span><span class="cnm">seedream-edit</span><span class="chip">云端</span><span class="cstate">待命</span></div>
+                </div>
+                <div class="pstatic"><b>静态直连（不进池）</b> — bge-m3 嵌入 · bge-reranker-v2-m3 重排：基本不更换的能力按模型名直接路由，属静态配置，不占候选位。</div>
+              </div>
+              <div class="pinsp">
+                <div style="font-size:14px;font-weight:700">候选管理</div>
+                <div class="selbox" style="margin-top:10px"><span class="pname">iff/fast</span><span class="puse">快速对话</span><span class="chev">▾</span></div>
+                <p class="ptip" style="margin-top:10px">优先级 = 自上而下的尝试顺序。改动先进草稿，预览通过才应用。</p>
+                <div class="prow" style="margin-top:6px"><span class="prio mono">1</span><span class="pn">qwen3-4b</span><span class="chip">本机</span><span class="act"><span class="icbtn">↑</span><span class="icbtn dim">↓</span><span class="icbtn">✕</span></span></div>
+                <div class="prow"><span class="prio mono">2</span><span class="pn">glm-5</span><span class="chip">云端</span><span class="act"><span class="icbtn dim">↑</span><span class="icbtn">↓</span><span class="icbtn">✕</span></span></div>
+                <div class="addrow"><span class="icbtn dim">＋</span> 添加候选（本机模型 / 云端已注册）</div>
+                <div style="margin-top:16px;border-top:1px solid var(--line)">
+                  <div class="prow"><span style="color:var(--dim)">失败重试上限</span><span class="mono" style="margin-left:auto;color:var(--ink)">2 次</span></div>
+                  <div class="prow"><span style="color:var(--dim)">整体截止时间</span><span class="mono" style="margin-left:auto;color:var(--ink)">60 s</span></div>
+                </div>
+                <div style="display:flex;gap:8px;margin-top:18px;flex-wrap:wrap">
+                  <span class="btn sm pri">预览改动</span><span class="btn sm">复制调用 · OpenAI</span><span class="btn sm">· Anthropic</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <ul class="notes">
+      <li><b>默认池预设五件套：</b>fast / small / premium / 文生图 / 图生图，全部支持本机+云端混合候选，本机排前即"本地优先"。意图分类并入 iff/small——它是轻量任务的一种，不单设池。</li>
+      <li><b>嵌入与重排不入池：</b>这类能力基本不更换，做成静态直连（虚线框标识"非池成员"）——没有候选链就没有排序负担。</li>
+      <li><b>表现对齐原生范式：</b>候选链 = macOS「网络 → 服务顺序」的同款交互——分组列表 + 状态圆点 + 有序行，零自绘连线。调用中的候选整行以能力线色微染、左侧色条标记、圆点呼吸；就绪=绿点常亮；待命=灰点。</li>
+      <li><b>端口不重复出现：</b>:8999 是唯一入口，放进树里是噪音。接入信息（含端口、协议片段）收进"复制调用"，树上只呈现池与模型。</li>
+      <li><b>管理器下拉切换池：</b>右侧候选管理固定一屏，顶部下拉选池——增删、优先级排序、池参数全在这一栏，模型池扩展再多主区也不拉长。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══ 监控 ═══ -->
+<section class="sec">
+  <h2>主窗口 · 监控台</h2>
+  <p class="sub">v1 只回答三个问题：谁在耗、耗了多少、快不快。功耗与 GPU 利用率需要 root 特权助手，钉死为 v2 备选，v1 不做。</p>
+  <div class="screen">
+    <div class="sc">
+      <div class="win">
+        <div class="tbar"><div class="dots"><i></i><i></i><i></i></div><div class="ttl">MacFabric — 监控台</div></div>
+        <div class="wbody">
+          <div class="sbar">
+            <div class="grp">平台</div>
+            <div class="sit"><i></i>总览</div>
+            <div class="sit"><i></i>模型服务</div>
+            <div class="sit"><i></i>本地推理</div>
+            <div class="sit"><i></i>模型池</div>
+            <div class="sit on"><i></i>监控台</div>
+            <div class="grp">获取</div>
+            <div class="sit"><i></i>能力包</div>
+            <div class="sit"><i></i>云端接入</div>
+            <div class="grp"></div>
+            <div class="sit"><i></i>设置</div>
+          </div>
+          <div class="mn">
+            <h4>监控台 <span style="float:right;color:var(--faint);font-size:12.5px">近 24 小时</span></h4>
+            <div class="pgrid">
+              <div class="pane card">
+                <h5>Token 用量 <span>· 本地 / 云端</span></h5>
+                <div class="bars">
+                  <div class="bar" style="height:14%"><div class="lc" style="height:80%"></div><div class="cd" style="height:20%"></div></div>
+                  <div class="bar" style="height:32%"><div class="lc" style="height:85%"></div><div class="cd" style="height:15%"></div></div>
+                  <div class="bar" style="height:50%"><div class="lc" style="height:90%"></div><div class="cd" style="height:10%"></div></div>
+                  <div class="bar" style="height:66%"><div class="lc" style="height:78%"></div><div class="cd" style="height:22%"></div></div>
+                  <div class="bar" style="height:42%"><div class="lc" style="height:88%"></div><div class="cd" style="height:12%"></div></div>
+                  <div class="bar" style="height:78%"><div class="lc" style="height:70%"></div><div class="cd" style="height:30%"></div></div>
+                  <div class="bar" style="height:96%"><div class="lc" style="height:65%"></div><div class="cd" style="height:35%"></div></div>
+                  <div class="bar" style="height:70%"><div class="lc" style="height:82%"></div><div class="cd" style="height:18%"></div></div>
+                  <div class="bar" style="height:55%"><div class="lc" style="height:90%"></div><div class="cd" style="height:10%"></div></div>
+                  <div class="bar" style="height:86%"><div class="lc" style="height:75%"></div><div class="cd" style="height:25%"></div></div>
+                  <div class="bar" style="height:46%"><div class="lc" style="height:92%"></div><div class="cd" style="height:8%"></div></div>
+                  <div class="bar" style="height:22%"><div class="lc" style="height:88%"></div><div class="cd" style="height:12%"></div></div>
+                </div>
+                <div class="xaxis"><span>00</span><span>04</span><span>08</span><span>12</span><span>16</span><span>20</span><span>24时</span></div>
+                <div class="wleg"><span><i style="background:var(--accent)"></i>本地 2.4M</span><span><i style="background:rgba(255,255,255,.25)"></i>云端 0.4M</span></div>
+              </div>
+              <div class="pane card">
+                <h5>模型延迟 <span>· TTFT P50 / P95 (ms)</span></h5>
+                <svg viewBox="0 0 340 122" width="100%" role="img" aria-label="TTFT 延迟趋势">
+                  <line x1="20" y1="14" x2="320" y2="14" stroke="rgba(255,255,255,.08)"/>
+                  <line x1="20" y1="62" x2="320" y2="62" stroke="rgba(255,255,255,.08)"/>
+                  <line x1="20" y1="110" x2="320" y2="110" stroke="rgba(255,255,255,.16)"/>
+                  <text x="324" y="18" fill="#6d6d78" font-size="9">600</text>
+                  <text x="324" y="66" fill="#6d6d78" font-size="9">300</text>
+                  <text x="324" y="113" fill="#6d6d78" font-size="9">0</text>
+                  <polyline fill="none" stroke="rgba(95,125,255,.45)" stroke-width="1.6" points="20,30 47,35 75,40 102,24 129,43 156,47 184,44 211,49 238,52 265,51 293,54 320,56"/>
+                  <polyline fill="none" stroke="#5f7dff" stroke-width="2.2" points="20,76 47,79 75,81 102,74 129,82 156,84 184,83 211,85 238,86 265,85 293,87 320,87"/>
+                  <circle cx="320" cy="87" r="3" fill="#5f7dff"/>
+                </svg>
+                <div class="wleg"><span><i style="background:#5f7dff"></i>P50 142ms</span><span><i style="background:rgba(95,125,255,.45)"></i>P95 340ms</span></div>
+              </div>
+              <div class="pane card" style="grid-column:1/-1">
+                <h5>请求日志 <span>· 最近</span></h5>
+                <table class="tlog mono">
+                  <tr><th>时间</th><th>模型</th><th>入口</th><th>tokens</th><th>TTFT</th><th>结果</th></tr>
+                  <tr><td>14:32:08</td><td>qwen3-4b</td><td>iff/fast · Anthropic</td><td>1,204</td><td>138ms</td><td style="color:#6fe87e">200</td></tr>
+                  <tr><td>14:31:52</td><td>bge-m3</td><td>/v1/embeddings · OpenAI</td><td>96</td><td>—</td><td style="color:#6fe87e">200</td></tr>
+                  <tr><td>14:31:44</td><td>kokoro-82m</td><td>/v1/audio/speech</td><td>—</td><td>—</td><td style="color:#6fe87e">200</td></tr>
+                  <tr><td>14:31:30</td><td>mflux-schnell</td><td>/v1/images/generations · OpenAI</td><td>—</td><td>—</td><td style="color:#6fe87e">200</td></tr>
+                  <tr><td>14:30:55</td><td>Vision OCR</td><td>/ocr · 本机</td><td>—</td><td>—</td><td style="color:#6fe87e">200</td></tr>
+                  <tr><td>14:30:17</td><td>qwen3-vl-4b</td><td>iff/vision · OpenAI</td><td>512</td><td>412ms</td><td style="color:#ffe269">唤醒 2.1s 后 200</td></tr>
+                  <tr><td>14:29:03</td><td>glm-5</td><td>iff/premium · Anthropic</td><td>3,870</td><td>640ms</td><td style="color:#6fe87e">200</td></tr>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <ul class="notes">
+      <li>延迟图把"唤醒 2.1s 后 200"记为黄色而非错误——<b>睡眠唤醒是特性不是故障</b>，监控语义要跟状态机一致。</li>
+      <li>本地/云端双色堆叠：聚合平台的"本地优先、云端兜底"在数据上直接可见。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══ 能力包 ═══ -->
+<section class="sec">
+  <h2>主窗口 · 能力包</h2>
+  <p class="sub">产品主入口：用户装的不是"模型文件"，是"会说话、会认字、会做决定"的能力。每个包 = YAML 预设 + 模型清单 + 装载模式，一键落进 models.d。</p>
+  <div class="screen">
+    <div class="sc">
+      <div class="win">
+        <div class="tbar"><div class="dots"><i></i><i></i><i></i></div><div class="ttl">MacFabric — 能力包</div></div>
+        <div class="wbody">
+          <div class="sbar">
+            <div class="grp">平台</div>
+            <div class="sit"><i></i>总览</div>
+            <div class="sit"><i></i>模型服务</div>
+            <div class="sit"><i></i>本地推理</div>
+            <div class="sit"><i></i>模型池</div>
+            <div class="sit"><i></i>监控台</div>
+            <div class="grp">获取</div>
+            <div class="sit on"><i></i>能力包</div>
+            <div class="sit"><i></i>云端接入</div>
+            <div class="grp"></div>
+            <div class="sit"><i></i>设置</div>
+          </div>
+          <div class="mn">
+            <h4>能力包</h4>
+            <div class="sgrid">
+              <div class="scard card"><div class="nm"><span class="dotc" style="background:var(--th-emb)"></span>通用文本嵌入</div><div class="ds">bge-m3 · 中英多语 · 常驻</div><div class="ft"><span class="mono" style="font-size:11.5px;color:var(--faint)">1.2 GB</span><span class="chip">已安装</span></div></div>
+              <div class="scard card"><div class="nm"><span class="dotc" style="background:var(--th-judge)"></span>决策判官</div><div class="ds">qwen3-1.7b · 意图分类与路由 · 常驻</div><div class="ft"><span class="mono" style="font-size:11.5px;color:var(--faint)">1.4 GB</span><span class="chip">已安装</span></div></div>
+              <div class="scard card"><div class="nm"><span class="dotc" style="background:var(--th-rerank)"></span>检索重排</div><div class="ds">bge-reranker-v2-m3 · 常驻</div><div class="ft"><span class="mono" style="font-size:11.5px;color:var(--faint)">1.2 GB</span><span class="chip">已安装</span></div></div>
+              <div class="scard card"><div class="nm"><span class="dotc" style="background:var(--th-tts)"></span>中文语音合成</div><div class="ds">kokoro-82m · 含系统语音兜底 · 常驻</div><div class="ft"><span class="mono" style="font-size:11.5px;color:var(--faint)">0.6 GB</span><span class="chip">已安装</span></div></div>
+              <div class="scard card"><div class="nm"><span class="dotc" style="background:var(--th-asr)"></span>语音转写</div><div class="ds">whisper-v3-turbo · 中英 · 按需</div><div class="ft"><span class="mono" style="font-size:11.5px;color:var(--faint)">1.6 GB</span><span class="btn sm pri">安装</span></div></div>
+              <div class="scard card"><div class="nm"><span class="dotc" style="background:var(--th-vl)"></span>轻量看图</div><div class="ds">qwen3-vl-4b · 截图理解 · 按需</div><div class="ft"><span class="mono" style="font-size:11.5px;color:var(--faint)">3.8 GB</span><span class="btn sm pri">安装</span></div></div>
+              <div class="scard card"><div class="nm"><span class="dotc" style="background:var(--th-ocr)"></span>屏幕与文档识别</div><div class="ds">macOS 视觉框架 · 零模型 · 常驻</div><div class="ft"><span class="mono" style="font-size:11.5px;color:var(--faint)">内置</span><span class="chip">已就绪</span></div></div>
+              <div class="scard card"><div class="nm"><span class="dotc" style="background:var(--th-llm)"></span>轻量对话</div><div class="ds">qwen3-4b · 中文对话与工具调用 · 按需</div><div class="ft"><span class="mono" style="font-size:11.5px;color:var(--faint)">3.1 GB</span><span class="chip">已安装</span></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <ul class="notes">
+      <li><b>卡上写的是行为不是技术名词：</b>"会转写语音"而不是 "whisper GGML"；引擎与模型名放描述行，供核对。</li>
+      <li>语音合成包内含<b>系统语音兜底</b>（`say` 命令 + 内置中文语音）——Kokoro 未加载时也能出声，体验不断档。</li>
+      <li>安装按钮的动作即文案：点了变"下载中 42%"→"安装"完成态"已安装"，全程同词。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══ 云端接入 ═══ -->
+<section class="sec">
+  <h2>主窗口 · 云端接入</h2>
+  <p class="sub">云端是聚合平台的另一半。服务商一行一家，云端模型一张卡——与本地能力卡同构：能力声明、协议、池内角色，三件事说完。</p>
+  <div class="screen">
+    <div class="sc">
+      <div class="win">
+        <div class="tbar"><div class="dots"><i></i><i></i><i></i></div><div class="ttl">MacFabric — 云端接入</div></div>
+        <div class="wbody">
+          <div class="sbar">
+            <div class="grp">平台</div>
+            <div class="sit"><i></i>总览</div>
+            <div class="sit"><i></i>模型服务</div>
+            <div class="sit"><i></i>本地推理</div>
+            <div class="sit"><i></i>模型池</div>
+            <div class="sit"><i></i>监控台</div>
+            <div class="grp">获取</div>
+            <div class="sit"><i></i>能力包</div>
+            <div class="sit on"><i></i>云端接入</div>
+            <div class="grp"></div>
+            <div class="sit"><i></i>设置</div>
+          </div>
+          <div class="mn">
+            <h4>云端接入 <span style="float:right"><span class="btn sm">＋ 添加服务商</span></span></h4>
+            <div class="poolcard" style="margin-bottom:16px">
+              <div class="prov"><span class="pd" style="background:#3b6cff">智</span><span><span class="pn">智谱AI</span><br><span class="pm">OpenAI + Anthropic · 自动发现 3 个模型</span></span><span class="right"><span class="chip">已连接</span><span class="btn sm">测试</span></span></div>
+              <div class="prov"><span class="pd" style="background:#2b7de1">深</span><span><span class="pn">DeepSeek</span><br><span class="pm">OpenAI · 自动发现 2 个模型</span></span><span class="right"><span class="chip">已连接</span><span class="btn sm">测试</span></span></div>
+              <div class="prov"><span class="pd" style="background:#7a5cf0">火</span><span><span class="pn">火山方舟</span><br><span class="pm">OpenAI · 自动发现 4 个模型</span></span><span class="right"><span class="chip">已连接</span><span class="btn sm">测试</span></span></div>
+              <div class="prov"><span class="pd" style="background:#8a8a95">百</span><span><span class="pn">百度千帆</span><br><span class="pm">规格预设 · 无 /models 端点，手工声明模型</span></span><span class="right"><span class="chip">未测试</span><span class="btn sm">测试</span></span></div>
+            </div>
+            <div class="sgrid">
+              <div class="scard card"><div class="nm">glm-5</div><div class="ds">智谱AI · 旗舰 · OpenAI + Anthropic</div><div class="ft"><span class="caps"><span class="capdot on" title="视觉"></span><span class="capdot on" title="工具调用"></span></span><span class="poolbadge">iff/premium ①</span><span class="poolbadge">iff/fast ②</span></div></div>
+              <div class="scard card"><div class="nm">glm-5-flash</div><div class="ds">智谱AI · 快速 · OpenAI</div><div class="ft"><span class="caps"><span class="capdot on" title="视觉"></span><span class="capdot" title="工具调用"></span></span><span class="poolbadge">iff/small ②</span></div></div>
+              <div class="scard card"><div class="nm">deepseek-v4</div><div class="ds">DeepSeek · 推理 · OpenAI</div><div class="ft"><span class="caps"><span class="capdot" title="视觉"></span><span class="capdot on" title="工具调用"></span></span><span class="poolbadge" style="color:var(--faint)">未入池</span></div></div>
+              <div class="scard card"><div class="nm">seedream-4.0</div><div class="ds">火山方舟 · 图像 · OpenAI</div><div class="ft"><span class="poolbadge">iff/txt2img ②</span><span class="poolbadge">iff/img2img ②</span></div></div>
+            </div>
+            <p class="ptip" style="margin-top:16px">统一入口 :8999 覆盖全部类型：/v1/chat/completions · /v1/messages · /v1/embeddings · /v1/rerank · /v1/audio/speech · /v1/audio/transcriptions · /v1/images/generations · /v1/images/edits · /ocr —— 本地与云端候选共用同一调用面，客户端不感知背后是谁。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <ul class="notes">
+      <li><b>云端模型卡与本地能力卡同构：</b>能力点（视觉／工具）是声明态，点亮来自服务商面板的能力打标——供池选路与带图请求软优先使用。</li>
+      <li><b>池内角色徽章</b>标出该云模型被哪些池引用、排第几——云端页与模型池页互相印证，不用翻配置找"这个模型在哪被用"。</li>
+      <li><b>协议 chip 揭示翻译层适用性：</b>只说 OpenAI 的云模型被 Anthropic 客户端调用时走网关翻译层，客户端无感；双协议模型则直通。</li>
+      <li><b>接口多样性在网关收口：</b>文生图／图生图／OCR／语音／嵌入／重排各有专属端点，每类端点对本地与云端候选一视同仁——"都支持"是路由层的属性，不是某个引擎的属性。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══ 设置 ═══ -->
+<section class="sec">
+  <h2>主窗口 · 设置</h2>
+  <p class="sub">一屏放下。审查钉死的默认值都编码在这里：仅本机监听、镜像加速默认开、开机自启是唯一可选后台方式。</p>
+  <div class="screen">
+    <div class="sc">
+      <div class="win">
+        <div class="tbar"><div class="dots"><i></i><i></i><i></i></div><div class="ttl">MacFabric — 设置</div></div>
+        <div class="wbody">
+          <div class="sbar">
+            <div class="grp">平台</div>
+            <div class="sit"><i></i>总览</div>
+            <div class="sit"><i></i>模型服务</div>
+            <div class="sit"><i></i>本地推理</div>
+            <div class="sit"><i></i>模型池</div>
+            <div class="sit"><i></i>监控台</div>
+            <div class="grp">获取</div>
+            <div class="sit"><i></i>能力包</div>
+            <div class="sit"><i></i>云端接入</div>
+            <div class="grp"></div>
+            <div class="sit on"><i></i>设置</div>
+          </div>
+          <div class="mn">
+            <h4>设置</h4>
+            <div class="setrow"><span class="lb"><b>开机时启动网关</b><span>通过系统 LaunchAgent 常驻，App 不开也在服务</span></span><span class="tgl"></span></div>
+            <div class="setrow"><span class="lb"><b>HuggingFace 镜像加速</b><span>模型下载走 hf-mirror.com，国内网络建议开启</span></span><span class="tgl"></span></div>
+            <div class="setrow"><span class="lb"><b>仅本机监听</b><span>关闭后局域网设备可访问 :8999，将强制启用 API 鉴权</span></span><span class="tgl off"></span></div>
+            <div class="setrow"><span class="lb"><b>API Key 鉴权</b><span>客户端需携带密钥调用，密钥仅生成时展示一次</span></span><span class="tgl off"></span></div>
+            <div class="setrow"><span class="lb"><b>模型目录</b><span>模型文件与引擎环境所在位置</span></span><span class="path mono">~/Library/Application Support/MacFabric/models</span><span class="btn sm">更改</span></div>
+            <div class="setrow"><span class="lb"><b>内存保留</b><span>为系统与其他 App 保留的内存，默认 8 GB</span></span><span class="path mono">8 GB</span></div>
+            <div class="setrow"><span class="lb"><b>检查更新</b><span>llama.cpp b6016 · MLX 0.31.2 · whisper.cpp v1.8.2</span></span><span class="btn sm">检查</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <ul class="notes">
+      <li><b>危险开关自带后果说明：</b>关闭"仅本机监听"的那行字同时告知"将强制启用鉴权"——规则不靠文档靠界面。</li>
+      <li>"内存保留 8 GB"是全局唯一公式 B = RAM − 8G 的唯一入口，无第二道上限（128GB 机型天然放宽，符合既定裁决）。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══ 内存不足弹窗 ═══ -->
+<section class="sec">
+  <h2>关键交互 · 内存不足</h2>
+  <p class="sub">准入规则的唯一拒绝时刻，文案钉死：差多少、停掉谁、然后怎样——三个数字说完。</p>
+  <div class="screen" style="display:flex;gap:26px;align-items:flex-start;flex-wrap:wrap">
+    <div class="sc" style="flex:0 1 auto">
+      <div class="dlg">
+        <h5>内存不足</h5>
+        <p>安装「语音转写」还差 <b class="mono">2.1 GB</b>。<br>停掉 <b>qwen3-4b</b>（3.1 GB）就能装下。</p>
+        <div class="btns"><span class="btn">取消</span><span class="btn pri">停掉并继续</span></div>
+      </div>
+    </div>
+    <ul class="notes" style="flex:1 1 320px;min-width:280px">
+      <li><b>拒绝弹窗复用织物条</b>（弹窗顶部嵌入同组件），用户读到的永远是他已学会读的那根条。</li>
+      <li>按钮"停掉并继续"即动作本身；点击后 qwen3-4b 转入睡眠（可唤醒），不是销毁。</li>
+      <li>同一弹窗三处入口：本地推理页手动启动、能力包安装、云端大模型触发本地兜底失败时。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ═══ 令牌 ═══ -->
+<section class="sec">
+  <h2>设计令牌与状态语义</h2>
+  <p class="sub">亮暗双主题同构：下表为深色值，亮色为对应翻转（白瓷底 #f5f5f7 · 面板 #ffffff · 线 rgba(0,0,0,.12)），能力线色与状态色双主题共用。</p>
+  <div class="screen">
+    <div class="sc">
+      <table class="tok" style="min-width:700px">
+        <tr><th>令牌</th><th>值（深色）</th><th>用途</th></tr>
+        <tr><td><span class="sw"><i style="background:#101014"></i>desk / panel / chrome</span></td><td class="mono">#101014 · #17171c · #1e1e25</td><td>页面桌面、窗口面板、标题栏三级底色（石墨微蓝）</td></tr>
+        <tr><td><span class="sw"><i style="background:#5f7dff"></i>accent 织物蓝</span></td><td class="mono">#5f7dff</td><td>主操作、主图线、选中态。亮色下 #3d5ce5</td></tr>
+        <tr><td><span class="sw"><i style="background:#c79bff"></i>八根能力线</span></td><td class="mono">判官 #c79bff · 对话 #7a8cff · 看图 #ff7fa3 · 嵌入 #4fd8b8<br>重排 #66b8ff · 转写 #ffc266 · 合成 #ff8f6b · 识别 #a8e063</td><td>语义色不是装饰色：线色 ⇄ 能力类全局一一对应</td></tr>
+        <tr><td><span class="sw"><i style="background:#32d74b"></i>ok / warn / err</span></td><td class="mono">#32d74b · #ffd60a · #ff453a</td><td>生命周期与系统告警（Apple 系统色）</td></tr>
+        <tr><td>字体</td><td class="mono">SF Pro Text + PingFang SC；数据 SF Mono</td><td>原生栈，等宽只用于数字与版本号</td></tr>
+        <tr><td>圆角 / 动效</td><td class="mono">窗 14 · 卡 10 · 控件 7；0.15s / 0.25s 标准缓动</td><td>reduced-motion 全局降级；加载中脉冲为唯一常驻动画</td></tr>
+      </table>
+    </div>
+    <h3 style="margin-top:22px">生命周期五态 <span class="tag">— 全局唯一一套</span></h3>
+    <div class="pillrow">
+      <span class="pill run"><i></i>运行中</span>
+      <span class="pill load"><i></i>加载中</span>
+      <span class="pill sleep"><i></i>睡眠</span>
+      <span class="pill stop"><i></i>已停止</span>
+      <span class="pill errp"><i></i>异常</span>
+    </div>
+  </div>
+</section>
+
+<div class="foot">MacFabric 界面设计稿 v0.1 · 2026-11-13 · 待终审后随 PLAN.md 定版 · 数据为示例数据</div>
+
+</div>
+</body>
+</html>

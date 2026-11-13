@@ -1,0 +1,4 @@
+.DS_Store
+_design-preview/
+*.pyc
+__pycache__/
