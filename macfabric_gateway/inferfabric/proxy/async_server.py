@@ -42,6 +42,7 @@ from pathlib import Path
 from aiohttp import web
 
 from inferfabric import forwarder  # noqa: F401  (保持 _deps 注入顺序与线程模式一致)
+from inferfabric.config import DEFAULT_LOG_DIR
 from inferfabric.proxy.handler import (
     ProxyHandler,
     _validate_admin_token_safety,
@@ -676,7 +677,8 @@ def start_async():
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
     )
-    log_dir = Path.home() / ".inferfabric" / "logs"
+    # 日志目录跟随 IFF_DATA_DIR（MACFABRIC_STATE_DIR 可覆盖）— 与 handler.main 对齐
+    log_dir = DEFAULT_LOG_DIR
     log_dir.mkdir(parents=True, exist_ok=True)
     from logging.handlers import RotatingFileHandler
     fh = RotatingFileHandler(log_dir / "proxy.log", maxBytes=10_000_000, backupCount=3)

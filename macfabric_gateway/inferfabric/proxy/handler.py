@@ -30,6 +30,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import dataclasses
 
 from inferfabric.state import GPUMode
+from inferfabric.config import DEFAULT_LOG_DIR
 from inferfabric.agent_registry import request_protocol
 from inferfabric.agent_stats import AGENT_GRAN, aggregate_agent_stats
 from inferfabric.metrics_aggregator import cost_of_row
@@ -777,9 +778,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if route and route.startswith("cloud:"):
                 provider_name = route.split(":", 1)[1]
                 provider_cfg = pm.cloud.get_provider_config(provider_name)
-                cloud_model = pm.cloud.cloud_models.get(
-                    requested_model.split("/")[-1] if "/" in requested_model else requested_model
-                )
+                cloud_model = pm.cloud.resolve_cloud_model(provider_name, requested_model)
                 if provider_cfg and cloud_model:
                     log.info("/v1/messages → CLOUD %s [%s] [model=%s]",
                              provider_name, "anthropic", requested_model)
@@ -3140,7 +3139,9 @@ def main():
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
     )
-    log_dir = Path.home() / ".inferfabric" / "logs"
+    # 日志目录跟随 IFF_DATA_DIR（MACFABRIC_STATE_DIR 可覆盖）— 调试版日志
+    # 落 ~/.inferfabric-dev/logs，不得硬编码 ~/.inferfabric 污染安装版
+    log_dir = DEFAULT_LOG_DIR
     log_dir.mkdir(parents=True, exist_ok=True)
     from logging.handlers import RotatingFileHandler
     fh = RotatingFileHandler(log_dir / "proxy.log", maxBytes=10_000_000, backupCount=3)

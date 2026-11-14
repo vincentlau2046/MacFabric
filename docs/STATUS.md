@@ -215,3 +215,25 @@
 - qianfan 服务商（双协议端点+key），glm-5.3/deepseek-v4.1-flash 手填
 - forwarder 修 Anthropic 路径拼接：base 尾带 /v1 拼 /messages，裸 base 拼 /v1/messages
 - 双协议经 :8999 实测：glm-5.3（openai）、deepseek-v4.1-flash（anthropic 原生直连）
+
+## 2026-11-14 深夜补丁 3 — Atlaswork 接入 + 云路由三缺陷修复 + 网关守护
+
+- atlaswork 服务商接入安装版（双协议同 base 尾带 /v1）：发现 6 模型，
+  按用户裁决启用 4 个（Qwen38-27B-VL / glm-5 / gpt-6.1-sol / kimi/k3.1-pro；
+  glm-5.3 与 deepseek-v4.1-flash 归千帆，且 atlaswork 上游不允许其走 anthropic）
+- 缺陷1 斜杠模型 404：注册表短名查表用 split("/")[-1]，kimi/k3.1-pro 两种
+  形态全查不中 → CloudDiscovery.resolve_cloud_model 按条目精确比对，
+  handler(:8999 messages) 与 chat_handlers(:8998 chat) 两处调用点统一换用
+- 缺陷2 floor 兜底被吞：provider 列表瞬态失败时其 spec 模型短键被先发现
+  者占用后连前缀键都不注册 → _register_spec_only_models 短键占用时仍补注册
+  "provider/model" 前缀键
+- 缺陷3 前缀请求被劫持：resolve_route 短名优先于全名，多 provider 同名时
+  "qianfan/glm-5.3" 可能路由到他家的 atlaswork → 改全名优先
+- 隔离漏洞：handler/async_server 日志目录硬编码 ~/.inferfabric/logs →
+  改用 DEFAULT_LOG_DIR（跟随 MACFABRIC_STATE_DIR，调试版不再污染安装版日志）
+- 网关守护：scripts/gateway-launchd.sh（com.macfabric.gateway LaunchAgent，
+  KeepAlive=true 进程死 10s 拉起 + 开机自启；仅管安装版 :8999，调试版仍手工）
+  — 安装执行待用户放行持久化权限
+- 实测（:8999 全量）：atlaswork 4 模型双协议 200；qianfan/glm-5.3 floor 场景
+  200；atlaswork/glm-5.3 移除后干净 404；Qwen38-27B-VL 上游 502（服务方问题，
+  保留观察）

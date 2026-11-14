@@ -589,9 +589,29 @@ class CloudDiscovery:
         if short_name in local_models or model_name in local_models:
             return "local"
         with self._models_lock:
-            cm = self._cloud_models.get(short_name) or self._cloud_models.get(model_name)
+            # 全名（含 "provider/model" 前缀）优先于短名 — 短名在多 provider
+            # 同名时是 first-wins 的歧义键，显式前缀请求不得被它劫持
+            cm = self._cloud_models.get(model_name) or self._cloud_models.get(short_name)
         if cm:
             return f"cloud:{cm.provider}"
+        return None
+
+    def resolve_cloud_model(self, provider_name: str, model_name: str) -> "CloudModel | None":
+        """按 provider + 模型名精确解析注册表条目（resolve_route 命中后的二段查找）。
+
+        model_name 的三种合法形态：短名（"glm-5"）、含斜杠 model_id 本体
+        （"kimi/k3.1-pro"）、provider 前缀全名（"atlaswork/kimi/k3.1-pro"）。
+        调用侧历史上用 split("/")[-1] 截短名再拼键 — 对含斜杠 model_id
+        两个键都拼错，必然 404；这里改为按条目逐一比对，杜绝该类失真。
+        """
+        prefix = f"{provider_name}/"
+        stripped = model_name[len(prefix):] if model_name.startswith(prefix) else model_name
+        with self._models_lock:
+            for k, v in self._cloud_models.items():
+                if v.provider != provider_name:
+                    continue
+                if model_name in (k, v.model_id) or stripped in (k, v.model_id):
+                    return v
         return None
 
     def get_provider_config(self, provider_name: str) -> ProviderConfig | None:
@@ -837,13 +857,29 @@ class CloudDiscovery:
             if not cfg.enabled:
                 continue
             for mid, spec in cfg.model_specs.items():
-                if mid in merged:
-                    continue  # 已发现，跳过
-                # v6.6：spec 的 key 是注册表短名（routing 按 split("/")[-1] 查表），
-                # spec["model_id"] 才是上游真实模型 id —— _serialize_providers 保存时
-                # 正是 key=短名 / model_id=全名。二者不同时：注册表 key 用短名，
+                # v6.6：spec 的 key 是注册表短名（routing 查表用），spec["model_id"]
+                # 才是上游真实模型 id —— _serialize_providers 保存时正是
+                # key=短名 / model_id=全名。二者不同时：注册表 key 用短名，
                 # CloudModel.model_id 用全名，转发时由 forward_to_cloud 覆盖 data["model"]。
                 upstream_id = (spec or {}).get("model_id") or mid
+                if mid in merged:
+                    # 短名已被占用（他 provider 先发现/先注册同名模型）：
+                    # 跳过短键，但仍补注册本 provider 前缀键 — 否则本 provider
+                    # 列表瞬态失败时（floor 兜底场景）连 "provider/model" 形式
+                    # 都不可达，spec 承诺的可路由性被先发现者整个吞掉。
+                    if merged[mid].provider != name and f"{name}/{mid}" not in merged:
+                        m = CloudModel(
+                            model_id=upstream_id,
+                            provider=name,
+                            openai_available=bool(cfg.openai_base),
+                            anthropic_available=bool(cfg.anthropic_base),
+                            discovered_at=0.0,
+                        )
+                        m = self._merge_model_spec(m, cfg, spec_key=mid)
+                        merged[f"{name}/{mid}"] = m
+                        log.debug("Registered spec-only model (prefix only): %s/%s "
+                                  "(short key owned by %s)", name, mid, merged[mid].provider)
+                    continue
                 # 仅 spec 注册，协议信息从 provider 配置推断
                 m = CloudModel(
                     model_id=upstream_id,
