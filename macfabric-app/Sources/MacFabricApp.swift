@@ -4,6 +4,7 @@
 // SwiftUI 外部宏包装（@State/@StateObject/@ObservedObject/@Environment）在 CLT
 // 缺 SwiftUIMacros 插件，一律改手动 Binding / 传参。
 import SwiftUI
+import Charts
 import Combine
 import AppKit
 
@@ -26,6 +27,22 @@ struct Snapshot: Codable {
     var status: Status
 }
 
+struct ModelItem: Codable {
+    var name: String
+    var description: String?
+    var mode: String?
+    var type: String?
+    var model_type: String?
+    var active: Bool?
+    var context_window: Int?
+}
+
+struct CurvePoint: Codable {
+    var t: Double
+    var tokens: Int
+    var requests: Int
+}
+
 final class GatewayStore: ObservableObject {
     @Published var snapshot: Snapshot?
     @Published var gatewayUp = false
@@ -33,19 +50,29 @@ final class GatewayStore: ObservableObject {
     @Published var prompt = "你好，介绍一下你自己"
     @Published var reply = ""
     @Published var busy = false
+    @Published var models: [ModelItem] = []
+    @Published var curve: [CurvePoint] = []
+    @Published var actionMessage = ""
 
-    private let url = URL(string: "http://127.0.0.1:8999/api/snapshot")!
+    private let base = URL(string: "http://127.0.0.1:8999")!
     private var timer: Timer?
+    private var curveTimer: Timer?
 
     init() {
         refresh()
+        fetchModels()
+        fetchCurve()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             self?.refresh()
+            self?.fetchModels()
+        }
+        curveTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            self?.fetchCurve()
         }
     }
 
     func refresh() {
-        var req = URLRequest(url: url, timeoutInterval: 3)
+        var req = URLRequest(url: base.appendingPathComponent("/api/snapshot"), timeoutInterval: 3)
         req.cachePolicy = .reloadIgnoringLocalCacheData
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             guard let self else { return }
@@ -58,6 +85,62 @@ final class GatewayStore: ObservableObject {
                 }
             }
         }.resume()
+    }
+
+    func fetchModels() {
+        URLSession.shared.dataTask(with: base.appendingPathComponent("/models")) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let list = try? JSONDecoder().decode([ModelItem].self, from: data) else { return }
+            DispatchQueue.main.async { self.models = list }
+        }.resume()
+    }
+
+    func fetchCurve() {
+        URLSession.shared.dataTask(with: base.appendingPathComponent("/api/token-curve")) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let local = obj["local"] as? [[String: Any]] else { return }
+            let pts = local.suffix(24).compactMap { d -> CurvePoint? in
+                guard let t = d["t"] as? Double else { return nil }
+                return CurvePoint(t: t,
+                                  tokens: (d["tokens"] as? Int) ?? Int((d["tokens"] as? Double) ?? 0),
+                                  requests: (d["requests"] as? Int) ?? Int((d["requests"] as? Double) ?? 0))
+            }
+            DispatchQueue.main.async { self.curve = pts }
+        }.resume()
+    }
+
+    /// POST /switch 或 /stop（admin 动作，body {"model": name}）
+    private func adminAction(_ path: String, model: String, done: @escaping (String) -> Void) {
+        var req = URLRequest(url: base.appendingPathComponent(path), timeoutInterval: 180)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model])
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                let ok = (200..<300).contains(code)
+                done(ok ? "✅ \(model) 完成"
+                        : "❌ \(model) 失败(\(code)): \(body.prefix(120))")
+                self?.refresh(); self?.fetchModels()
+            }
+        }.resume()
+    }
+
+    func switchModel(_ name: String, then: ((Bool) -> Void)? = nil) {
+        actionMessage = "切换 \(name) 中…（首次加载约 5~10s）"
+        adminAction("/switch", model: name) { [weak self] msg in
+            self?.actionMessage = msg
+            then?(msg.hasPrefix("✅"))
+        }
+    }
+
+    func stopService(_ name: String) {
+        actionMessage = "停止 \(name) 中…"
+        adminAction("/stop", model: name) { [weak self] msg in
+            self?.actionMessage = msg
+        }
     }
 
     var usedGB: String {
@@ -194,16 +277,120 @@ struct MainWindowView: View {
             Picker("", selection: Binding(get: { store.tab }, set: { store.tab = $0 })) {
                 Text("总览").tag(0)
                 Text("模型服务").tag(1)
-                Text("本地推理").tag(2)
+                Text("模型池").tag(2)
+                Text("监控台").tag(3)
+                Text("本地推理").tag(4)
             }
             .pickerStyle(.segmented).labelsHidden().padding(12)
             switch store.tab {
             case 0: OverviewView(store: store)
             case 1: ServicesView(store: store)
+            case 2: PoolsView(store: store)
+            case 3: MonitorView(store: store)
             default: InferenceView(store: store)
             }
         }
         .frame(minWidth: 560, minHeight: 400)
+    }
+}
+
+// ─── 模型池页 ──────────────────────────────────────────────────
+
+struct PoolsView: View {
+    @ObservedObject var store: GatewayStore
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if !store.actionMessage.isEmpty {
+                Text(store.actionMessage)
+                    .font(.callout)
+                    .padding(8).frame(maxWidth: .infinity)
+                    .background(Color.blue.opacity(0.08))
+            }
+            List {
+                ForEach(store.models, id: \.name) { m in
+                    HStack(spacing: 10) {
+                        Circle()
+                            .fill(m.active == true ? Color.green : Color.secondary.opacity(0.4))
+                            .frame(width: 9, height: 9)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(m.name).font(.body.weight(.medium))
+                                Text(m.model_type ?? "llm").font(.caption2)
+                                    .padding(.horizontal, 5).padding(.vertical, 1)
+                                    .background(Color.blue.opacity(0.12), in: Capsule())
+                                Text(m.mode ?? "").font(.caption2).foregroundColor(.secondary)
+                            }
+                            Text(m.description ?? "")
+                                .font(.caption).foregroundColor(.secondary).lineLimit(1)
+                        }
+                        Spacer()
+                        if m.active == true {
+                            Button("停止") { store.stopService(m.name) }
+                                .controlSize(.small)
+                        } else {
+                            Button("切换到此模型") { store.switchModel(m.name) }
+                                .controlSize(.small)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+            Text("pool 树状视图（iff/<pool> 候选链）将在接入 /admin/model-pools 后补全")
+                .font(.caption2).foregroundColor(.secondary).padding(6)
+        }
+    }
+}
+
+// ─── 监控台页 ──────────────────────────────────────────────────
+
+struct MonitorView: View {
+    @ObservedObject var store: GatewayStore
+
+    private var totalRequests: Int { store.curve.reduce(0) { $0 + $1.requests } }
+    private var totalTokens: Int { store.curve.reduce(0) { $0 + $1.tokens } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                StatTile(title: "24h 请求", value: "\(totalRequests)")
+                StatTile(title: "24h Tokens", value: "\(totalTokens)")
+                StatTile(title: "网关状态", value: store.gatewayUp ? "在线 :8999" : "离线")
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("每小时请求数（近 24h）").font(.subheadline).foregroundColor(.secondary)
+                if store.curve.isEmpty {
+                    Text("暂无数据 — 发起一次对话后这里会出现曲线")
+                        .foregroundColor(.secondary).frame(maxWidth: .infinity, minHeight: 120)
+                } else {
+                    Chart(store.curve, id: \.t) { p in
+                        BarMark(
+                            x: .value("时间", Date(timeIntervalSince1970: p.t)),
+                            y: .value("请求", p.requests)
+                        )
+                        .foregroundStyle(Color.blue.opacity(0.7))
+                    }
+                    .chartYAxis(.hidden)
+                    .frame(height: 140)
+                }
+            }
+            Spacer()
+        }
+        .padding(20)
+    }
+}
+
+struct StatTile: View {
+    let title: String
+    let value: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption).foregroundColor(.secondary)
+            Text(value).font(.title3.weight(.semibold).monospacedDigit())
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
