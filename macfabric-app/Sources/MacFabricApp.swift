@@ -239,9 +239,10 @@ final class GatewayStore: ObservableObject {
         refresh(); fetchModels(); fetchCurve(); fetchPools(); fetchCloud(); scanLocalModels(); fetchMetrics()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             self?.refresh(); self?.fetchModels(); self?.fetchDownloadStatus()
+            self?.fetchPools()   // 池可能被其它页面/服务端联动改变（如卸载触发的候选清除）
         }
         curveTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            self?.fetchCurve()
+            self?.fetchCurve(); self?.fetchCloud()   // 云端发现/注册表周期性变化
         }
     }
 
@@ -431,7 +432,10 @@ final class GatewayStore: ObservableObject {
             DispatchQueue.main.async {
                 self?.actionMessage = (200..<300).contains(code)
                     ? "✅ \(name) 已卸载" : "❌ 卸载失败(\(code)): \(body.prefix(120))"
-                self?.fetchModels()
+                // 卸载是跨页面事件：模型列表、池（服务端已联动清除候选）、
+                // 本地扫描、下载状态全部即时刷新 — 不等轮询、不用切页面
+                self?.fetchModels(); self?.fetchPools()
+                self?.scanLocalModels(); self?.fetchDownloadStatus()
             }
         }.resume()
     }
@@ -1322,10 +1326,10 @@ struct PoolCard: View {
                         }
                         // 协议标签：本地 OAI 恒有 + ANT 协议；云端按注册表三态
                         if c.kind != "cloud" {
-                            Chip("OAI")
-                            if localModel(c)?.anthropic_native == true { Chip("ANT 协议", color: Color.thJudge) }
+                            Chip("openai")
+                            if localModel(c)?.anthropic_native == true { Chip("anthropic", color: Color.thJudge) }
                         } else {
-                            Chip("OAI", color: Color.thLlm)
+                            Chip("openai", color: Color.thLlm)
                         }
                         Spacer()
                         // 换模型：本机 + 云端全部模型可作候选
@@ -1780,8 +1784,8 @@ struct CloudProviderCard: View {
                     VStack(alignment: .leading, spacing: 1) {
                         HStack(spacing: 6) {
                             Text(pv.name).font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
-                            Chip("OAI")
-                            if (pv.anthropic_base ?? "").isEmpty == false { Chip("ANT 协议", color: Color.thJudge) }
+                            Chip("openai")
+                            if (pv.anthropic_base ?? "").isEmpty == false { Chip("anthropic", color: Color.thJudge) }
                         }
                         Text(pv.openai_base ?? "").font(.system(size: 10.5, design: .monospaced))
                             .foregroundColor(.dim).lineLimit(1)
@@ -1827,8 +1831,8 @@ struct CloudProviderCard: View {
                     }
                     Text(spec.id).font(.system(size: 12.5)).foregroundColor(.ink)
                     // 协议可用性：OAI 发现恒有；ANT 协议按注册表
-                    Chip("OAI", color: Color.thLlm)
-                    if spec.anthropic == true { Chip("ANT 协议", color: Color.thJudge) }
+                    Chip("openai", color: Color.thLlm)
+                    if spec.anthropic == true { Chip("anthropic", color: Color.thJudge) }
                     if spec.manual == true { Chip("手填") }
                     // F5: VL 标签（supports_vision 三态；tag 动作切换）
                     if spec.supports_vision == true {
