@@ -240,15 +240,20 @@ final class GatewayStore: ObservableObject {
     private var base: URL { URL(string: GW_BASE)! }
     private var timer: Timer?
     private var curveTimer: Timer?
+    /// 主窗口可见性 — 菜单栏常驻应用，窗口关闭后暂停轮询（空转打点无意义；
+    /// 菜单栏迷你条是独立 store，打开菜单时刷新一次）
+    var windowVisible = true
 
     init() {
         refresh(); fetchModels(); fetchCurve(); fetchPools(); fetchCloud(); scanLocalModels(); fetchMetrics()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            self?.refresh(); self?.fetchModels(); self?.fetchDownloadStatus()
-            self?.fetchPools()   // 池可能被其它页面/服务端联动改变（如卸载触发的候选清除）
+            guard let self, self.windowVisible else { return }
+            self.refresh(); self.fetchModels(); self.fetchDownloadStatus()
+            self.fetchPools()   // 池可能被其它页面/服务端联动改变（如卸载触发的候选清除）
         }
         curveTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            self?.fetchCurve(); self?.fetchCloud()   // 云端发现/注册表周期性变化
+            guard let self, self.windowVisible else { return }
+            self.fetchCurve(); self.fetchCloud()   // 云端发现/注册表周期性变化
         }
     }
 
@@ -2341,6 +2346,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    // 主窗口可见性 → 轮询开关（关闭窗口即暂停 3s/30s 打点，重开即恢复）
+    func windowWillClose(_ notification: Notification) { store.windowVisible = false }
+    func windowDidBecomeKey(_ notification: Notification) { store.windowVisible = true }
 
     /// 最小化/关闭后从菜单栏、Dock 点击都能调回
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
