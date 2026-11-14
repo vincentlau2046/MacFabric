@@ -106,6 +106,21 @@ struct CurvePoint: Codable {
     var requests: Int
 }
 
+struct PoolCandidate: Codable {
+    var id: String
+    var priority: Int
+    var kind: String?
+    var target: String?
+}
+struct PoolDef: Codable {
+    var enabled: Bool?
+    var candidates: [PoolCandidate]?
+}
+struct PoolsPayload: Codable {
+    var revision: Int
+    var pools: [String: PoolDef]?
+}
+
 final class GatewayStore: ObservableObject {
     @Published var snapshot: Snapshot?
     @Published var gatewayUp = false
@@ -117,6 +132,8 @@ final class GatewayStore: ObservableObject {
     @Published var curve: [CurvePoint] = []
     @Published var actionMessage = ""
     @Published var hubExpanded = ""
+    @Published var pools: PoolsPayload?
+    @Published var uninstallConfirm: String? = nil   // F2: 待确认卸载的能力包名
     var onMemoryInsufficient: ((_ name: String, _ reason: String) -> Void)?
 
     private let base = URL(string: "http://127.0.0.1:8999")!
@@ -124,7 +141,7 @@ final class GatewayStore: ObservableObject {
     private var curveTimer: Timer?
 
     init() {
-        refresh(); fetchModels(); fetchCurve()
+        refresh(); fetchModels(); fetchCurve(); fetchPools(); cachePoolsRaw()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             self?.refresh(); self?.fetchModels()
         }
@@ -151,6 +168,83 @@ final class GatewayStore: ObservableObject {
             guard let self, let data,
                   let list = try? JSONDecoder().decode([ModelItem].self, from: data) else { return }
             DispatchQueue.main.async { self.models = list }
+        }.resume()
+    }
+
+    func fetchPools() {
+        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/model-pools")) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let pl = try? JSONDecoder().decode(PoolsPayload.self, from: data) else { return }
+            DispatchQueue.main.async { self.pools = pl }
+        }.resume()
+    }
+
+    /// F1: 候选优先级上移/下移 — raw 为基底改 priority，PUT + expected_revision (CAS)
+    func reorderCandidate(pool: String, candidateId: String, up: Bool) {
+        guard var raw = poolsRaw,
+              var poolsCfg = raw["pools"] as? [String: Any],
+              var cands = (poolsCfg[pool] as? [String: Any])?["candidates"] as? [[String: Any]],
+              let rev = pools?.revision else { return }
+        cands.sort { ($0["priority"] as? Int ?? 0) < ($1["priority"] as? Int ?? 0) }
+        guard let idx = cands.firstIndex(where: { $0["id"] as? String == candidateId }) else { return }
+        let swap = up ? idx - 1 : idx + 1
+        guard cands.indices.contains(swap) else { return }
+        let a = cands[idx]["priority"] as? Int ?? 0
+        let b = cands[swap]["priority"] as? Int ?? 0
+        cands[idx]["priority"] = b
+        cands[swap]["priority"] = a
+        if var poolCfg = poolsCfg[pool] as? [String: Any] {
+            poolCfg["candidates"] = cands
+            poolsCfg[pool] = poolCfg
+        }
+        raw["pools"] = poolsCfg
+        raw["expected_revision"] = rev
+        var req = URLRequest(url: base.appendingPathComponent("/admin/model-pools"), timeoutInterval: 30)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: raw)
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                self?.actionMessage = (200..<300).contains(code)
+                    ? "✅ 优先级已更新" : "❌ 更新失败(\(code)): \(body.prefix(100))"
+                self?.fetchPools()
+            }
+        }.resume()
+    }
+
+    var poolsRaw: [String: Any]? {
+        // raw 由 GET 携带（编辑基底）；解码到 [String: Any] 供 CAS 回写
+        if let raw = _poolsRawCache { return raw }
+        return nil
+    }
+    private var _poolsRawCache: [String: Any]?
+    func cachePoolsRaw() {
+        guard let url = URL(string: "http://127.0.0.1:8999/admin/model-pools") else { return }
+        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let raw = obj["raw"] as? [String: Any] else { return }
+            DispatchQueue.main.async { self._poolsRawCache = raw }
+        }.resume()
+    }
+
+    /// F2: 能力包卸载 = 停服务 + 删 models.d YAML + 热重载
+    func uninstallPack(_ name: String) {
+        actionMessage = "卸载 \(name) 中…"
+        var req = URLRequest(url: base.appendingPathComponent("/admin/packs/uninstall"), timeoutInterval: 60)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": name])
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                self?.actionMessage = (200..<300).contains(code)
+                    ? "✅ \(name) 已卸载" : "❌ 卸载失败(\(code)): \(body.prefix(120))"
+                self?.fetchModels()
+            }
         }.resume()
     }
 
@@ -565,12 +659,14 @@ struct HubRow: View {
 
 struct Chip: View {
     let text: String
-    init(_ text: String) { self.text = text }
+    var color: Color? = nil            // 线色参数：VL 徽章等能力染色
+    init(_ text: String, color: Color? = nil) { self.text = text; self.color = color }
     var body: some View {
-        Text(text).font(.system(size: 11.5)).foregroundColor(.dim)
+        Text(text).font(.system(size: 11.5))
+            .foregroundColor(color ?? .dim)
             .padding(.horizontal, 9).padding(.vertical, 2)
-            .overlay(Capsule().stroke(Color.lineC, lineWidth: 1))
-            .background(Color.white.opacity(0.03), in: Capsule())
+            .overlay(Capsule().stroke(color ?? Color.lineC, lineWidth: 1))
+            .background(color.map { $0.opacity(0.10) } ?? Color.white.opacity(0.03), in: Capsule())
     }
 }
 
@@ -683,14 +779,17 @@ struct ModelRowView: View {
 struct SmallBtn: View {
     var title: String
     var primary = false
+    var disabled = false
     let action: () -> Void
-    init(_ title: String, primary: Bool = false, action: @escaping () -> Void) {
-        self.title = title; self.primary = primary; self.action = action
+    init(_ title: String, primary: Bool = false, disabled: Bool = false, action: @escaping () -> Void) {
+        self.title = title; self.primary = primary; self.disabled = disabled; self.action = action
     }
     var body: some View {
         Button(title, action: action)
             .font(.system(size: 11.5, weight: primary ? .semibold : .regular))
             .buttonStyle(.plain)
+            .disabled(disabled)
+            .opacity(disabled ? 0.35 : 1)
             .padding(.horizontal, 10).padding(.vertical, 3)
             .background(primary ? Color.accent : Color.white.opacity(0.06),
                         in: RoundedRectangle(cornerRadius: 6))
@@ -724,18 +823,11 @@ struct ChatStrip: View {
 
 // ─── 模型池 / 监控台 ────────────────────────────────────────────
 
-/// 设计稿默认池五件套（v1 静态目录，候选点亮跟实际运行态走）
-let defaultPools: [(String, String, [(String, String, Bool)])] = [
-    ("iff/fast", "快速对话",
-     [("1", "qwen3-4b", true), ("2", "glm-5", false)]),
-    ("iff/small", "轻量任务 · 意图分类",
-     [("1", "qwen3-1.7b", true), ("2", "glm-5-flash", false)]),
-    ("iff/premium", "高质量长文",
-     [("1", "glm-5", false)]),
-    ("iff/txt2img", "文生图",
-     [("1", "mflux-schnell", true), ("2", "seedream-4.0", false)]),
-    ("iff/img2img", "图生图 · 编辑",
-     [("1", "mflux-schnell-edit", true), ("2", "seedream-edit", false)]),
+/// 模型池：真数据（GET /admin/model-pools）— 角色池 + 竖排候选链 + 优先级可调（CAS PUT）
+let poolUseLabels: [String: String] = [
+    "fast": "快速对话 · 低延迟优先",
+    "small": "轻量任务 · 意图分类",
+    "premium": "高质量长文 · 云端兜底",
 ]
 
 struct PoolsView: View {
@@ -749,13 +841,26 @@ struct PoolsView: View {
                         .padding(8).frame(maxWidth: .infinity)
                         .background(Color.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 12)], spacing: 12) {
-                    ForEach(defaultPools, id: \.0) { pool in
-                        PoolCard(store: store, name: pool.0, use: pool.1, candidates: pool.2)
+                if let pools = store.pools, let cfg = pools.pools, !cfg.isEmpty {
+                    // 固定角色序：fast → small → premium，其余追加
+                    let order = ["fast", "small", "premium"]
+                    let names = cfg.keys.sorted { (a, b) in
+                        let ia = order.firstIndex(of: a) ?? 99
+                        let ib = order.firstIndex(of: b) ?? 99
+                        return ia != ib ? ia < ib : a < b
+                    }
+                    ForEach(names, id: \.self) { name in
+                        PoolCard(store: store, name: name, def: cfg[name]!)
+                    }
+                    Text("候选按优先级竖排（数字小者优先）— 路由自上而下逐个尝试；↑↓ 调整优先级即时生效（revision CAS）")
+                        .font(.system(size: 11)).foregroundColor(.faint)
+                } else {
+                    Card {
+                        Text(store.gatewayUp ? "池配置加载中…" : "网关离线 — 启动后此处显示角色池")
+                            .font(.system(size: 12)).foregroundColor(.faint)
+                            .frame(maxWidth: .infinity, minHeight: 60)
                     }
                 }
-                Text("嵌入与重排不入池 — 基本不更换的能力走静态直连；池配置当前为规划目录，网关侧 iff/<pool> 路由接入后此页即实时")
-                    .font(.system(size: 11)).foregroundColor(.faint)
             }.padding(16)
         }
     }
@@ -764,44 +869,69 @@ struct PoolsView: View {
 struct PoolCard: View {
     var store: GatewayStore
     let name: String
-    let use: String
-    let candidates: [(String, String, Bool)]
+    let def: PoolDef
+
+    var candidates: [PoolCandidate] {
+        (def.candidates ?? []).sorted { $0.priority < $1.priority }
+    }
+    var use: String { poolUseLabels[name] ?? "" }
+    var activeCount: Int { candidates.filter { isActive($0) }.count }
+
+    func isActive(_ c: PoolCandidate) -> Bool {
+        if c.kind == "cloud" { return false }
+        return localModel(c)?.active == true
+    }
+    func localModel(_ c: PoolCandidate) -> ModelItem? {
+        store.models.first { $0.name == (c.target ?? c.id) }
+    }
+    func isVL(_ c: PoolCandidate) -> Bool {
+        c.kind == "cloud" ? false : localModel(c)?.model_type == "vl"
+    }
 
     var body: some View {
         Card {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    Text(name).font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
+                    Text("iff/\(name)").font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
                     Text(use).font(.system(size: 11.5)).foregroundColor(.dim)
                     Spacer()
-                    let onCount = candidates.filter { isCandidateActive($0.1) }.count
-                    Text(onCount > 0 ? "● 调用中" : "\(onCount) 就绪")
-                        .font(.system(size: 11)).foregroundColor(onCount > 0 ? .okC : .faint)
+                    Text(activeCount > 0 ? "● 调用中" : "\(candidates.count) 候选")
+                        .font(.system(size: 11)).foregroundColor(activeCount > 0 ? .okC : .faint)
                 }
-                ForEach(candidates, id: \.1) { c in
+                ForEach(Array(candidates.enumerated()), id: \.element.id) { idx, c in
                     HStack(spacing: 8) {
-                        Text(c.0).font(.system(size: 11, design: .monospaced)).foregroundColor(.faint)
-                            .frame(width: 12)
-                        Circle().fill(isCandidateActive(c.1) ? Color.okC : Color.faint.opacity(0.5))
+                        Text("\(c.priority)").font(.system(size: 11, design: .monospaced)).foregroundColor(.faint)
+                            .frame(width: 16)
+                        Circle().fill(isActive(c) ? Color.okC : Color.faint.opacity(0.5))
                             .frame(width: 7, height: 7)
-                        Text(c.1).font(.system(size: 12.5)).foregroundColor(.ink)
-                        Chip(isLocal(c.1) ? "本机" : "云端")
+                        Text(c.target ?? c.id).font(.system(size: 12.5)).foregroundColor(.ink)
+                        Chip(c.kind == "cloud" ? "云端" : "本机")
+                        // F5: VL 能力徽章（本地模型 model_type == vl）
+                        if isVL(c) {
+                            Chip("VL", color: Color.thVl)
+                        }
+                        if idx == 0 {
+                            Text("首选").font(.system(size: 10, weight: .semibold))
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(Color.accent.opacity(0.15), in: RoundedRectangle(cornerRadius: 5))
+                                .foregroundColor(.accent)
+                        }
                         Spacer()
-                        Text(isCandidateActive(c.1) ? "调用中" : "待命")
-                            .font(.system(size: 11)).foregroundColor(isCandidateActive(c.1) ? .okC : .dim)
+                        // F1: 优先级可调 — ↑↓ 换相邻优先级，PUT CAS 回写
+                        HStack(spacing: 3) {
+                            SmallBtn("↑", disabled: idx == 0) {
+                                store.reorderCandidate(pool: name, candidateId: c.id, up: true)
+                            }
+                            SmallBtn("↓", disabled: idx == candidates.count - 1) {
+                                store.reorderCandidate(pool: name, candidateId: c.id, up: false)
+                            }
+                        }
                     }
                     .padding(.vertical, 3)
                 }
             }
             .padding(12)
         }
-    }
-
-    func isLocal(_ name: String) -> Bool {
-        store.models.contains { $0.name == name }
-    }
-    func isCandidateActive(_ name: String) -> Bool {
-        store.models.first { $0.name == name }?.active == true
     }
 }
 
@@ -902,6 +1032,7 @@ struct PacksView: View {
 struct PackCard: View {
     var store: GatewayStore
     let pack: (String, String, String, String?, String?)
+    var confirmingUninstall: Bool { store.uninstallConfirm == pack.1 }   // 两击确认，防误删
 
     var installed: Bool {
         guard let target = pack.4 else { return true }          // OCR 内置即就绪
@@ -926,6 +1057,18 @@ struct PackCard: View {
                     Spacer()
                     if installed {
                         Chip(pack.4 == nil ? "已就绪" : "已安装")
+                        if let target = pack.4 {
+                            if confirmingUninstall {
+                                SmallBtn("确认卸载", primary: true) {
+                                    store.uninstallConfirm = nil
+                                    store.uninstallPack(target)
+                                }
+                                SmallBtn("取消") { store.uninstallConfirm = nil }
+                            } else {
+                                SmallBtn("卸载") { store.uninstallConfirm = pack.1 }
+                                    .help("停止服务并从 models.d 移除，模型文件保留在磁盘")
+                            }
+                        }
                     } else {
                         Text("安装").font(.system(size: 11, weight: .semibold))
                             .padding(.horizontal, 9).padding(.vertical, 3)

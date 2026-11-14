@@ -1,0 +1,67 @@
+# MacFabric — 特性端到端梳理（feature-driven audit，2026-11-14）
+
+> 用户裁决驱动：池按模型 role 定义（LLM 三默认池）、候选竖排可调优先级、模型可卸载、云端可增删、VL 能力标签。
+> 本文档 = 特性清单 + 语义 + 现状 + 批次。完成后逐项回填状态。
+
+## 一、特性清单（F1–F8）
+
+### F1 模型池（role 语义）— ✅ 本轮落地
+**语义**：池 = 模型角色的路由链，非静态目录。LLM 三默认角色池：
+- `iff/fast` 快速对话 — qwen3-4b(本机) → zhipu/glm-5(云端)
+- `iff/small` 轻量任务 — qwen3-4b → zhipu/glm-5-flash
+- `iff/premium` 高质量长文 — 纯云端 glm-5（本机 4B 不够格，`allow_cross_location: false`）
+
+**规则**：priority 数字小者优先；路由自上而下逐候选尝试（本地失败/离线 → 云端兜底）；候选含本机与云端混排（`kind: local|cloud`，云端以 `provider/model` 表示）。
+**实现**：`~/.inferfabric/model_pools.yaml`（revision CAS）；GET/POST `/admin/model-pools`（POST body = raw 配置 + expected_revision，409 revision_conflict 时重取重试）；App 模型池页 = 竖排候选链（priority 序号 + 点亮态 + 本机/云端 chip + 首选徽章 + ↑↓ 调序按钮）。
+**已验证**：换序 rev1→2、旧 revision 重发 409、还原 rev3；三池零 issue 加载。
+
+### F2 模型卸载 — ✅ 本轮落地
+**语义**：能力包页承载「安装/卸载一体」（裁决：不单做安装管理页）。卸载 = 停服务（若在跑）→ 删 models.d/<name>.yaml → 热重载；GGUF 模型文件保留磁盘，v2 再议缓存清理。
+**实现**：POST `/admin/packs/uninstall` {name}；App 能力包页已装卡「卸载」按钮（两击确认防误删）。
+**已验证**：卸载后 /models=[]、重复卸载 404、还原+reload 恢复。
+**修复**：handler 原误调 `pm.mgr.load_models()`（模块函数非方法）→ AttributeError 被 except 吞掉、注册表不刷新；改走 `pm.mgr.reload_models()`（同步 _gpu_state/_lifecycle）。
+
+### F3 云端接入 CRUD — 🔶 数据面就绪，UI 下批
+**语义**：服务商可增删（名称、OpenAI 兼容 base、API key、是否发现）；模型可发现/添加/删除（`enabled_models` 白名单 + 每模型 `supports_vision/supports_tools`）。
+**实现**：`~/.inferfabric/cloud_provider.yaml`（schema：providers.{name}.{openai_base, api_key, discovery_enabled, enabled_models, models}）；端点已注册：GET/DELETE `/admin/cloud/providers`、POST `/admin/cloud/discover|test|reload|provider-test`、GET `/admin/cloud/provider-models`。
+**待办**：App 云端接入页从静态演示换真数据（增删服务商、发现+勾选模型）。
+
+### F4 本地模型安装（发现/添加）— 🔶 后端有，UI 未接
+**语义**：与 F2 对称的「增加」侧：扫描本机 GGUF → 生成 models.d YAML → 出现在能力包/本地推理。
+**实现**：`manager.py` 有 `_discover_local_models(models_dir)`（/api/discover-models 类端点）。
+**待办**：安装向导（选文件 → 起名 → mem_baseline/role → 写 YAML）。
+
+### F5 VL 能力标签 — ✅ 本轮落地
+**语义**：模型具备「看图」能力需可配置可显示。本机：`model_type: vl`；云端：`supports_vision: true`。
+**实现**：模型池候选行 VL 徽章（thVl 粉线 chip）；能力包 vl 卡已有线色。待扩展：本地推理/Hub 卡片徽章。
+
+### F6 已对齐项（不再动）
+- 内存账本三字段（B=RAM−8G、R1 准入 + force 超卖 409 确认链路、sleep/wake llama_cpp Mac 语义）
+- 模型不默认启动（`mode: on_demand`，冷启动空闲、首请求自动唤醒）
+- 双协议 :8999（llama-server b12361 原生 /v1/messages 透传）
+- 织物暗色设计令牌全套、侧栏八页导航
+- Hub 接入地址复制、试聊、监控柱状图、四态 pill
+
+### F7 云端候选点亮 — 🔶 待定语义
+云端候选「点亮」= 最近一次该 provider 可达/调用成功。暂显「待命」；后续接 `/admin/model-pools/runtime` 的候选健康态。
+
+### F8 池管理扩展（v2）
+自建池/删除池/改池用途标签；候选拖拽排序（↑↓ 已够 v1）；池级 enabled 开关（端点已有 `/admin/model-pools/toggle`，UI 未接）。
+
+## 二、批次安排
+
+| 批次 | 内容 | 状态 |
+|---|---|---|
+| B1 | F1 池真数据页 + F2 卸载 + F5 VL 徽章 + 卸载 reload bug 修复 | ✅ 本轮 |
+| B2 | F3 云端接入页真数据（服务商 CRUD + 模型发现/勾选/删除） | 下批 |
+| B3 | F4 本地模型安装向导 + F5 徽章铺满全部卡片 + F8 池开关 | 后续 |
+| B4 | GAP.md 遗留：G3 菜单栏 mini 织物条、G4 监控补全、G5 设置页真数据 | 后续 |
+| B5 | G6 首启向导、G7 dmg 打包 | P4 |
+
+## 三、验证记录（本轮）
+
+- 池换序：POST raw+expected_revision → 200 → rev2，fast 首选变 zhipu/glm-5
+- CAS：旧 revision 重发 → 409 revision_conflict（App 端策略：重新 GET 后提示）
+- 还原：rev3 回 qwen3-4b 首选
+- 卸载：stopped=true → /models=[] → 重复 404 → 还原恢复
+- App 构建：`macfabric-app/build.sh` 通过

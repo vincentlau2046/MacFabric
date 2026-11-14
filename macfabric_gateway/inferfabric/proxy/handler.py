@@ -257,6 +257,8 @@ _POST_ROUTES = {
     "/admin/gpu-clear":        _admin(lambda h, pm: h._handle_gpu_clear(pm)),
     "/api/agents":             _admin(lambda h, pm: h._handle_post_agents(pm)),
     "/api/agents/reclassify":  _admin(lambda h, pm: h._handle_reclassify(pm)),
+    # MACFABRIC F2: 能力包卸载（安装管理的减法 — 停服务+删 YAML+重载）
+    "/admin/packs/uninstall":  _admin(lambda h, pm: h._handle_pack_uninstall(pm)),
 
     # ─── Admin: Cloud Provider Management (PR-D) ─────────────────
     "/admin/cloud/reload":      _admin(lambda h, pm: h._handle_cloud_reload(pm)),
@@ -1469,6 +1471,42 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return True
         self._send_json({"error": "Unauthorized", "status": "unauthorized"}, 401)
         return False
+
+    # ─── MACFABRIC F2: 能力包卸载 ─────────────────────────────────
+    def _handle_pack_uninstall(self, pm):
+        """卸载能力包 = 停服务（若在跑）→ 删 models.d/<name>.yaml → 热重载。
+        用户语义「卸载」由能力包页发起；模型文件（GGUF 磁盘缓存）保留，v2 再议清理。"""
+        data = self._read_body()
+        if data is None:
+            return
+        name = data.get("name", "")
+        if not name:
+            self._send_json({"error": "Missing name"}, 400)
+            return
+        model = pm.mgr._models.get(name)
+        if model is None:
+            self._send_json({"error": f"Unknown model: {name}"}, 404)
+            return
+        # 在跑先停（shared/independent 都走 stop_service）
+        stopped = None
+        if name in pm.mgr.active_services:
+            stopped = pm.mgr.stop_service(name)
+        yaml_path = getattr(model, "yaml_path", None)
+        if not yaml_path or not Path(yaml_path).exists():
+            self._send_json({"error": f"YAML not found: {yaml_path}"}, 404)
+            return
+        try:
+            Path(yaml_path).unlink()
+        except Exception as e:
+            self._send_json({"error": f"Delete failed: {e}"}, 500)
+            return
+        # D1: 下次 switch 会重读 models.d；这里主动重载使列表即时生效
+        # （必须走 mgr.reload_models：同步 _gpu_state/_lifecycle 引用；
+        #   早期版本误当 mgr 方法调 load_models → AttributeError 被 except 吞掉）
+        pm.mgr.reload_models()
+        log.info("Pack uninstalled: %s (stopped=%s)", name, bool(stopped))
+        self._send_json({"status": "uninstalled", "model": name,
+                         "stopped": bool(stopped)})
 
     def _handle_switch(self, pm):
         data = self._read_body()

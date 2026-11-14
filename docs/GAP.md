@@ -12,9 +12,9 @@
 | 3 | 总览 | 🔶 | ✅ 织物条+图例+预算数字+统计瓦片+能力卡格；缺**睡眠态卡**（"唤醒约 2s"）、四态 pill（设计稿 run/load/sleep/stop）、段 hover 显"模型名·基线/实测"与偏差黄点、机器型号行 |
 | 4 | 模型服务 Hub | 🔶 | ✅ 接入地址条+复制 Base URL/JSON/cURL；缺**协议 tab 切换**（OpenAI↔Anthropic 两套配置）、**复制环境变量**（ANTHROPIC_BASE_URL 方式）、**云端模型卡**（glm-5 等）、能力筛选 tabs、鉴权状态 |
 | 5 | 本地推理 | 🔶 | ✅ 一行一模型+切换/停止+试聊；缺 **sleep/wake 按钮**（端点已有 /sleep /wake）、装载模式/内存账小字列、四态 pill |
-| 6 | 模型池 | ❌ | 仅占位列表。缺：池树（iff/<pool> 候选链按调用顺序点亮）、候选排序拖拽、池管理下拉。**前置依赖：网关默认池配置（PLAN 裁决的 5 池）**，/admin/model-pools 现为空 |
+| 6 | 模型池 | 🔶 | ✅ 真数据（GET /admin/model-pools）：三角色池 fast/small/premium、候选竖排 priority 序、点亮态、本机/云端 chip、首选徽章、↑↓ 调序（POST CAS，409 重取）；缺：云端候选点亮（F7）、池开关 UI、拖拽 |
 | 7 | 监控台 | 🔶 | ✅ 24h 请求柱状图+统计瓦片；缺 tokens 曲线、TTFT/延迟分布、agent 调用统计（/api/agent-stats 现成） |
-| 8 | 能力包 | ❌ | 整页未做。**前置依赖：P3 能力端点**（/v1/audio/*、/ocr、/v1/embeddings 预设） |
+| 8 | 能力包 | 🔶 | ✅ 八卡目录 + 安装态对齐 models.d + **卸载按钮**（POST /admin/packs/uninstall 实测通过，reload bug 已修）；缺 P3 能力端点（audio/ocr/embeddings 预设）与安装向导（F4） |
 | 9 | 云端接入 | ❌ | 整页未做。数据端点现成（/admin/cloud/providers、presets、provider-models） |
 | 10 | 设置 | ❌ | 整页未做（鉴权开关、auto-switch、预算参数 MACFABRIC_RESERVE_MB、局域网共享 v1.5） |
 | 11 | 内存不足弹窗 | ❌ | 未做。**前置依赖：账本 R1 接线到 switch 路径**（memory_ledger 已实现+测试，未接入 manager.switch） |
@@ -27,7 +27,7 @@
 | 内存不足弹窗 | ✅ G1 | App 端 409 → NSAlert（预算/实测同位显示）→「仍然加载」force 重发，实测拒绝+确认加载双链路通过 |
 | sleep/wake（llama_cpp Mac 语义） | ✅ G1 | 睡眠=停进程+记 L2 标记（内存全释放），唤醒=清标记+switch 重载（4B Q4 实测 3s）；App 睡眠/唤醒按钮 + 四态 pill（snapshot sleep_states） |
 | 账本 R2/R3 调度 | ❌ | idle_sleep_candidates/pressure_eviction_plan 无后台循环调用 |
-| 默认池配置 | ❌ | 5 池未写入 models.d/pool 配置（G3 前置） |
+| 默认池配置 | ✅ | ~/.inferfabric/model_pools.yaml 三 LLM 角色池（fast/small/premium）+ cloud_provider.yaml zhipu 声明；特性梳理见 docs/FEATURES.md（F1–F8 批次） |
 
 ## 三、执行计划（优先序）
 
