@@ -77,6 +77,7 @@ struct Snapshot: Codable {
         var services_info: [String: ServiceInfo]?
         var gpu_used_mb: Int?
         var gpu_total_mb: Int?
+        var sleep_states: [String: String]?
     }
     struct ServiceInfo: Codable {
         var mode: String?
@@ -113,6 +114,7 @@ final class GatewayStore: ObservableObject {
     @Published var models: [ModelItem] = []
     @Published var curve: [CurvePoint] = []
     @Published var actionMessage = ""
+    var onMemoryInsufficient: ((_ name: String, _ reason: String) -> Void)?
 
     private let base = URL(string: "http://127.0.0.1:8999")!
     private var timer: Timer?
@@ -179,13 +181,40 @@ final class GatewayStore: ObservableObject {
         }.resume()
     }
 
-    func switchModel(_ name: String) {
-        actionMessage = "切换 \(name) 中…（首次加载约 5~10s）"
-        adminAction("/switch", model: name) { [weak self] msg in self?.actionMessage = msg }
+    func switchModel(_ name: String, force: Bool = false) {
+        actionMessage = force ? "已确认超卖，加载 \(name) 中…" : "切换 \(name) 中…（首次加载约 5~10s）"
+        var req = URLRequest(url: base.appendingPathComponent("/switch"), timeoutInterval: 180)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": name, "force": force])
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if code == 409, let obj = try? JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any],
+                   obj["status"] as? String == "memory_insufficient" {
+                    self.actionMessage = ""
+                    self.onMemoryInsufficient?(name, obj["message"] as? String ?? "内存不足")
+                    return
+                }
+                self.actionMessage = (200..<300).contains(code)
+                    ? "✅ \(name) 完成" : "❌ \(name) 失败(\(code)): \(body.prefix(120))"
+                self.refresh(); self.fetchModels()
+            }
+        }.resume()
     }
     func stopService(_ name: String) {
         actionMessage = "停止 \(name) 中…"
         adminAction("/stop", model: name) { [weak self] msg in self?.actionMessage = msg }
+    }
+    func sleepModel(_ name: String) {
+        actionMessage = "\(name) 睡眠中…（唤醒约 2s）"
+        adminAction("/sleep", model: name) { [weak self] msg in self?.actionMessage = msg }
+    }
+    func wakeModel(_ name: String) {
+        actionMessage = "唤醒 \(name) 中…"
+        adminAction("/wake", model: name) { [weak self] msg in self?.actionMessage = msg }
     }
 
     func sendPrompt() {
@@ -240,12 +269,13 @@ struct Card<Content: View>: View {
 struct Pill: View {
     enum Kind { case run, sleep, stop, err }
     let kind: Kind
-    static func from(active: Bool?, health: String?) -> Kind {
+    static func from(active: Bool?, health: String?, sleeping: Bool = false) -> Kind {
         if health == "❌" { return .err }
+        if sleeping { return .sleep }
         return active == true ? .run : .stop
     }
-    static func make(active: Bool?, health: String?) -> Pill {
-        Pill(kind: from(active: active, health: health))
+    static func make(active: Bool?, health: String?, sleeping: Bool = false) -> Pill {
+        Pill(kind: from(active: active, health: health, sleeping: sleeping))
     }
     var label: String {
         switch kind { case .run: "运行中"; case .sleep: "睡眠"; case .stop: "已停止"; case .err: "异常" }
@@ -386,7 +416,8 @@ struct OverviewView: View {
                 // 能力卡格
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 168), spacing: 12)], spacing: 12) {
                     ForEach(store.models, id: \.name) { m in
-                        CapabilityCard(model: m)
+                        CapabilityCard(model: m,
+                                       sleeping: store.snapshot?.status.sleep_states?[m.name] != nil)
                     }
                 }
             }
@@ -432,6 +463,7 @@ struct StatCard: View {
 
 struct CapabilityCard: View {
     let model: ModelItem
+    var sleeping = false
     var body: some View {
         Card {
             VStack(alignment: .leading, spacing: 7) {
@@ -443,9 +475,10 @@ struct CapabilityCard: View {
                 }
                 Text(model.name).font(.system(size: 12)).foregroundColor(.dim).lineLimit(1)
                 HStack {
-                    Pill.make(active: model.active, health: nil)
+                    Pill.make(active: model.active, health: nil, sleeping: sleeping)
                     Spacer()
-                    Text(model.peak_vram_mb.map { String(format: "%.1f GB", Double($0) / 1024) } ?? "按需")
+                    Text(sleeping ? "唤醒约 2s"
+                         : model.peak_vram_mb.map { String(format: "%.1f GB", Double($0) / 1024) } ?? "按需")
                         .font(.system(size: 11.5, design: .monospaced)).foregroundColor(.faint)
                 }
             }
@@ -485,9 +518,14 @@ struct HubView: View {
                                 CopyButton("复制 cURL", text: curlFor(m))
                             }
                             VStack(alignment: .leading, spacing: 6) {
+                                Text("OpenAI 协议").font(.system(size: 11)).foregroundColor(.faint)
                                 FieldRow(k: "Base URL", v: "http://127.0.0.1:8999/v1")
                                 FieldRow(k: "模型 ID", v: m.name)
                                 FieldRow(k: "端点", v: endpointFor(m))
+                                Text("Anthropic 协议（/v1/messages）").font(.system(size: 11)).foregroundColor(.faint)
+                                FieldRow(k: "环境变量", v: "ANTHROPIC_BASE_URL=http://127.0.0.1:8999 ANTHROPIC_MODEL=\(m.name)")
+                                Text("已停止的按需模型照样能调 — 首请求自动唤醒，约 2s")
+                                    .font(.system(size: 10.5)).foregroundColor(.faint)
                             }
                         }.padding(14)
                     }
@@ -582,8 +620,18 @@ struct InferenceView: View {
                                         .font(.system(size: 12)).foregroundColor(.faint)
                                 }
                                 Spacer()
-                                Pill.make(active: m.active, health: nil)
-                                if m.active == true {
+                                let sleeping = store.snapshot?.status.sleep_states?[m.name] != nil
+                                Pill.make(active: m.active, health: nil, sleeping: sleeping)
+                                if sleeping {
+                                    Button("唤醒") { store.wakeModel(m.name) }.buttonStyle(.plain)
+                                        .font(.system(size: 11.5)).foregroundColor(.accent)
+                                        .padding(.horizontal, 9).padding(.vertical, 3)
+                                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.accent.opacity(0.5), lineWidth: 1))
+                                } else if m.active == true {
+                                    Button("睡眠") { store.sleepModel(m.name) }.buttonStyle(.plain)
+                                        .font(.system(size: 11.5))
+                                        .padding(.horizontal, 9).padding(.vertical, 3)
+                                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.lineC, lineWidth: 1))
                                     Button("停止") { store.stopService(m.name) }.buttonStyle(.plain)
                                         .font(.system(size: 11.5))
                                         .padding(.horizontal, 9).padding(.vertical, 3)
@@ -644,7 +692,8 @@ struct PoolsView: View {
                                         .foregroundColor(.dim).lineLimit(1)
                                 }
                                 Spacer()
-                                Pill.make(active: m.active, health: nil)
+                                Pill.make(active: m.active, health: nil,
+                                          sleeping: store.snapshot?.status.sleep_states?[m.name] != nil)
                             }.padding(12)
                         }
                     }
@@ -727,7 +776,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ note: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
         buildMenuBarItem()
+        store.onMemoryInsufficient = { [weak self] name, reason in
+            self?.showMemoryDialog(name: name, reason: reason)
+        }
         showOverview()
+    }
+
+    /// G1 内存不足弹窗：预算与实测同位显示，确认后 force 超卖加载
+    private func showMemoryDialog(name: String, reason: String) {
+        let alert = NSAlert()
+        alert.messageText = "内存不足"
+        alert.informativeText = reason + "\n\n仍然加载可能导致系统卡顿或模型被 macOS 压缩/换页。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: "仍然加载")
+        guard let win = window else { return }
+        alert.beginSheetModal(for: win) { resp in
+            if resp == .alertSecondButtonReturn {
+                self.store.switchModel(name, force: true)
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

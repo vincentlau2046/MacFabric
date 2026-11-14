@@ -1493,7 +1493,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 pm.mgr.state.record_manual_stop(svc)
         elif target != "idle":
             pm.mgr.state.clear_manual_stop(target)
-        result = pm.mgr.switch(target)
+        # MACFABRIC G1: force=内存不足弹窗里用户点「仍然加载」
+        result = pm.mgr.switch(target, force=bool(data.get("force", False)))
+        if result.get("status") == "memory_insufficient":
+            self._send_json(result, 409)
+            return
         pm.mgr.state.set("switching_target", "")
         self._send_json(result)
 

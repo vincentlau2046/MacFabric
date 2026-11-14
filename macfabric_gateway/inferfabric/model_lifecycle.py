@@ -111,7 +111,11 @@ class ModelLifecycle:
 
         # PR-1: VRAM budget guard — reject if peak would exceed 97% of GPU
         # (95% was too tight: bge-m3 ~480MB + peak_vram_mb leaves <10MB margin)
-        if not engine_present and model.gpu_role != "none":
+        # MACFABRIC G1: macOS 上由内存账本 R1（manager._admit_memory，switch
+        # 入口处、支持 force 超卖确认）负责准入，此闸退役以免双重门槛语义打架；
+        # Linux 保持原行为。
+        from inferfabric import mac_platform as _mf
+        if not engine_present and model.gpu_role != "none" and not _mf.IS_MACOS:
             if model.peak_vram_mb > 0:
                 current_vram = gpu_used_mb()
                 gpu_total = gpu_total_mb()
@@ -623,6 +627,19 @@ class ModelLifecycle:
         model = self._models.get(name)
         if not model:
             return {"status": "error", "message": f"Unknown model: {name}"}
+
+        # MACFABRIC G1: llama.cpp 的 Mac 睡眠语义 —— 停进程即睡眠（统一内存
+        # 无独立显存，权重驻留无意义），唤醒=重新加载（4B Q4 约 6s）。
+        if model.type == "llama_cpp":
+            if self.state.get_sleep_state(name):
+                return {"status": "already_sleeping", "model": name}
+            result = self.stop_service(name)
+            if result.get("status") in ("ok", "stopped", "success", True) or not result.get("status") == "error":
+                self.state.set_sleep_state(name, 2)
+                return {"status": "ok", "model": name, "level": 2,
+                        "message": "llama.cpp 已睡眠（进程退出，内存全释放；唤醒约 2~6s）"}
+            return {**result, "model": name}
+
         if not model.is_vllm:
             return {"status": "error", "message": f"Model '{name}' is not a vLLM model"}
 
@@ -674,6 +691,9 @@ class ModelLifecycle:
         model = self._models.get(name)
         if not model:
             return {"status": "error", "message": f"Unknown model: {name}"}
+        # MACFABRIC G1: llama_cpp 唤醒由 Manager.wake_model 处理（清标记+switch）
+        if model.type == "llama_cpp":
+            return {"status": "delegated", "model": name}
         if not model.is_vllm:
             return {"status": "error", "message": f"Model '{name}' is not a vLLM model"}
 

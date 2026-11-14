@@ -444,6 +444,11 @@ class ModelConfig:
     # MACFABRIC P1: 上游引擎是否原生支持 Anthropic /v1/messages。
     # true → 透传（llama-server b12361）；false → 走 anthropic_bridge 翻译层。
     anthropic_native: bool = False
+    # MACFABRIC G1: 内存账本三字段（D2/D3 裁决）。
+    # mem_baseline_mb 为 0 时回退 peak_vram_mb；mode: resident | on_demand | ""
+    mem_baseline_mb: int = 0
+    ledger_mode: str = ""          # "resident" | "on_demand"（空=on_demand）
+    idle_timeout_min: float = 30.0
     vllm: Optional[VLLMConfig] = None
     sglang: Optional[SGLangConfig] = None
     comfyui: Optional[ComfyUIConfig] = None
@@ -881,7 +886,15 @@ def load_models(models_dir: Path = MODELS_DIR, include_applied: bool = True) -> 
                 ninfer_cfg = NInferConfig(**ninfer_fields)
 
         # Backward compat: YAML 'mode' → gpu_role
-        mode_val = raw.get("mode", raw.get("gpu_role", "none"))
+        # MACFABRIC G1: YAML `mode` 双语义消歧——resident/on_demand 归内存账本
+        # （ledger_mode），其余值保持上游 `mode → gpu_role` 别名行为。
+        _mode_raw = str(raw.get("mode", "")).lower()
+        if _mode_raw in ("resident", "on_demand"):
+            _ledger_mode = _mode_raw
+            mode_val = raw.get("gpu_role", "none")
+        else:
+            _ledger_mode = str(raw.get("ledger_mode", ""))
+            mode_val = raw.get("mode", raw.get("gpu_role", "none"))
         result[model_name] = ModelConfig(
             name=model_name,
             description=raw.get("description", model_name),
@@ -904,6 +917,9 @@ def load_models(models_dir: Path = MODELS_DIR, include_applied: bool = True) -> 
             replicas=raw.get("replicas", []),
             deployment=raw.get("deployment", ""),
             anthropic_native=bool(raw.get("anthropic_native", False)),
+            mem_baseline_mb=int(raw.get("mem_baseline_mb", 0)),
+            ledger_mode=_ledger_mode,
+            idle_timeout_min=float(raw.get("idle_timeout_min", 30)),
         )
         # 场景预设（iff tune）: 顶层 presets（内联兜底）+ 源 YAML 路径。
         # active_preset 不从 YAML 读——应用层（APPLIED_SCENARIOS_FILE）是单一来源。

@@ -23,10 +23,11 @@
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| 账本 R1 接线 | ❌ | `memory_ledger.MemoryLedger` 已实现+31 测试，但 `manager.switch` 未做准入检查（现在 YAML 还是 peak_vram_mb 旧字段，未迁移 mem_baseline_mb/mode/idle_timeout_min 三字段） |
+| 账本 R1 接线 | ✅ G1 | `manager._admit_memory` 动态账本准入（B=RAM−8G + 实测水位修正），409 memory_insufficient + force 确认超卖；YAML 已迁移三字段（`mode:` 双语义消歧：resident/on_demand 归账本，其余保持 gpu_role 别名）；macOS 上游 PR-1 VRAM 闸退役避免双重门槛 |
+| 内存不足弹窗 | ✅ G1 | App 端 409 → NSAlert（预算/实测同位显示）→「仍然加载」force 重发，实测拒绝+确认加载双链路通过 |
+| sleep/wake（llama_cpp Mac 语义） | ✅ G1 | 睡眠=停进程+记 L2 标记（内存全释放），唤醒=清标记+switch 重载（4B Q4 实测 3s）；App 睡眠/唤醒按钮 + 四态 pill（snapshot sleep_states） |
 | 账本 R2/R3 调度 | ❌ | idle_sleep_candidates/pressure_eviction_plan 无后台循环调用 |
-| 默认池配置 | ❌ | 5 池未写入 models.d/pool 配置 |
-| sleep/wake 映射账本 | 🔶 | /sleep /wake 端点有，未与账本 SLEEPING 态同步 |
+| 默认池配置 | ❌ | 5 池未写入 models.d/pool 配置（G3 前置） |
 
 ## 三、执行计划（优先序）
 

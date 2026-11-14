@@ -27,6 +27,12 @@ from .config import (
 from .state import StateDB, ServiceState, GPUMode, validate_transition
 from .gpu_lock import GPULock
 from .process_manager import ProcessManager
+
+
+def ModeOf(m):
+    """MACFABRIC G1: ModelConfig → 账本 Mode（ledger_mode 空值=on_demand）。"""
+    from inferfabric.memory_ledger import Mode
+    return Mode.RESIDENT if getattr(m, "ledger_mode", "") == "resident" else Mode.ON_DEMAND
 from .health import (
     gpu_used_mb,
     gpu_total_mb,
@@ -266,7 +272,37 @@ class ModelManager:
 
     # ── Switch ────────────────────────────────────────────────────
 
-    def switch(self, target: str) -> dict:
+    def _admit_memory(self, model, force: bool = False):
+        """MACFABRIC G1 — 内存账本 R1 准入（动态重建账本，无生命周期簿记）。
+
+        预算 B = RAM − 8G（mac_platform）；已在运行的模型按 resident 记账；
+        探测到的实测水位与账面取更紧约束。baseline≤0（未知）直接放行。
+        返回 None 表示无需检查（未知内存），否则返回 AdmitDecision。
+        """
+        from inferfabric.memory_ledger import MemoryLedger, Lifecycle
+        from inferfabric import mac_platform
+        if not mac_platform.IS_MACOS:
+            return None
+        baseline = getattr(model, "mem_baseline_mb", 0) or getattr(model, "peak_vram_mb", 0)
+        if baseline <= 0:
+            return None
+        ledger = MemoryLedger(
+            budget_mb=mac_platform.budget_mb(),
+            # 探针语义=「当前可用于推理的水位」= B − 实测已用（非 used 本身）
+            probe_available_mb=lambda: (
+                (mac_platform.budget_mb() - (mac_platform.mem_used_mb() or 0))
+                if mac_platform.mem_used_mb() is not None else None),
+        )
+        for name, m in self._models.items():
+            if name == model.name or name not in self.active_services:
+                continue
+            base2 = getattr(m, "mem_baseline_mb", 0) or getattr(m, "peak_vram_mb", 0)
+            e = ledger.register(name, base2, ModeOf(m))
+            e.state = Lifecycle.READY  # 运行中即占内存
+        e = ledger.register(model.name, baseline, ModeOf(model))
+        return ledger.admit(model.name, force=force)
+
+    def switch(self, target: str, force: bool = False) -> dict:
         # v5.6.8 debug: log stack trace on every switch to trace mysterious caller
         import traceback
         log.info("switch(%r) caller:\n%s", target, "".join(traceback.format_stack()[:-1]))
@@ -305,6 +341,12 @@ class ModelManager:
         model = self._models.get(target)
         if not model:
             return {"status": "error", "message": f"Unknown model: {target}. Available: {list(self._models.keys())}"}
+
+        # ── MACFABRIC G1: 内存账本 R1 准入（force=用户在弹窗点「仍然加载」）──
+        decision = self._admit_memory(model, force=force)
+        if decision is not None and not decision.ok:
+            return {"status": "memory_insufficient", "message": decision.reason,
+                    "available_mb": decision.available_mb, "needed_mb": decision.needed_mb}
 
         # Already running? (P0-1: check config drift before skipping)
         if target in self.active_services:
@@ -584,6 +626,15 @@ class ModelManager:
         return self._lifecycle.sleep_model(name)
 
     def wake_model(self, name: str) -> dict:
+        # MACFABRIC G1: llama.cpp 睡眠=停进程，唤醒=清标记+重新加载（switch
+        # 自带账本 R1 准入与状态机迁移）。
+        model = self._models.get(name)
+        if model is not None and model.type == "llama_cpp":
+            if not self._lifecycle.state.get_sleep_state(name):
+                return {"status": "already_awake", "model": name, "message": "Model is not sleeping"}
+            self._lifecycle.state.set_sleep_state(name, None)
+            self._lifecycle.state.clear_manual_stop(name)
+            return self.switch(name)
         return self._lifecycle.wake_model(name)
 
     # ── Discovery ─────────────────────────────────────────────────
