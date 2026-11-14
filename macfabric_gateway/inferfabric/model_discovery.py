@@ -53,8 +53,18 @@ def discover_local_models(models_dir: Path) -> dict:
             configured_ollama_refs.add(m.ollama.model_ref)
 
     # ── vLLM models (~/models/ with config.json) ──
-    models_base = Path.home() / "models"
-    if models_base.exists():
+    # Mac 版额外扫描 MacFabric/models（GGUF 实际放置处：models_dir 的上上级 /models）
+    scan_bases = [Path.home() / "models"]
+    try:
+        _mf_models = models_dir.parents[1] / "models"
+        if _mf_models.exists() and _mf_models not in scan_bases:
+            scan_bases.append(_mf_models)
+    except IndexError:
+        pass
+    for models_base in scan_bases:
+        if not models_base.exists():
+            continue
+
         def _scan_dirs(parent):
             return [c for c in sorted(parent.glob("*")) if c.is_dir() and not c.name.startswith(".")]
 
@@ -89,6 +99,31 @@ def discover_local_models(models_dir: Path) -> dict:
                     discovered.append({
                         "name": scan_dir.name, "type": "llama_cpp", "framework": "llama_cpp", "size_mb": size_mb,
                     })
+
+        # 根级散置 GGUF（Mac 习惯：模型文件直接丢在 models/ 下，非子目录）
+        configured_paths = set()
+        for m in models.values():
+            if (hasattr(m, "is_llama_cpp") and m.is_llama_cpp
+                    and hasattr(m, "llama_cpp") and m.llama_cpp):
+                configured_paths.add(str(Path(m.llama_cpp.model_path).expanduser().resolve()))
+        for gf in sorted(models_base.glob("*.gguf")):
+            stem = gf.stem
+            if str(gf.resolve()) in configured_paths:
+                continue  # 已配置（文件名≠配置名也精确排除）
+            if stem in {m.name for m in models.values()}:
+                continue  # 已配置
+            try:
+                size_mb = gf.stat().st_size // (1024 * 1024)
+            except Exception:
+                size_mb = 0
+            discovered.append({
+                "name": stem, "type": "llama_cpp", "framework": "llama_cpp", "size_mb": size_mb,
+            })
+
+    # 同名去重（子目录扫描与根级扫描可能重叠）
+    seen = set()
+    discovered = [d for d in discovered
+                  if d["name"] not in seen and not seen.add(d["name"])]
 
     # ── Ollama pulled models (ollama list) ──
     try:
@@ -138,22 +173,16 @@ def discover_local_models(models_dir: Path) -> dict:
     return {"discovered": discovered, "configured": configured}
 
 
-def auto_deploy(name: str, model_type: str, models_dir: Path, existing_models: dict, switch_fn) -> dict:
-    """Auto-generate YAML and deploy a discovered model.
+def install_yaml(name: str, model_type: str, models_dir: Path, existing_models: dict) -> dict:
+    """Auto-generate YAML for a discovered model — 只写配置不启动（Mac 语义：不默认启动）。
 
-    Args:
-        name: Model name.
-        model_type: Type string (e.g. "vllm", "llama_cpp").
-        models_dir: Path to models YAML directory.
-        existing_models: Dict of currently loaded models (for port scanning).
-        switch_fn: Callable(name) -> dict — the ModelManager.switch() method.
-
-    Returns:
-        dict with status message.
+    Mac（IS_MACOS）llama_cpp 模板：Metal 全层 offload + on_demand 账本三字段；
+    上游模板（gpu_layers: 0 纯 CPU）保留给非 Mac。
     """
     yaml_path = models_dir / f"{name}.yaml"
     if yaml_path.exists():
-        return {"status": "already_configured", "message": f"YAML already exists for {name}, running switch"}
+        return {"status": "already_configured",
+                "message": f"YAML already exists for {name}, running switch"}
 
     # Find next available port
     used_ports = set()
@@ -179,7 +208,37 @@ vllm:
 """
     elif model_type.startswith("llama_cpp"):
         port = max([p for p in used_ports if p >= 11435] + [11434]) + 1
-        yaml_content = f"""name: {name}
+        from . import mac_platform as _mf
+        if _mf.IS_MACOS:
+            gguf = ""
+            for base in [models_dir.parents[1] / "models", Path.home() / "models"]:
+                if base.exists():
+                    hits = sorted(base.glob(f"**/{name}*.gguf")) or sorted(base.glob(f"**/{name}/*.gguf"))
+                    if hits:
+                        gguf = str(hits[0])
+                        break
+            if not gguf:
+                return {"status": "error",
+                        "message": f"GGUF for {name} not found under MacFabric/models or ~/models"}
+            binary = models_dir.parents[1] / "engines" / "llama-b12361" / "llama-server"
+            binary_lines = f"  binary_path: {binary}\n" if binary.exists() else ""
+            yaml_content = f"""name: {name}
+description: "{name} (auto-installed, llama.cpp Metal)"
+type: llama_cpp
+gpu_role: shared
+model_type: llm
+# G1 账本三字段（D2/D3）：不默认启动，首请求自动唤醒
+mode: on_demand
+idle_timeout_min: 30
+llama_cpp:
+  model_path: {gguf}
+{binary_lines}  port: {port}
+  threads: 8
+  context_size: 16384
+  gpu_layers: 99
+"""
+        else:
+            yaml_content = f"""name: {name}
 description: "{name} (auto-deployed, llama.cpp)"
 type: llama_cpp
 gpu_role: none
@@ -204,7 +263,14 @@ llama_cpp:
         return {"status": "error", "message": f"Failed to write YAML: {e}"}
     log.info("Auto-generated YAML (atomic): %s", yaml_path)
 
-    # Reload models and switch
     from .config import load_models
     load_models(models_dir)  # refresh module-level cache
+    return {"status": "installed", "model": name, "yaml": str(yaml_path)}
+
+
+def auto_deploy(name: str, model_type: str, models_dir: Path, existing_models: dict, switch_fn) -> dict:
+    """Auto-generate YAML and deploy a discovered model (deprecated path: installs then switches)."""
+    result = install_yaml(name, model_type, models_dir, existing_models)
+    if result.get("status") not in ("installed", "already_configured"):
+        return result
     return switch_fn(name)

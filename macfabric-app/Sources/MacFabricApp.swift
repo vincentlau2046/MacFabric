@@ -140,6 +140,16 @@ struct CloudPayload: Codable {
     var providers: [CloudProvider]?
     var total_cloud_models: Int?
 }
+struct LocalDiscovered: Codable {
+    var name: String
+    var type: String?
+    var framework: String?
+    var size_mb: Int?
+}
+struct LocalModelsPayload: Codable {
+    var discovered: [LocalDiscovered]?
+    var configured: [String]?
+}
 
 final class GatewayStore: ObservableObject {
     @Published var snapshot: Snapshot?
@@ -162,6 +172,9 @@ final class GatewayStore: ObservableObject {
     @Published var cloudFormBase = ""
     @Published var cloudFormKey = ""
     @Published var cloudAddModel = ""
+    // F4: 本地模型发现/安装
+    @Published var localDiscovered: [LocalDiscovered] = []
+    @Published var localScanned = false
     var onMemoryInsufficient: ((_ name: String, _ reason: String) -> Void)?
 
     private let base = URL(string: "http://127.0.0.1:8999")!
@@ -169,7 +182,7 @@ final class GatewayStore: ObservableObject {
     private var curveTimer: Timer?
 
     init() {
-        refresh(); fetchModels(); fetchCurve(); fetchPools(); cachePoolsRaw(); fetchCloud()
+        refresh(); fetchModels(); fetchCurve(); fetchPools(); cachePoolsRaw(); fetchCloud(); scanLocalModels()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             self?.refresh(); self?.fetchModels()
         }
@@ -255,6 +268,24 @@ final class GatewayStore: ObservableObject {
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let raw = obj["raw"] as? [String: Any] else { return }
             DispatchQueue.main.async { self._poolsRawCache = raw }
+        }.resume()
+    }
+
+    /// F8: 单池 enabled 开关（服务端字段级原子修改 + expected_revision CAS）
+    func togglePool(_ name: String, enabled: Bool) {
+        guard let rev = pools?.revision else { return }
+        var req = URLRequest(url: base.appendingPathComponent("/admin/model-pools/toggle"), timeoutInterval: 30)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["pool": name, "enabled": enabled, "expected_revision": rev])
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                self?.actionMessage = (200..<300).contains(code)
+                    ? "✅ iff/\(name) 已\(enabled ? "启用" : "停用")" : "❌ 开关失败(\(code)): \(body.prefix(100))"
+                self?.fetchPools(); self?.cachePoolsRaw()
+            }
         }.resume()
     }
 
@@ -363,6 +394,36 @@ final class GatewayStore: ObservableObject {
                     ? okMsg : "❌ \(failPrefix)(\(code)): \(body.prefix(100))"
                 self?.fetchCloud()
                 self?.fetchPools(); self?.cachePoolsRaw()
+            }
+        }.resume()
+    }
+
+    /// F4: 扫描本机模型（~/models + MacFabric/models，含根级散置 GGUF）
+    func scanLocalModels() {
+        URLSession.shared.dataTask(with: base.appendingPathComponent("/local-models")) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let obj = try? JSONDecoder().decode(LocalModelsPayload.self, from: data) else { return }
+            DispatchQueue.main.async {
+                self.localDiscovered = obj.discovered ?? []
+                self.localScanned = true
+            }
+        }.resume()
+    }
+
+    /// F4: 安装 = 写 models.d YAML + 热重载，不启动（首请求自动唤醒）
+    func installLocalModel(_ m: LocalDiscovered) {
+        actionMessage = "安装 \(m.name) 中…"
+        var req = URLRequest(url: base.appendingPathComponent("/admin/packs/install"), timeoutInterval: 30)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": m.name, "type": m.type ?? "llama_cpp"])
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                self?.actionMessage = (200..<300).contains(code)
+                    ? "✅ \(m.name) 已安装（未启动 — 首请求自动唤醒）" : "❌ 安装失败(\(code)): \(body.prefix(120))"
+                self?.fetchModels(); self?.scanLocalModels()
             }
         }.resume()
     }
@@ -861,6 +922,8 @@ struct ModelRowView: View {
                         .font(.system(size: 11, design: .monospaced)).foregroundColor(.faint)
                 }
                 if sleeping { Pill(kind: .sleep) } else { Pill.make(active: m.active, health: nil) }
+                // F5: VL 能力徽章（model_type == vl）
+                if m.model_type == "vl" { Chip("VL", color: Color.thVl) }
                 Chip(loadChip)                       // 装载模式 chip
                 Text("基线 \(baselineGB)")
                     .font(.system(size: 11, design: .monospaced)).foregroundColor(.dim)
@@ -1016,6 +1079,11 @@ struct PoolCard: View {
                     Spacer()
                     Text(activeCount > 0 ? "● 调用中" : "\(candidates.count) 候选")
                         .font(.system(size: 11)).foregroundColor(activeCount > 0 ? .okC : .faint)
+                    // F8: 池级启停（服务端字段级 CAS）
+                    SmallBtn((def.enabled ?? true) ? "已启用" : "已停用",
+                             primary: def.enabled ?? true) {
+                        store.togglePool(name, enabled: !(def.enabled ?? true))
+                    }
                 }
                 ForEach(Array(candidates.enumerated()), id: \.element.id) { idx, c in
                     HStack(spacing: 8) {
@@ -1138,12 +1206,61 @@ struct PacksView: View {
 
     var body: some View {
         ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
-                ForEach(packs, id: \.1) { pk in
-                    PackCard(store: store, pack: pk)
+            VStack(alignment: .leading, spacing: 12) {
+                if !store.actionMessage.isEmpty {
+                    Text(store.actionMessage).font(.system(size: 12))
+                        .padding(8).frame(maxWidth: .infinity)
+                        .background(Color.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
                 }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
+                    ForEach(packs, id: \.1) { pk in
+                        PackCard(store: store, pack: pk)
+                    }
+                }
+                // F4: 本机模型发现/安装（与卸载对称；安装不启动）
+                LocalDiscoverCard(store: store)
             }
             .padding(16)
+        }
+    }
+}
+
+/// F4: 本机模型发现 — 扫描 ~/models 与 MacFabric/models（含根级散置 GGUF）
+struct LocalDiscoverCard: View {
+    var store: GatewayStore
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text("本机模型发现").font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
+                    Text("~/models · MacFabric/models").font(.system(size: 11)).foregroundColor(.faint)
+                    Spacer()
+                    SmallBtn("扫描") { store.scanLocalModels() }
+                }
+                if !store.localScanned {
+                    Text("点「扫描」查找未配置的本地模型（GGUF / vLLM 目录 / Ollama）")
+                        .font(.system(size: 11.5)).foregroundColor(.faint)
+                } else if store.localDiscovered.isEmpty {
+                    Text("没有新发现 — 磁盘上的模型都已配置").font(.system(size: 11.5)).foregroundColor(.faint)
+                } else {
+                    ForEach(store.localDiscovered, id: \.name) { m in
+                        HStack(spacing: 8) {
+                            Circle().fill(threadColor(m.type)).frame(width: 8, height: 8)
+                            Text(m.name).font(.system(size: 12.5)).foregroundColor(.ink)
+                            if let mb = m.size_mb, mb > 0 {
+                                Text("\(mb) MB").font(.system(size: 11, design: .monospaced)).foregroundColor(.faint)
+                            }
+                            Chip(m.framework ?? m.type ?? "模型")
+                            Spacer()
+                            SmallBtn("安装", primary: true) { store.installLocalModel(m) }
+                                .help("写入 models.d 并热重载；不会启动 — 首请求自动唤醒")
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+            .padding(12)
         }
     }
 }

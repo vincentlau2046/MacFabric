@@ -42,6 +42,7 @@ from .health_checker import DefaultHealthChecker
 from .interfaces import IStateDB, IProcessManager, IHealthChecker, IGPULock
 from .model_discovery import discover_local_models as _discover_local_models
 from .model_discovery import auto_deploy as _auto_deploy
+from .model_discovery import install_yaml as _install_yaml
 from .gpu_state import GpuStateMachine
 from .model_lifecycle import ModelLifecycle
 
@@ -659,13 +660,21 @@ class ModelManager:
             return {"status": "already_configured",
                     "message": f"YAML already exists for {name}"}
 
-        result = _auto_deploy(name, model_type, self.models_dir,
-                              self._models, self.switch)
-        # _auto_deploy writes YAML + calls switch_fn internally, but
-        # switch_fn uses the stale self._models snapshot → first-time
-        # deploy always fails with "Unknown model".  Reload and retry.
+        result = _install_yaml(name, model_type, self.models_dir, self._models)
         self.reload_models()
+        if result.get("status") not in ("installed", "already_configured"):
+            return result
         return self.switch(name)
+
+    def install_model(self, name: str, model_type: str) -> dict:
+        """安装能力包 = 生成 models.d YAML + 热重载，**不启动服务**。
+
+        Mac 语义（用户裁决：模型不要默认启动）——装载留给首请求自动唤醒
+        或用户在本地推理页手动切换。与 /admin/packs/uninstall 对称。"""
+        result = _install_yaml(name, model_type, self.models_dir, self._models)
+        if result.get("status") == "installed":
+            self.reload_models()
+        return result
 
     def pull_model(self, name: str, framework: str) -> dict:
         """Pull/download a model before deployment."""

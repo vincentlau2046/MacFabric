@@ -196,7 +196,7 @@ _GET_ROUTES = {
     "/status":                  lambda h, pm: h._send_json(pm.mgr.status()),
     "/models":                  lambda h, pm: h._send_json(pm.mgr.list_models()),
     "/profiles":                lambda h, pm: (log.warning("/profiles is deprecated"), h._send_json(pm.mgr.list_models()))[1],
-    "/local-models":            lambda h, pm: h._send_json({"discovered": [], "configured": list(pm.mgr._models.keys())}),
+    "/local-models":            lambda h, pm: h._send_json(pm.mgr.discover_local_models()),
     "/v1/models":               lambda h, pm: h._handle_v1_models(pm),
     "/system":                  lambda h, pm: h._send_json(h._system_info()),
     "/api/metrics":             lambda h, pm: h._handle_api_metrics(pm),
@@ -259,6 +259,7 @@ _POST_ROUTES = {
     "/api/agents/reclassify":  _admin(lambda h, pm: h._handle_reclassify(pm)),
     # MACFABRIC F2: 能力包卸载（安装管理的减法 — 停服务+删 YAML+重载）
     "/admin/packs/uninstall":  _admin(lambda h, pm: h._handle_pack_uninstall(pm)),
+    "/admin/packs/install":    _admin(lambda h, pm: h._handle_pack_install(pm)),
 
     # ─── Admin: Cloud Provider Management (PR-D) ─────────────────
     "/admin/cloud/reload":      _admin(lambda h, pm: h._handle_cloud_reload(pm)),
@@ -1507,6 +1508,18 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         log.info("Pack uninstalled: %s (stopped=%s)", name, bool(stopped))
         self._send_json({"status": "uninstalled", "model": name,
                          "stopped": bool(stopped)})
+
+    def _handle_pack_install(self, pm):
+        """安装能力包 = 发现产物写 models.d YAML + 热重载，不启动（Mac 语义）。"""
+        data = self._read_body()
+        name = ((data or {}).get("name") or "").strip()
+        model_type = ((data or {}).get("type") or "llama_cpp").strip()
+        if not name:
+            self._send_json({"error": "Missing name"}, 400)
+            return
+        result = pm.mgr.install_model(name, model_type)
+        code = 200 if result.get("status") in ("installed", "already_configured") else 400
+        self._send_json(result, code)
 
     def _handle_switch(self, pm):
         data = self._read_body()
