@@ -1847,9 +1847,19 @@ struct CloudProviderCard: View {
     @ViewBuilder private var cloudModelsSection: some View {
         let specs = pv.model_specs ?? []
         let enabled = Set(pv.enabled_models ?? [])
+        // 策展行 = spec 行 ∪ 已启用但未建 spec 的发现模型。发现模型 enable
+        // 只进白名单（不建 model_specs），只渲染 specs 会让已启用模型在
+        // 面板隐身、无法 VL 打标 — 合成行保证可见；点「标 VL」即落为真 spec
+        let specIds = Set(specs.map { $0.id })
+        let synthesized: [CloudModelSpec] = enabled.subtracting(specIds).sorted().map {
+            CloudModelSpec(id: $0, manual: false, supports_vision: nil,
+                           supports_tools: nil,
+                           anthropic: (pv.anthropic_base ?? "").isEmpty == false)
+        }
+        let rows = specs + synthesized
         VStack(alignment: .leading, spacing: 4) {
             Text("模型策展 — 勾选入白名单（enabled_models）后可入池路由").font(.system(size: 11)).foregroundColor(.faint)
-            ForEach(specs, id: \.id) { spec in
+            ForEach(rows, id: \.id) { spec in
                 HStack(spacing: 8) {
                     // 勾选 = enable/disable（可路由白名单）
                     SmallBtn(enabled.contains(spec.id) ? "已启用" : "未启用",
@@ -1878,7 +1888,7 @@ struct CloudProviderCard: View {
                 }
                 .padding(.vertical, 2)
             }
-            if specs.isEmpty {
+            if rows.isEmpty {
                 Text("暂无模型 — 点「测试」确认连通后，用下方输入框手填，或等待自动发现")
                     .font(.system(size: 11)).foregroundColor(.faint)
             }

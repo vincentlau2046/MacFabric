@@ -812,6 +812,11 @@ class CloudDiscovery:
                   二者不一致，必须显式传入，否则 spec 属性会被漏合并。
         """
         spec = cfg.model_specs.get(spec_key or model.model_id)
+        if spec is None:
+            # 落盘后 spec key 是短名（_serialize_providers 对含斜杠 model_id
+            # 取 split("/")[-1]）— 按 model_id 查不到时兜底短名键，
+            # 否则重启后打标属性对斜杠模型全部漏合并
+            spec = cfg.model_specs.get(model.model_id.split("/")[-1])
         if not spec:
             return model
         # 新字段

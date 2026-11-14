@@ -237,3 +237,14 @@
 - 实测（:8999 全量）：atlaswork 4 模型双协议 200；qianfan/glm-5.3 floor 场景
   200；atlaswork/glm-5.3 移除后干净 404；Qwen38-27B-VL 上游 502（服务方问题，
   保留观察）
+
+## 2026-11-14 深夜补丁 4 — VL 打标可见性修复（用户反馈：找不到在哪加 VL 标签）
+- 根因：发现模型 enable 只进白名单不建 model_specs，云端接入页模型列表
+  只渲染 specs → 已启用模型整行隐身，VL 打标按钮无从触达
+- 修复：UI 策展行 = specs ∪ 已启用未建 spec（合成行，含 anthropic 协议标记）；
+  点「标 VL」走 tag 动作即落真 spec（spec 缺失时网关本就自动创建）
+- 顺带：_merge_model_spec 查找兜底短名键（落盘后 spec key=短名，含斜杠
+  模型重启后打标属性漏合并）
+- 池调度侧已有 VL 感知（无需改）：selector 排序键把 vision 请求的
+  supports_vision 候选软优先（云模型读注册表 supports_vision，本地读
+  model_type==vl），无 VL 配置时按优先级正常调度
