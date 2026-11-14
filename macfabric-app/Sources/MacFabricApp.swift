@@ -1687,6 +1687,126 @@ struct SettingRow: View {
     }
 }
 
+// ─── G6: 首启向导（RAM 检测 → 预算确认 → 默认池 → 完成）─────────
+
+final class WizardState: ObservableObject {
+    @Published var page = 0   // 0 检测 / 1 预算 / 2 池 / 3 完成
+}
+
+struct WizardView: View {
+    @ObservedObject var ws: WizardState
+    let onFinish: () -> Void
+
+    private var ramGB: Int {
+        Int(ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024))
+    }
+    private var budgetGB: Int { ramGB - 8 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // 顶部进度
+            HStack(spacing: 6) {
+                ForEach(0..<4, id: \.self) { i in
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(i <= ws.page ? Color.accent : Color.white.opacity(0.10))
+                        .frame(height: 4)
+                }
+            }
+            .padding(.horizontal, 28).padding(.top, 24)
+            Spacer()
+            VStack(alignment: .leading, spacing: 14) {
+                switch ws.page {
+                case 0: welcomePage
+                case 1: budgetPage
+                case 2: poolsPage
+                default: donePage
+                }
+            }
+            .padding(.horizontal, 28)
+            Spacer()
+            HStack {
+                if ws.page > 0 { SmallBtn("上一步") { ws.page -= 1 } }
+                Spacer()
+                SmallBtn(ws.page == 3 ? "开始使用" : "下一步", primary: true) {
+                    if ws.page == 3 { onFinish() } else { ws.page += 1 }
+                }
+            }
+            .padding(.horizontal, 28).padding(.bottom, 22)
+        }
+        .frame(width: 520, height: 360)
+        .background(Color.panel)
+        .preferredColorScheme(.dark)
+    }
+
+    private var welcomePage: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("欢迎用 MacFabric").font(.system(size: 20, weight: .bold)).foregroundColor(.ink)
+            Text("Apple Silicon 小模型聚合平台 — 一个网关 :8999 同时讲 OpenAI 与 Anthropic 两种方言，本地小模型与云端大模型同一调用面。")
+                .font(.system(size: 13)).foregroundColor(.dim).fixedSize(horizontal: false, vertical: true)
+            Label("检测到内存：\(ramGB) GB", systemImage: "memorychip")
+                .font(.system(size: 13)).foregroundColor(.accent)
+        }
+    }
+
+    private var budgetPage: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("内存账本").font(.system(size: 20, weight: .bold)).foregroundColor(.ink)
+            Text("全局唯一公式：可加载预算 B = 物理内存 − 为系统保留")
+                .font(.system(size: 13)).foregroundColor(.dim)
+            HStack(spacing: 12) {
+                budgetTile("物理内存", "\(ramGB) GB")
+                Text("− 8 GB 保留").font(.system(size: 12)).foregroundColor(.faint)
+                budgetTile("账本预算 B", "\(budgetGB) GB")
+            }
+            Text("所有模型准入、睡眠、驱逐都只看这一个数字；内存不足时会弹窗确认而不是静默失败。")
+                .font(.system(size: 12)).foregroundColor(.faint).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var poolsPage: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("三个默认角色池").font(.system(size: 20, weight: .bold)).foregroundColor(.ink)
+            Text("池按模型角色定义，本地失败自动落到云端，候选优先级随时可调：")
+                .font(.system(size: 13)).foregroundColor(.dim)
+            VStack(alignment: .leading, spacing: 8) {
+                poolRow("iff/fast", "快速对话 · 低延迟优先", "qwen3-4b → glm-5")
+                poolRow("iff/small", "轻量任务 · 意图分类", "qwen3-4b → glm-5-flash")
+                poolRow("iff/premium", "高质量长文", "glm-5（云端）")
+            }
+        }
+    }
+
+    private var donePage: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("一切就绪").font(.system(size: 20, weight: .bold)).foregroundColor(.ink)
+            Text("• 网关已就绪 :8999（OpenAI /v1/chat/completions · Anthropic /v1/messages）\n• 模型不默认启动 — 首个请求自动唤醒，约 3s\n• 能力包页可安装/卸载模型，模型池页可调路由优先级")
+                .font(.system(size: 13)).foregroundColor(.dim).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func budgetTile(_ k: String, _ v: String) -> some View {
+        VStack(spacing: 2) {
+            Text(v).font(.system(size: 17, weight: .bold, design: .monospaced)).foregroundColor(.accent)
+            Text(k).font(.system(size: 11)).foregroundColor(.faint)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+        .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 9))
+    }
+
+    private func poolRow(_ name: String, _ use: String, _ chain: String) -> some View {
+        HStack(spacing: 10) {
+            Text(name).font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundColor(.ink)
+                .frame(width: 90, alignment: .leading)
+            Text(use).font(.system(size: 12)).foregroundColor(.dim)
+            Spacer()
+            Text(chain).font(.system(size: 11, design: .monospaced)).foregroundColor(.faint)
+        }
+        .padding(.vertical, 6).padding(.horizontal, 10)
+        .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 7))
+    }
+}
+
 // ─── AppKit 引导：菜单栏常驻 + 主窗口 ───────────────────────────
 
 /// G3: 菜单栏 mini 织物条 — 预算水位分段 + 活跃/睡眠模型速览
@@ -1763,6 +1883,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let store = GatewayStore()
     var window: NSWindow?
     var statusItem: NSStatusItem?
+    var wizardWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
@@ -1770,7 +1891,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.onMemoryInsufficient = { [weak self] name, reason in
             self?.showMemoryDialog(name: name, reason: reason)
         }
-        showOverview()
+        // G6: 首启向导（defaults 记忆，完成后不再出现）
+        if !UserDefaults.standard.bool(forKey: "wizardDone") {
+            showWizard()
+        } else {
+            showOverview()
+        }
+    }
+
+    /// G6: 首启向导窗口 — RAM 检测 → 预算确认 → 默认池 → 完成
+    private func showWizard() {
+        let ws = WizardState()
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 360),
+                           styleMask: [.titled, .fullSizeContentView],
+                           backing: .buffered, defer: false)
+        win.title = "MacFabric 首次设置"
+        win.center()
+        win.isMovableByWindowBackground = true
+        win.contentView = NSHostingView(rootView: WizardView(ws: ws) { [weak self, weak win] in
+            UserDefaults.standard.set(true, forKey: "wizardDone")
+            win?.close()
+            self?.showOverview()
+        })
+        win.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        wizardWindow = win
     }
 
     /// G1 内存不足弹窗：预算与实测同位显示，确认后 force 超卖加载
