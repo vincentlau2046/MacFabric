@@ -476,10 +476,11 @@ final class GatewayStore: ObservableObject {
                      okMsg: "✅ 服务商 \(name) 已删除", failPrefix: "删除失败")
     }
 
-    /// F3: 触发全量模型发现（provider 侧 /models 端点）
+    /// F3: 触发全量模型发现（provider 侧 /models 端点；服务端串行抓取可达
+    /// 分钟级 — App 超时须放宽，否则显示失败但服务端仍在跑）
     func cloudDiscover() {
         cloudRequest(path: "/admin/cloud/discover", method: "POST", body: [:],
-                     okMsg: "✅ 发现完成", failPrefix: "发现失败")
+                     okMsg: "✅ 发现完成 — 列表已更新", failPrefix: "发现失败", timeout: 150)
     }
 
     /// F3: 模型策展 — enable/disable（勾选）/add（手填）/remove/tag（VL 打标）
@@ -524,10 +525,10 @@ final class GatewayStore: ObservableObject {
 
     @Published var cloudBusy = false   // 云端操作防抖：进行中忽略重复触发（双击不再产生第二次 DELETE）
 
-    func cloudRequest(path: String, method: String, body: [String: Any], okMsg: String, failPrefix: String) {
+    func cloudRequest(path: String, method: String, body: [String: Any], okMsg: String, failPrefix: String, timeout: Double = 30) {
         guard !cloudBusy else { return }
         cloudBusy = true
-        var req = URLRequest(url: base.appendingPathComponent(path), timeoutInterval: 30)
+        var req = URLRequest(url: base.appendingPathComponent(path), timeoutInterval: timeout)
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !body.isEmpty { req.httpBody = try? JSONSerialization.data(withJSONObject: body) }
@@ -1360,7 +1361,7 @@ struct PoolCard: View {
                                 .background(Color.accent.opacity(0.15), in: RoundedRectangle(cornerRadius: 5))
                                 .foregroundColor(.accent)
                         }
-                        // 协议标签：本地 OAI 恒有 + ANT 协议；云端按注册表三态
+                        // 协议标签：本地 openai 恒有 + anthropic 协议；云端按注册表三态
                         if c.kind != "cloud" {
                             Chip("openai")
                             if localModel(c)?.anthropic_native == true { Chip("anthropic", color: Color.thJudge) }
@@ -1898,7 +1899,7 @@ struct CloudProviderCard: View {
                                                model: spec.id)
                     }
                     Text(spec.id).font(.system(size: 12.5)).foregroundColor(.ink)
-                    // 协议可用性：OAI 发现恒有；ANT 协议按注册表
+                    // 协议可用性：openai 发现恒有；anthropic 协议按注册表
                     Chip("openai", color: Color.thLlm)
                     if spec.anthropic == true { Chip("anthropic", color: Color.thJudge) }
                     if spec.manual == true { Chip("手填") }
@@ -1955,7 +1956,7 @@ struct CloudAddCard: View {
                 Text("只讲 OpenAI 方言的服务商开箱可用：网关把 /v1/messages（Anthropic）翻译成 OpenAI 调用再转发；服务商提供 Anthropic 协议端口时填第二行可直连免翻译")
                     .font(.system(size: 11)).foregroundColor(.faint)
                 HStack(spacing: 8) {
-                    TextField("Anthropic Base URL（可选，ANT 协议端口直连）",
+                    TextField("Anthropic Base URL（可选，anthropic 协议端口直连）",
                               text: Binding(get: { store.cloudFormAnth }, set: { store.cloudFormAnth = $0 }))
                         .textFieldStyle(.roundedBorder).font(.system(size: 12))
                 }
