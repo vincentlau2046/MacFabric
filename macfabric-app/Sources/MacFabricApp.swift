@@ -150,6 +150,26 @@ struct LocalModelsPayload: Codable {
     var discovered: [LocalDiscovered]?
     var configured: [String]?
 }
+struct ModelMetrics: Codable {
+    var requests: Int?
+    var success: Int?
+    var fail: Int?
+    var tokens_in: Int?
+    var tokens_out: Int?
+    var cost_yuan: Double?
+    var source: String?
+    var ttft_p50: Double?
+    var ttft_p95: Double?
+    var e2e_tps_p50: Double?
+    var duration_p95: Double?
+}
+struct MetricsPayload: Codable {
+    var window: String?
+    var total_requests: Int?
+    var success: Int?
+    var fail: Int?
+    var models: [String: ModelMetrics]?
+}
 
 final class GatewayStore: ObservableObject {
     @Published var snapshot: Snapshot?
@@ -175,6 +195,8 @@ final class GatewayStore: ObservableObject {
     // F4: 本地模型发现/安装
     @Published var localDiscovered: [LocalDiscovered] = []
     @Published var localScanned = false
+    // G4: 监控台 per-model 指标
+    @Published var metrics: MetricsPayload?
     var onMemoryInsufficient: ((_ name: String, _ reason: String) -> Void)?
 
     private let base = URL(string: "http://127.0.0.1:8999")!
@@ -182,7 +204,7 @@ final class GatewayStore: ObservableObject {
     private var curveTimer: Timer?
 
     init() {
-        refresh(); fetchModels(); fetchCurve(); fetchPools(); cachePoolsRaw(); fetchCloud(); scanLocalModels()
+        refresh(); fetchModels(); fetchCurve(); fetchPools(); cachePoolsRaw(); fetchCloud(); scanLocalModels(); fetchMetrics()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             self?.refresh(); self?.fetchModels()
         }
@@ -395,6 +417,15 @@ final class GatewayStore: ObservableObject {
                 self?.fetchCloud()
                 self?.fetchPools(); self?.cachePoolsRaw()
             }
+        }.resume()
+    }
+
+    /// G4: 拉取 per-model 指标（TTFT/TPS/tokens/成本）
+    func fetchMetrics() {
+        URLSession.shared.dataTask(with: base.appendingPathComponent("/api/metrics")) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let mp = try? JSONDecoder().decode(MetricsPayload.self, from: data) else { return }
+            DispatchQueue.main.async { self.metrics = mp }
         }.resume()
     }
 
@@ -1131,6 +1162,10 @@ struct MonitorView: View {
                     StatCard(v: "\(store.totalRequests)", k: "24h 请求")
                     StatCard(v: "\(store.totalTokens)", k: "24h tokens")
                     StatCard(v: store.gatewayUp ? "在线" : "离线", k: "网关状态")
+                    if let m = store.metrics {
+                        let ok = m.success ?? 0, all = (m.success ?? 0) + (m.fail ?? 0)
+                        StatCard(v: all > 0 ? "\(Int(Double(ok) / Double(all) * 100))%" : "—", k: "成功率")
+                    }
                 }
                 Card {
                     VStack(alignment: .leading, spacing: 8) {
@@ -1151,8 +1186,75 @@ struct MonitorView: View {
                         }
                     }.padding(14)
                 }
+                // G4: per-model 指标表（TTFT/TPS/tokens/成本）
+                Card {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("模型指标（24h）").font(.system(size: 12.5)).foregroundColor(.dim)
+                        HStack(spacing: 0) {
+                            metricHead("模型").frame(width: 130, alignment: .leading)
+                            metricHead("来源").frame(width: 50)
+                            metricHead("请求").frame(width: 50)
+                            metricHead("tokens").frame(width: 90)
+                            metricHead("TTFT p50").frame(width: 80)
+                            metricHead("TTFT p95").frame(width: 80)
+                            metricHead("TPS").frame(width: 60)
+                            metricHead("成本").frame(width: 70)
+                            Spacer()
+                        }
+                        ForEach(metricRows, id: \.name) { r in
+                            HStack(spacing: 0) {
+                                HStack(spacing: 6) {
+                                    Circle().fill(r.color).frame(width: 7, height: 7)
+                                    Text(r.name).font(.system(size: 12)).foregroundColor(.ink).lineLimit(1)
+                                }.frame(width: 130, alignment: .leading)
+                                Text(r.source).font(.system(size: 11)).foregroundColor(.dim).frame(width: 50)
+                                Text("\(r.requests)").font(.system(size: 11.5, design: .monospaced)).foregroundColor(.ink).frame(width: 50)
+                                Text("\(r.tokensIn)/\(r.tokensOut)").font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim).frame(width: 90)
+                                Text(r.ttft50).font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim).frame(width: 80)
+                                Text(r.ttft95).font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim).frame(width: 80)
+                                Text(r.tps).font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim).frame(width: 60)
+                                Text(r.cost).font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim).frame(width: 70)
+                                Spacer()
+                            }
+                            .padding(.vertical, 3)
+                            Rectangle().fill(Color.lineC).frame(height: 1)
+                        }
+                        if metricRows.isEmpty {
+                            Text("暂无调用数据").font(.system(size: 11.5)).foregroundColor(.faint)
+                        }
+                    }.padding(14)
+                }
             }.padding(18)
         }
+    }
+
+    struct MetricRow {
+        let name: String; let color: Color; let source: String
+        let requests: Int; let tokensIn: Int; let tokensOut: Int
+        let ttft50: String; let ttft95: String; let tps: String; let cost: String
+    }
+
+    var metricRows: [MetricRow] {
+        guard let models = store.metrics?.models else { return [] }
+        return models.keys.sorted().compactMap { name in
+            guard let mm = models[name] else { return nil }
+            let isCloud = mm.source == "cloud"
+            let hasTraffic = (mm.requests ?? 0) > 0
+            return MetricRow(
+                name: name,
+                color: isCloud ? Color.thLlm : (hasTraffic ? Color.okC : Color.faint.opacity(0.6)),
+                source: isCloud ? "云端" : "本机",
+                requests: mm.requests ?? 0,
+                tokensIn: mm.tokens_in ?? 0, tokensOut: mm.tokens_out ?? 0,
+                ttft50: mm.ttft_p50.map { String(format: "%.0fms", $0) } ?? "—",
+                ttft95: mm.ttft_p95.map { String(format: "%.0fms", $0) } ?? "—",
+                tps: mm.e2e_tps_p50.map { String(format: "%.1f", $0) } ?? "—",
+                cost: String(format: "¥%.2f", mm.cost_yuan ?? 0))
+        }
+    }
+
+    func metricHead(_ t: String) -> some View {
+        Text(t).font(.system(size: 10.5)).foregroundColor(.faint)
     }
 }
 
@@ -1476,35 +1578,81 @@ struct CloudAddCard: View {
     }
 }
 
-/// 设置：审查钉死的默认值都编码在这里（v1 展示真实值；开关后接 admin 端点）
+/// 设置：真实系统数据（RAM/账本预算/版本/目录）；开关项标注接入批次，不假装可用
 struct SettingsView: View {
     var store: GatewayStore
 
+    private var ramGB: Int {
+        Int(ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024))
+    }
+    private var reserveGB = 8   // MACFABRIC_RESERVE_MB 默认值（D2 裁决：全局唯一公式）
+    private var budgetMB: Int? { store.snapshot?.status.gpu_total_mb }
+    private var usedMB: Int? { store.snapshot?.status.gpu_used_mb }
+    private var osVersion: String {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        return "macOS \(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
+    }
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                SettingRow(title: "开机时启动网关",
-                           desc: "通过系统 LaunchAgent 常驻，App 不开也在服务（需在终端执行 scripts/install-launchd.sh install 批准）",
-                           on: false)
-                SettingRow(title: "HuggingFace 镜像加速",
-                           desc: "模型下载走 hf-mirror.com，国内网络建议开启",
-                           on: true)
-                SettingRow(title: "仅本机监听",
-                           desc: "关闭后局域网设备可访问 :8999，将强制启用 API 鉴权",
-                           on: true)
-                SettingRow(title: "API Key 鉴权",
-                           desc: "客户端需携带密钥调用，密钥仅生成时展示一次",
-                           on: false)
-                SettingRow(title: "模型目录",
-                           desc: "模型文件与引擎环境所在位置",
-                           path: "/Users/Apple/Documents/MacFabric/models")
-                SettingRow(title: "内存保留",
-                           desc: "为系统与其他 App 保留的内存 — 全局唯一公式 B = RAM − 8G 的唯一入口，无第二道上限",
-                           path: "8 GB")
-                SettingRow(title: "检查更新",
-                           desc: "llama.cpp b12361 · 引擎目录 engines/llama-b12361",
-                           path: nil, button: "检查")
+            VStack(alignment: .leading, spacing: 12) {
+                // 系统信息（App 直查，无网关依赖）
+                Card {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("系统").font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
+                        infoRow("芯片", ProcessInfo.processInfo.processorCount > 0 ? "\(ProcessInfo.processInfo.processorCount) 核" : "—")
+                        infoRow("物理内存", "\(ramGB) GB")
+                        infoRow("系统版本", osVersion)
+                        infoRow("网关版本", store.snapshot != nil ? "在线" : "离线")
+                    }.padding(12)
+                }
+                // 内存账本（全局唯一公式）
+                Card {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("内存账本 — B = RAM − 保留（全局唯一公式，无第二道上限）")
+                            .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
+                        infoRow("物理内存", "\(ramGB) GB")
+                        infoRow("为系统保留", "\(reserveGB) GB（MACFABRIC_RESERVE_MB，改后重启网关生效）")
+                        infoRow("账本预算 B", budgetMB.map { "\($0) MB" } ?? "—（网关离线）")
+                        infoRow("当前已用", usedMB.map { "\($0) MB" } ?? "—")
+                    }.padding(12)
+                }
+                // 开关项（诚实标注）
+                Card {
+                    VStack(alignment: .leading, spacing: 0) {
+                        SettingRow(title: "开机时启动网关",
+                                   desc: "需在终端执行 scripts/install-launchd.sh install 批准（v1.5 App 内一键）",
+                                   on: false, disabled: true)
+                        SettingRow(title: "仅本机监听",
+                                   desc: "关闭后局域网设备可访问 :8999（设计稿 v1.5 项，网关端点后接）",
+                                   on: true, disabled: true)
+                        SettingRow(title: "API Key 鉴权",
+                                   desc: "客户端需携带密钥调用（设计稿 v1.5 项，网关端点后接）",
+                                   on: false, disabled: true)
+                    }
+                }
+                // 目录与版本
+                Card {
+                    VStack(alignment: .leading, spacing: 0) {
+                        SettingRow(title: "模型目录",
+                                   desc: "GGUF 模型文件所在位置（本机发现扫描此处）",
+                                   path: "/Users/Apple/Documents/MacFabric/models")
+                        SettingRow(title: "引擎",
+                                   desc: "llama.cpp Metal 构建 · anthropic_native 透传",
+                                   path: "engines/llama-b12361")
+                    }
+                }
+                Text("开关项按设计稿分批接入：v1.5 网关端点落地后此页改为可交互")
+                    .font(.system(size: 11)).foregroundColor(.faint)
             }.padding(16)
+        }
+    }
+
+    @ViewBuilder private func infoRow(_ k: String, _ v: String) -> some View {
+        HStack {
+            Text(k).font(.system(size: 12)).foregroundColor(.dim)
+            Spacer()
+            Text(v).font(.system(size: 12, design: .monospaced)).foregroundColor(.ink)
         }
     }
 }
@@ -1515,6 +1663,7 @@ struct SettingRow: View {
     var on = false
     var path: String? = nil
     var button: String? = nil
+    var disabled = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1529,7 +1678,8 @@ struct SettingRow: View {
             if let button {
                 SmallBtn(button) {}
             } else if path == nil {
-                Toggle("", isOn: .constant(on)).labelsHidden().toggleStyle(.switch).controlSize(.small)
+                Toggle("", isOn: .constant(on)).labelsHidden().toggleStyle(.switch)
+                    .controlSize(.small).disabled(disabled).opacity(disabled ? 0.6 : 1)
             }
         }
         .padding(.vertical, 10)
@@ -1538,6 +1688,76 @@ struct SettingRow: View {
 }
 
 // ─── AppKit 引导：菜单栏常驻 + 主窗口 ───────────────────────────
+
+/// G3: 菜单栏 mini 织物条 — 预算水位分段 + 活跃/睡眠模型速览
+struct MiniWeaveView: View {
+    @ObservedObject var miniStore: GatewayStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Text("MacFabric").font(.system(size: 11, weight: .semibold)).foregroundColor(.ink)
+                Spacer()
+                if let snap = miniStore.snapshot,
+                   let total = snap.status.gpu_total_mb, total > 0 {
+                    Text("账本 \(snap.status.gpu_used_mb ?? 0)/\(total) MB")
+                        .font(.system(size: 10, design: .monospaced)).foregroundColor(.faint)
+                }
+            }
+            GeometryReader { geo in
+                HStack(spacing: 1) {
+                    ForEach(fabricSegments(), id: \.0) { seg in
+                        Rectangle().fill(seg.0)
+                            .frame(width: max(geo.size.width * seg.1, 2))
+                    }
+                }
+            }
+            .frame(height: 8)
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            Text(activeLabel).font(.system(size: 10)).foregroundColor(.dim).lineLimit(1)
+        }
+        .padding(10)
+        .background(Color.panel)
+    }
+
+    private func fabricSegments() -> [(Color, Double)] {
+        var segs: [(Color, Double)] = []
+        let used = Double(miniStore.snapshot?.status.gpu_used_mb ?? 0)
+        let total = Double(miniStore.snapshot?.status.gpu_total_mb ?? 0)
+        if total > 0 { segs.append((Color.accent.opacity(0.75), min(used / total, 1.0))) }
+        segs.append((Color.white.opacity(0.07), total > 0 ? max(1 - used / total, 0.02) : 1.0))
+        return segs
+    }
+
+    private var activeLabel: String {
+        let act = miniStore.models.filter { $0.active == true }.map(\.name)
+        if act.isEmpty { return miniStore.gatewayUp ? "无活跃模型 · 网关在线" : "网关离线" }
+        return "活跃: " + act.joined(separator: ", ")
+    }
+}
+
+/// NSMenuItem.view 包装 — 菜单展开时刷新一次数据
+final class MiniWeaveNSView: NSView {
+    private let miniStore = GatewayStore()
+    private var hosted = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, !hosted else { return }
+        hosted = true
+        let hv = NSHostingView(rootView: MiniWeaveView(miniStore: miniStore))
+        hv.frame = bounds
+        hv.autoresizingMask = [.width, .height]
+        addSubview(hv)
+        miniStore.refresh()
+        miniStore.fetchModels()
+    }
+}
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let store = GatewayStore()
@@ -1582,6 +1802,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         item.button?.image = NSImage(systemSymbolName: "sharedwithyou",
                                      accessibilityDescription: "MacFabric")
         let menu = NSMenu()
+        // G3: mini 织物条 + 活跃模型速览（设计稿菜单栏语义）
+        let mini = NSMenuItem()
+        mini.view = MiniWeaveNSView(frame: NSRect(x: 0, y: 0, width: 220, height: 58))
+        menu.addItem(mini)
+        menu.addItem(.separator())
         let overview = NSMenuItem(title: "打开总览", action: #selector(showOverview), keyEquivalent: "o")
         overview.target = self
         menu.addItem(overview)

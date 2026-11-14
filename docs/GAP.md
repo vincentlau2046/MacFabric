@@ -7,16 +7,16 @@
 
 | # | 画面 | 状态 | 差距明细 |
 |---|------|------|---------|
-| 1 | 菜单栏常驻 | 🔶 | 有图标+菜单（打开总览/网关面板/退出）；缺设计稿的**下拉内 mini 织物条**与活跃模型速览 |
+| 1 | 菜单栏常驻 | ✅ | 下拉内 mini 织物条（账本水位分段）+ 活跃模型速览 + 打开总览/网关面板/退出（B4） |
 | 2 | 首启向导 | ❌ | 整页未做（RAM 检测→预算确认→默认池推荐→完成） |
 | 3 | 总览 | 🔶 | ✅ 织物条+图例+预算数字+统计瓦片+能力卡格；缺**睡眠态卡**（"唤醒约 2s"）、四态 pill（设计稿 run/load/sleep/stop）、段 hover 显"模型名·基线/实测"与偏差黄点、机器型号行 |
 | 4 | 模型服务 Hub | 🔶 | ✅ 接入地址条+复制 Base URL/JSON/cURL；缺**协议 tab 切换**（OpenAI↔Anthropic 两套配置）、**复制环境变量**（ANTHROPIC_BASE_URL 方式）、**云端模型卡**（glm-5 等）、能力筛选 tabs、鉴权状态 |
 | 5 | 本地推理 | 🔶 | ✅ 一行一模型+切换/停止+试聊；缺 **sleep/wake 按钮**（端点已有 /sleep /wake）、装载模式/内存账小字列、四态 pill |
 | 6 | 模型池 | 🔶 | ✅ 真数据（GET /admin/model-pools）：三角色池 fast/small/premium、候选竖排 priority 序、点亮态、本机/云端 chip、首选徽章、↑↓ 调序（POST CAS，409 重取）；缺：云端候选点亮（F7）、池开关 UI、拖拽 |
-| 7 | 监控台 | 🔶 | ✅ 24h 请求柱状图+统计瓦片；缺 tokens 曲线、TTFT/延迟分布、agent 调用统计（/api/agent-stats 现成） |
+| 7 | 监控台 | 🔶 | ✅ 24h 请求柱状图 + 成功率瓦片 + **per-model 指标表**（请求/tokens/TTFT p50/p95/TPS/成本，/api/metrics，B4）；缺 agent 维度统计与 tokens 时序曲线 |
 | 8 | 能力包 | 🔶 | ✅ 八卡目录 + 安装态对齐 models.d + **卸载按钮**（POST /admin/packs/uninstall 实测通过，reload bug 已修）；缺 P3 能力端点（audio/ocr/embeddings 预设）与安装向导（F4） |
 | 9 | 云端接入 | ❌ | 整页未做。数据端点现成（/admin/cloud/providers、presets、provider-models） |
-| 10 | 设置 | ❌ | 整页未做（鉴权开关、auto-switch、预算参数 MACFABRIC_RESERVE_MB、局域网共享 v1.5） |
+| 10 | 设置 | 🔶 | ✅ 真实系统数据（芯片/RAM/OS/账本公式 B=RAM−保留实时值/目录/引擎版本，B4）；开关项诚实灰显标注 v1.5 接入 |
 | 11 | 内存不足弹窗 | ❌ | 未做。**前置依赖：账本 R1 接线到 switch 路径**（memory_ledger 已实现+测试，未接入 manager.switch） |
 
 ## 二、内核侧 Gap（支撑画面）
