@@ -173,7 +173,8 @@ def discover_local_models(models_dir: Path) -> dict:
     return {"discovered": discovered, "configured": configured}
 
 
-def install_yaml(name: str, model_type: str, models_dir: Path, existing_models: dict) -> dict:
+def install_yaml(name: str, model_type: str, models_dir: Path, existing_models: dict,
+                 model_type_label: str = "") -> dict:
     """Auto-generate YAML for a discovered model — 只写配置不启动（Mac 语义：不默认启动）。
 
     Mac（IS_MACOS）llama_cpp 模板：Metal 全层 offload + on_demand 账本三字段；
@@ -222,11 +223,12 @@ vllm:
                         "message": f"GGUF for {name} not found under MacFabric/models or ~/models"}
             binary = models_dir.parents[1] / "engines" / "llama-b12361" / "llama-server"
             binary_lines = f"  binary_path: {binary}\n" if binary.exists() else ""
+            label = model_type_label or "llm"
             yaml_content = f"""name: {name}
 description: "{name} (auto-installed, llama.cpp Metal)"
 type: llama_cpp
 gpu_role: shared
-model_type: llm
+model_type: {label}
 # G1 账本三字段（D2/D3）：不默认启动，首请求自动唤醒
 mode: on_demand
 idle_timeout_min: 30

@@ -197,6 +197,7 @@ _GET_ROUTES = {
     "/models":                  lambda h, pm: h._send_json(pm.mgr.list_models()),
     "/profiles":                lambda h, pm: (log.warning("/profiles is deprecated"), h._send_json(pm.mgr.list_models()))[1],
     "/local-models":            lambda h, pm: h._send_json(pm.mgr.discover_local_models()),
+    "/admin/packs/download-status": _admin(lambda h, pm: h._send_json(_pack_downloads_snapshot())),
     "/v1/models":               lambda h, pm: h._handle_v1_models(pm),
     "/system":                  lambda h, pm: h._send_json(h._system_info()),
     "/api/metrics":             lambda h, pm: h._handle_api_metrics(pm),
@@ -261,6 +262,7 @@ _POST_ROUTES = {
     "/admin/packs/uninstall":  _admin(lambda h, pm: h._handle_pack_uninstall(pm)),
     "/admin/packs/install":    _admin(lambda h, pm: h._handle_pack_install(pm)),
     "/admin/models/set-autostart": _admin(lambda h, pm: h._handle_set_autostart(pm)),
+    "/admin/packs/download":        _admin(lambda h, pm: h._handle_pack_download(pm)),
 
     # ─── Admin: Cloud Provider Management (PR-D) ─────────────────
     "/admin/cloud/reload":      _admin(lambda h, pm: h._handle_cloud_reload(pm)),
@@ -280,6 +282,18 @@ _POST_ROUTES = {
     "/v1/embeddings":           lambda h, pm: h._handle_embeddings(pm),
     "/v1/rerank":               lambda h, pm: h._handle_rerank(pm),
 }
+
+# 能力包下载进度登记表（模块级；键 = 模型名）
+_PACK_DOWNLOADS: dict = {}
+_PACK_DL_LOCK = threading.Lock()
+
+def _pack_download_state(name: str) -> dict:
+    with _PACK_DL_LOCK:
+        return _PACK_DOWNLOADS.setdefault(name, {})
+
+def _pack_downloads_snapshot() -> dict:
+    with _PACK_DL_LOCK:
+        return {k: dict(v) for k, v in _PACK_DOWNLOADS.items()}
 
 _DELETE_ROUTES = {
     "/admin/cloud/providers":   _admin(lambda h, pm: h._handle_cloud_providers(pm)),
@@ -1549,6 +1563,86 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         pm.mgr.reload_models()
         log.info("Autostart %s -> %s", name, enabled)
         self._send_json({"status": "ok", "model": name, "autostart": enabled})
+
+    def _handle_pack_download(self, pm):
+        """POST /admin/packs/download {name, url, filename, model_type_label?}
+
+        能力包一键安装：
+        1. models.d/<name>.yaml 已存在 → already_configured
+        2. 模型文件已在 MacFabric/models/<filename> → 跳过下载直接装机
+        3. 否则后台流式下载（.part → 原子改名），GET /admin/packs/download-status
+           查进度；完成后自动 install_model（只写 YAML 不启动）。
+        """
+        import threading as _threading
+        import urllib.request as _ureq
+        data = self._read_body()
+        name = ((data or {}).get("name") or "").strip()
+        url = ((data or {}).get("url") or "").strip()
+        filename = ((data or {}).get("filename") or "").strip()
+        label = ((data or {}).get("model_type_label") or "").strip()
+        if not name or not url or not filename:
+            self._send_json({"error": "name/url/filename required"}, 400)
+            return
+        if "/" in filename or ".." in filename:
+            self._send_json({"error": "invalid filename"}, 400)
+            return
+        if not self._validate_cloud_test_url(url, pm)[0] and not url.startswith("https://"):
+            self._send_json({"error": "invalid url"}, 400)
+            return
+        if name in pm.mgr._models:
+            self._send_json({"status": "already_configured", "model": name})
+            return
+        dest_dir = Path(self._pack_models_dir(pm))
+        dest = dest_dir / filename
+        if dest.exists() and dest.stat().st_size > 0:
+            result = pm.mgr.install_model(name, "llama_cpp", model_type_label=label)
+            self._send_json(result)
+            return
+        if _pack_download_state(name).get("status") == "downloading":
+            self._send_json({"status": "already_downloading", "model": name})
+            return
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        def _worker():
+            _pack_download_state(name).update(status="downloading", downloaded=0, total=0,
+                                              error="", started=time.time())
+            try:
+                req = _ureq.Request(url, headers={"User-Agent": "MacFabric/1.0"})
+                with _ureq.urlopen(req, timeout=60) as resp:
+                    total = int(resp.headers.get("Content-Length") or 0)
+                    _pack_download_state(name)["total"] = total
+                    tmp = dest.with_suffix(".part")
+                    done = 0
+                    with open(tmp, "wb") as f:
+                        while True:
+                            chunk = resp.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            done += len(chunk)
+                            _pack_download_state(name)["downloaded"] = done
+                    tmp.rename(dest)
+                _pack_download_state(name)["status"] = "installing"
+                result = pm.mgr.install_model(name, "llama_cpp", model_type_label=label)
+                _pack_download_state(name)["status"] = (
+                    "installed" if result.get("status") in ("installed", "already_configured")
+                    else "error")
+                _pack_download_state(name)["error"] = result.get("message", "")
+                log.info("Pack download+install %s: %s", name, result)
+            except Exception as e:
+                log.error("Pack download %s failed: %s", name, e)
+                _pack_download_state(name).update(status="error", error=str(e)[:300])
+                dest.with_suffix(".part").unlink(missing_ok=True)
+
+        _threading.Thread(target=_worker, daemon=True, name=f"pack-dl-{name}").start()
+        self._send_json({"status": "download_started", "model": name})
+
+    def _pack_models_dir(self, pm) -> str:
+        models_dir = Path(pm.mgr.models_dir)
+        try:
+            return str(models_dir.parents[1] / "models")
+        except IndexError:
+            return str(Path.home() / "models")
 
     def _handle_pack_install(self, pm):
         """安装能力包 = 发现产物写 models.d YAML + 热重载，不启动（Mac 语义）。"""

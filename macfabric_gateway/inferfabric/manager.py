@@ -667,12 +667,13 @@ class ModelManager:
             return result
         return self.switch(name)
 
-    def install_model(self, name: str, model_type: str) -> dict:
+    def install_model(self, name: str, model_type: str, model_type_label: str = "") -> dict:
         """安装能力包 = 生成 models.d YAML + 热重载，**不启动服务**。
 
         Mac 语义（用户裁决：模型不要默认启动）——装载留给首请求自动唤醒
         或用户在本地推理页手动切换。与 /admin/packs/uninstall 对称。"""
-        result = _install_yaml(name, model_type, self.models_dir, self._models)
+        result = _install_yaml(name, model_type, self.models_dir, self._models,
+                               model_type_label=model_type_label)
         if result.get("status") == "installed":
             self.reload_models()
         return result

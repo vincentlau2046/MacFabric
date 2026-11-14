@@ -102,3 +102,20 @@
 - `POST /admin/models/set-autostart {name, enabled}`：改 YAML + 热重载；/models 输出 autostart 字段
 - App 本地推理行新增"默认启动"开关
 - 全语义闭环实测：false→重启零自启；true→重启自动拉起；关回+停止→保持停止
+
+
+## 2026-11-14 下午补丁 2 — 能力包"安装"按钮真化（一键下载+装机）
+
+### 根因
+- PackCard 的"安装"是空壳 Text（无动作、无端点）——之前的占位未接线
+
+### 实现
+- 网关 `POST /admin/packs/download {name,url,filename,model_type_label}`：
+  文件在盘→直接装机；不在→后台流式下载（.part 原子改名，进度
+  `GET /admin/packs/download-status`），完成后自动 install_model（不启动）
+- install_yaml 支持 model_type 标签（embedding/rerank 线色）
+- 源逐一 HEAD 验证：bge-m3/bge-reranker(gpustack 417/418MB)、
+  qwen3-1.7b/qwen3-vl-4b(lmstudio-community 1.2/2.3GB)
+- ASR/TTS 包诚实禁用（"v1.5"，引擎未接）；App 卡片实时进度/重试
+- 实测：bge-m3 全链路 下载417MB→装机→/v1/embeddings 返回1024维
+  （首请求自动唤醒生效）

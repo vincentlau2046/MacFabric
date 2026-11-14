@@ -151,6 +151,12 @@ struct LocalModelsPayload: Codable {
     var discovered: [LocalDiscovered]?
     var configured: [String]?
 }
+struct PackDownloadState: Codable {
+    var status: String?
+    var downloaded: Int?
+    var total: Int?
+    var error: String?
+}
 struct ModelMetrics: Codable {
     var requests: Int?
     var success: Int?
@@ -198,6 +204,8 @@ final class GatewayStore: ObservableObject {
     @Published var localScanned = false
     // G4: 监控台 per-model 指标
     @Published var metrics: MetricsPayload?
+    // 能力包下载进度（键 = 模型名）
+    @Published var packDownloads: [String: PackDownloadState] = [:]
     var onMemoryInsufficient: ((_ name: String, _ reason: String) -> Void)?
 
     private let base = URL(string: "http://127.0.0.1:8999")!
@@ -207,7 +215,7 @@ final class GatewayStore: ObservableObject {
     init() {
         refresh(); fetchModels(); fetchCurve(); fetchPools(); cachePoolsRaw(); fetchCloud(); scanLocalModels(); fetchMetrics()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            self?.refresh(); self?.fetchModels()
+            self?.refresh(); self?.fetchModels(); self?.fetchDownloadStatus()
         }
         curveTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.fetchCurve()
@@ -417,6 +425,41 @@ final class GatewayStore: ObservableObject {
                     ? okMsg : "❌ \(failPrefix)(\(code)): \(body.prefix(100))"
                 self?.fetchCloud()
                 self?.fetchPools(); self?.cachePoolsRaw()
+            }
+        }.resume()
+    }
+
+    /// 能力包下载进度轮询（3s 定时器复用）
+    func fetchDownloadStatus() {
+        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/packs/download-status")) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let obj = try? JSONDecoder().decode([String: PackDownloadState].self, from: data) else { return }
+            DispatchQueue.main.async {
+                self.packDownloads = obj
+                // 下载完成 → 刷新模型列表（新装包出现在能力包/本地推理）
+                if obj.values.contains(where: { $0.status == "installed" }) { self.fetchModels(); self.scanLocalModels() }
+            }
+        }.resume()
+    }
+
+    /// 能力包一键安装：网关负责"已在盘→直接装机 / 不在→下载后装机"
+    func installPack(_ name: String, url: String, filename: String, label: String) {
+        actionMessage = "\(name) 安装中…"
+        var req = URLRequest(url: base.appendingPathComponent("/admin/packs/download"), timeoutInterval: 30)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "name": name, "url": url, "filename": filename, "model_type_label": label])
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                if (200..<300).contains(code) {
+                    self?.actionMessage = "\(name) 开始下载…进度看卡片"
+                    self?.fetchDownloadStatus()
+                } else {
+                    self?.actionMessage = "❌ 安装失败(\(code)): \(body.prefix(120))"
+                }
             }
         }.resume()
     }
@@ -1398,6 +1441,18 @@ struct LocalDiscoverCard: View {
 struct PackCard: View {
     var store: GatewayStore
     let pack: (String, String, String, String?, String?)
+
+    // (下载URL, 文件名, model_type 线色标签) — 源经 HEAD 验证 200；nil = 引擎未接
+    static let packPresets: [String: (String, String, String)] = [
+        "bge-m3": ("https://hf-mirror.com/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf",
+                   "bge-m3-Q4_K_M.gguf", "embedding"),
+        "bge-reranker-v2-m3": ("https://hf-mirror.com/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf",
+                               "bge-reranker-v2-m3-Q4_K_M.gguf", "rerank"),
+        "qwen3-1.7b": ("https://hf-mirror.com/lmstudio-community/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf",
+                       "Qwen3-1.7B-Q4_K_M.gguf", "llm"),
+        "qwen3-vl-4b": ("https://hf-mirror.com/lmstudio-community/Qwen3-VL-4B-Instruct-GGUF/resolve/main/Qwen3-VL-4B-Instruct-Q4_K_M.gguf",
+                        "Qwen3-VL-4B-Instruct-Q4_K_M.gguf", "vl"),
+    ]
     var confirmingUninstall: Bool { store.uninstallConfirm == pack.1 }   // 两击确认，防误删
 
     var installed: Bool {
@@ -1435,13 +1490,32 @@ struct PackCard: View {
                                     .help("停止服务并从 models.d 移除，模型文件保留在磁盘")
                             }
                         }
-                    } else {
-                        Text("安装").font(.system(size: 11, weight: .semibold))
-                            .padding(.horizontal, 9).padding(.vertical, 3)
-                            .background(Color.accent, in: RoundedRectangle(cornerRadius: 6))
-                            .foregroundColor(.white)
-                            .help("能力包安装将写入 models.d（P3 端点落地后启用）")
-                            .onHover { _ in }
+                    } else if let target = pack.4, let preset = PackCard.packPresets[target] {
+                        // 真安装：文件在盘 → 直接装机；不在 → 网关下载后自动装机
+                        let dl = store.packDownloads[target]
+                        if dl?.status == "downloading" || dl?.status == "installing" {
+                            let pct: Int = {
+                                guard let d = dl, let t = d.total, t > 0 else { return 0 }
+                                return Int(Double(d.downloaded ?? 0) / Double(t) * 100)
+                            }()
+                            Text(dl?.status == "installing" ? "装机中…" : "下载 \(pct)%")
+                                .font(.system(size: 11, design: .monospaced)).foregroundColor(.accent)
+                        } else if dl?.status == "error" {
+                            SmallBtn("重试", primary: true) {
+                                store.installPack(target, url: preset.0, filename: preset.1, label: preset.2)
+                            }
+                            Text("失败").font(.system(size: 10.5)).foregroundColor(.warnC)
+                                .help(dl?.error ?? "")
+                        } else {
+                            SmallBtn("安装", primary: true) {
+                                store.installPack(target, url: preset.0, filename: preset.1, label: preset.2)
+                            }
+                            .help("从 hf-mirror 下载 GGUF 到 MacFabric/models 后自动写入 models.d；不自动启动")
+                        }
+                    } else if pack.4 != nil {
+                        // ASR/TTS：引擎未接入，诚实禁用
+                        Text("v1.5").font(.system(size: 10.5)).foregroundColor(.faint)
+                            .help("该能力的引擎未接入（P3 批次），暂不可安装")
                     }
                 }
             }
