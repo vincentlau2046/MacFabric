@@ -120,6 +120,26 @@ struct PoolsPayload: Codable {
     var revision: Int
     var pools: [String: PoolDef]?
 }
+struct CloudModelSpec: Codable {
+    var id: String
+    var manual: Bool?
+    var supports_vision: Bool?
+    var supports_tools: Bool?
+}
+struct CloudProvider: Codable {
+    var name: String
+    var enabled: Bool?
+    var openai_base: String?
+    var discovery_enabled: Bool?
+    var enabled_models: [String]?
+    var model_specs: [CloudModelSpec]?
+    var routable_count: Int?
+    var key_env_set: Bool?
+}
+struct CloudPayload: Codable {
+    var providers: [CloudProvider]?
+    var total_cloud_models: Int?
+}
 
 final class GatewayStore: ObservableObject {
     @Published var snapshot: Snapshot?
@@ -134,6 +154,14 @@ final class GatewayStore: ObservableObject {
     @Published var hubExpanded = ""
     @Published var pools: PoolsPayload?
     @Published var uninstallConfirm: String? = nil   // F2: 待确认卸载的能力包名
+    // F3: 云端接入 CRUD 状态
+    @Published var cloud: CloudPayload?
+    @Published var cloudExpanded: String? = nil
+    @Published var cloudDeleteConfirm: String? = nil
+    @Published var cloudFormName = ""
+    @Published var cloudFormBase = ""
+    @Published var cloudFormKey = ""
+    @Published var cloudAddModel = ""
     var onMemoryInsufficient: ((_ name: String, _ reason: String) -> Void)?
 
     private let base = URL(string: "http://127.0.0.1:8999")!
@@ -141,7 +169,7 @@ final class GatewayStore: ObservableObject {
     private var curveTimer: Timer?
 
     init() {
-        refresh(); fetchModels(); fetchCurve(); fetchPools(); cachePoolsRaw()
+        refresh(); fetchModels(); fetchCurve(); fetchPools(); cachePoolsRaw(); fetchCloud()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             self?.refresh(); self?.fetchModels()
         }
@@ -244,6 +272,97 @@ final class GatewayStore: ObservableObject {
                 self?.actionMessage = (200..<300).contains(code)
                     ? "✅ \(name) 已卸载" : "❌ 卸载失败(\(code)): \(body.prefix(120))"
                 self?.fetchModels()
+            }
+        }.resume()
+    }
+
+    func fetchCloud() {
+        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/cloud/providers")) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let cp = try? JSONDecoder().decode(CloudPayload.self, from: data) else { return }
+            DispatchQueue.main.async { self.cloud = cp }
+        }.resume()
+    }
+
+    /// F3: 添加服务商（name + openai_base + api_key；key 写 secrets.env，YAML 只存 ${REF}）
+    func addCloudProvider() {
+        let name = cloudFormName.trimmingCharacters(in: .whitespaces)
+        let burl = cloudFormBase.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, !burl.isEmpty else {
+            actionMessage = "⚠️ 名称与 Base URL 必填"; return
+        }
+        var body: [String: Any] = ["name": name, "openai_base": burl, "discovery_enabled": true]
+        let key = cloudFormKey.trimmingCharacters(in: .whitespaces)
+        if !key.isEmpty { body["api_key"] = key }
+        cloudRequest(path: "/admin/cloud/providers", method: "POST", body: body,
+                     okMsg: "✅ 服务商 \(name) 已添加", failPrefix: "添加失败")
+    }
+
+    /// F3: 删除服务商（两击确认）
+    func deleteCloudProvider(_ name: String) {
+        cloudRequest(path: "/admin/cloud/providers", method: "DELETE", body: ["name": name],
+                     okMsg: "✅ 服务商 \(name) 已删除", failPrefix: "删除失败")
+    }
+
+    /// F3: 触发全量模型发现（provider 侧 /models 端点）
+    func cloudDiscover() {
+        cloudRequest(path: "/admin/cloud/discover", method: "POST", body: [:],
+                     okMsg: "✅ 发现完成", failPrefix: "发现失败")
+    }
+
+    /// F3: 模型策展 — enable/disable（勾选）/add（手填）/remove/tag（VL 打标）
+    func cloudModelAction(_ provider: String, action: String, model: String,
+                          vision: Bool? = nil, tools: Bool? = nil) {
+        var body: [String: Any] = ["provider": provider, "action": action, "model": model]
+        if let v = vision { body["supports_vision"] = v }
+        if let t = tools { body["supports_tools"] = t }
+        cloudRequest(path: "/admin/cloud/provider-models", method: "POST", body: body,
+                     okMsg: "✅ \(model) · \(action) 成功", failPrefix: "\(model) \(action) 失败")
+    }
+
+    /// F3: 连通性测试（用已存 key 探测全部 base）
+    func cloudTestProvider(_ name: String) {
+        actionMessage = "测试 \(name) 中…"
+        var req = URLRequest(url: base.appendingPathComponent("/admin/cloud/provider-test"), timeoutInterval: 30)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["provider": name])
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            var ok = false; var detail = ""
+            if let data, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                ok = obj["ok"] as? Bool ?? false
+                if let results = obj["results"] as? [[String: Any]] {
+                    detail = results.compactMap { r in
+                        let proto = r["protocol"] as? String ?? "?"
+                        return r["pass"] as? Bool == true
+                            ? "\(proto)✓" : "\(proto)✗ \(r["message"] as? String ?? "")"
+                    }.joined(separator: " · ")
+                }
+                if let keySet = obj["key_set"] as? Bool, !keySet { detail += "（未设 API key）" }
+            }
+            DispatchQueue.main.async {
+                self?.actionMessage = (200..<300).contains(code)
+                    ? (ok ? "✅ \(name) 连通 \(detail)" : "❌ \(name) 不通：\(detail)")
+                    : "❌ 测试失败(\(code))"
+                self?.fetchCloud()
+            }
+        }.resume()
+    }
+
+    func cloudRequest(path: String, method: String, body: [String: Any], okMsg: String, failPrefix: String) {
+        var req = URLRequest(url: base.appendingPathComponent(path), timeoutInterval: 30)
+        req.httpMethod = method
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !body.isEmpty { req.httpBody = try? JSONSerialization.data(withJSONObject: body) }
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                self?.actionMessage = (200..<300).contains(code)
+                    ? okMsg : "❌ \(failPrefix)(\(code)): \(body.prefix(100))"
+                self?.fetchCloud()
+                self?.fetchPools(); self?.cachePoolsRaw()
             }
         }.resume()
     }
@@ -1084,73 +1203,159 @@ struct PackCard: View {
     }
 }
 
-/// 云端接入：服务商行 + 云端模型卡（v1 静态演示目录，/admin/cloud 数据接入后实时）
+/// 云端接入：真数据 CRUD（GET/POST/DELETE /admin/cloud/providers + provider-models 五动作）
 struct CloudView: View {
     var store: GatewayStore
-
-    let providers: [(String, String, String, String)] = [
-        ("智", "#3b6cff", "智谱AI", "OpenAI + Anthropic · 自动发现 3 个模型"),
-        ("深", "#2b7de1", "DeepSeek", "OpenAI · 自动发现 2 个模型"),
-        ("火", "#7a5cf0", "火山方舟", "OpenAI · 自动发现 4 个模型"),
-        ("百", "#8a8a95", "百度千帆", "规格预设 · 无 /models 端点，手工声明模型"),
-    ]
-    let cloudModels: [(String, String)] = [
-        ("glm-5", "智谱AI · 旗舰 · OpenAI + Anthropic"),
-        ("glm-5-flash", "智谱AI · 快速 · OpenAI"),
-        ("deepseek-v4", "DeepSeek · 推理 · OpenAI"),
-        ("seedream-4.0", "火山方舟 · 图像 · OpenAI"),
-    ]
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                Card {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(providers, id: \.2) { pv in
-                            HStack(spacing: 10) {
-                                Text(pv.0).font(.system(size: 14, weight: .bold))
-                                    .frame(width: 26, height: 26)
-                                    .background(Color(hexString: pv.1), in: RoundedRectangle(cornerRadius: 6))
-                                    .foregroundColor(.white)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(pv.2).font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
-                                    Text(pv.3).font(.system(size: 11)).foregroundColor(.dim)
-                                }
-                                Spacer()
-                                Chip(pv.2 == "百度千帆" ? "未测试" : "已连接")
-                                SmallBtn("测试") {}
-                            }
-                            .padding(.horizontal, 12).padding(.vertical, 7)
-                        }
-                    }
+                if !store.actionMessage.isEmpty {
+                    Text(store.actionMessage).font(.system(size: 12))
+                        .padding(8).frame(maxWidth: .infinity)
+                        .background(Color.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
-                    ForEach(cloudModels, id: \.0) { cm in
-                        Card {
-                            VStack(alignment: .leading, spacing: 7) {
-                                Text(cm.0).font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
-                                Text(cm.1).font(.system(size: 11.5)).foregroundColor(.dim).lineLimit(2)
-                                HStack {
-                                    Spacer()
-                                    Chip("未入池 · 演示目录")
-                                }
-                            }.padding(12)
-                        }
-                    }
+                // 服务商列表（可展开模型策展）
+                ForEach(store.cloud?.providers ?? [], id: \.name) { pv in
+                    CloudProviderCard(store: store, pv: pv)
                 }
-                Text("统一入口 :8999 覆盖全部类型：/v1/chat/completions · /v1/messages · /v1/embeddings · /v1/audio/* · /v1/images/* · /ocr — 本地与云端候选共用同一调用面")
+                // 添加服务商表单
+                CloudAddCard(store: store)
+                HStack {
+                    SmallBtn("重新发现全部模型") { store.cloudDiscover() }
+                    if let total = store.cloud?.total_cloud_models {
+                        Text("云端模型 \(total) 个").font(.system(size: 11)).foregroundColor(.faint)
+                    }
+                    Spacer()
+                }
+                Text("统一入口 :8999 覆盖全部类型：/v1/chat/completions · /v1/messages · /v1/embeddings · /v1/audio/* · /v1/images/* · /ocr — 本地与云端候选共用同一调用面；API key 写入 secrets.env，YAML 只存 ${REF} 引用")
                     .font(.system(size: 11)).foregroundColor(.faint)
             }.padding(16)
         }
     }
 }
 
-extension Color {
-    init(hexString: String) {
-        let h = hexString.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
-        var v: UInt64 = 0
-        Scanner(string: h).scanHexInt64(&v)
-        self.init(hex: UInt32(v))
+struct CloudProviderCard: View {
+    var store: GatewayStore
+    let pv: CloudProvider
+    var expanded: Bool { store.cloudExpanded == pv.name }
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    Text(String(pv.name.prefix(1)).uppercased())
+                        .font(.system(size: 14, weight: .bold))
+                        .frame(width: 26, height: 26)
+                        .background(Color.accent.opacity(0.8), in: RoundedRectangle(cornerRadius: 6))
+                        .foregroundColor(.white)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(pv.name).font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
+                        Text(pv.openai_base ?? "").font(.system(size: 10.5, design: .monospaced))
+                            .foregroundColor(.dim).lineLimit(1)
+                    }
+                    Spacer()
+                    if pv.key_env_set == true { Chip("key ✓", color: Color.okC) } else { Chip("未设 key", color: Color.warnC) }
+                    Chip("\(pv.routable_count ?? 0) 模型")
+                    SmallBtn(expanded ? "收起" : "模型") { store.cloudExpanded = expanded ? nil : pv.name }
+                    SmallBtn("测试") { store.cloudTestProvider(pv.name) }
+                    // F3: 删除服务商（两击确认）
+                    if store.cloudDeleteConfirm == pv.name {
+                        SmallBtn("确认删除", primary: true) {
+                            store.cloudDeleteConfirm = nil
+                            store.cloudExpanded = nil
+                            store.deleteCloudProvider(pv.name)
+                        }
+                        SmallBtn("取消") { store.cloudDeleteConfirm = nil }
+                    } else {
+                        SmallBtn("删除") { store.cloudDeleteConfirm = pv.name }
+                    }
+                }
+                if expanded { cloudModelsSection }
+            }
+            .padding(12)
+        }
+    }
+
+    // 模型策展：spec 列表 + 勾选启停 + 手填添加 + 移除 + VL 打标
+    @ViewBuilder private var cloudModelsSection: some View {
+        let specs = pv.model_specs ?? []
+        let enabled = Set(pv.enabled_models ?? [])
+        VStack(alignment: .leading, spacing: 4) {
+            Text("模型策展 — 勾选入白名单（enabled_models）后可入池路由").font(.system(size: 11)).foregroundColor(.faint)
+            ForEach(specs, id: \.id) { spec in
+                HStack(spacing: 8) {
+                    // 勾选 = enable/disable（可路由白名单）
+                    SmallBtn(enabled.contains(spec.id) ? "已启用" : "未启用",
+                             primary: enabled.contains(spec.id)) {
+                        store.cloudModelAction(pv.name, action: enabled.contains(spec.id) ? "disable" : "enable",
+                                               model: spec.id)
+                    }
+                    Text(spec.id).font(.system(size: 12.5)).foregroundColor(.ink)
+                    if spec.manual == true { Chip("手填") }
+                    // F5: VL 标签（supports_vision 三态；tag 动作切换）
+                    if spec.supports_vision == true {
+                        Chip("VL", color: Color.thVl)
+                    }
+                    SmallBtn(spec.supports_vision == true ? "去 VL" : "标 VL") {
+                        store.cloudModelAction(pv.name, action: "tag", model: spec.id,
+                                               vision: spec.supports_vision != true,
+                                               tools: spec.supports_tools)
+                    }
+                    if spec.supports_tools == true { Chip("工具", color: Color.thLlm) }
+                    Spacer()
+                    // remove 仅手填模型（发现的由 disable 控制）
+                    if spec.manual == true {
+                        SmallBtn("移除") { store.cloudModelAction(pv.name, action: "remove", model: spec.id) }
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            if specs.isEmpty {
+                Text("暂无模型 — 点「测试」确认连通后，用下方输入框手填，或等待自动发现")
+                    .font(.system(size: 11)).foregroundColor(.faint)
+            }
+            // 手填添加
+            HStack(spacing: 8) {
+                TextField("手填模型名（如 glm-5-air）",
+                          text: Binding(get: { store.cloudAddModel }, set: { store.cloudAddModel = $0 }))
+                    .textFieldStyle(.roundedBorder).font(.system(size: 12))
+                SmallBtn("添加", primary: true) {
+                    let m = store.cloudAddModel.trimmingCharacters(in: .whitespaces)
+                    guard !m.isEmpty else { return }
+                    store.cloudModelAction(pv.name, action: "add", model: m)
+                    store.cloudAddModel = ""
+                }
+            }
+        }
+        .padding(.top, 4)
+    }
+}
+
+struct CloudAddCard: View {
+    var store: GatewayStore
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("添加服务商 — OpenAI 兼容 base + API key").font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
+                HStack(spacing: 8) {
+                    TextField("名称（如 deepseek）",
+                              text: Binding(get: { store.cloudFormName }, set: { store.cloudFormName = $0 }))
+                        .textFieldStyle(.roundedBorder).font(.system(size: 12))
+                    TextField("Base URL（如 https://api.deepseek.com/v1）",
+                              text: Binding(get: { store.cloudFormBase }, set: { store.cloudFormBase = $0 }))
+                        .textFieldStyle(.roundedBorder).font(.system(size: 12))
+                    SecureField("API Key（可选，可后补）",
+                                text: Binding(get: { store.cloudFormKey }, set: { store.cloudFormKey = $0 }))
+                        .textFieldStyle(.roundedBorder).font(.system(size: 12))
+                    SmallBtn("添加", primary: true) {
+                        store.addCloudProvider()
+                        store.cloudFormName = ""; store.cloudFormBase = ""; store.cloudFormKey = ""
+                    }
+                }
+            }.padding(12)
+        }
     }
 }
 

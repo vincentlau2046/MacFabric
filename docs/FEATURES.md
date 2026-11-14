@@ -21,10 +21,11 @@
 **已验证**：卸载后 /models=[]、重复卸载 404、还原+reload 恢复。
 **修复**：handler 原误调 `pm.mgr.load_models()`（模块函数非方法）→ AttributeError 被 except 吞掉、注册表不刷新；改走 `pm.mgr.reload_models()`（同步 _gpu_state/_lifecycle）。
 
-### F3 云端接入 CRUD — 🔶 数据面就绪，UI 下批
+### F3 云端接入 CRUD — ✅ B2 落地
 **语义**：服务商可增删（名称、OpenAI 兼容 base、API key、是否发现）；模型可发现/添加/删除（`enabled_models` 白名单 + 每模型 `supports_vision/supports_tools`）。
 **实现**：`~/.inferfabric/cloud_provider.yaml`（schema：providers.{name}.{openai_base, api_key, discovery_enabled, enabled_models, models}）；端点已注册：GET/DELETE `/admin/cloud/providers`、POST `/admin/cloud/discover|test|reload|provider-test`、GET `/admin/cloud/provider-models`。
-**待办**：App 云端接入页从静态演示换真数据（增删服务商、发现+勾选模型）。
+**实现（B2）**：App 云端接入页真数据化 — 服务商卡（key 状态/可路由数/连通测试/删除两击确认/展开模型策展）、模型行（enable/disable 白名单勾选、VL tag 打标/去标、手填 add、manual 模型 remove）、底部添加服务商表单（名称+Base+key，key 写 secrets.env 存 ${REF}）。
+**已验证**：add→dup 400→add model→enable→tag VL→remove→delete→404 八步全过，providers 恢复 [zhipu]。
 
 ### F4 本地模型安装（发现/添加）— 🔶 后端有，UI 未接
 **语义**：与 F2 对称的「增加」侧：扫描本机 GGUF → 生成 models.d YAML → 出现在能力包/本地推理。
@@ -53,7 +54,7 @@
 | 批次 | 内容 | 状态 |
 |---|---|---|
 | B1 | F1 池真数据页 + F2 卸载 + F5 VL 徽章 + 卸载 reload bug 修复 | ✅ 本轮 |
-| B2 | F3 云端接入页真数据（服务商 CRUD + 模型发现/勾选/删除） | 下批 |
+| B2 | F3 云端接入页真数据（服务商 CRUD + 模型勾选/VL 打标/手填/删除） | ✅ |
 | B3 | F4 本地模型安装向导 + F5 徽章铺满全部卡片 + F8 池开关 | 后续 |
 | B4 | GAP.md 遗留：G3 菜单栏 mini 织物条、G4 监控补全、G5 设置页真数据 | 后续 |
 | B5 | G6 首启向导、G7 dmg 打包 | P4 |
