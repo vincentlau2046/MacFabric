@@ -248,3 +248,10 @@
 - 池调度侧已有 VL 感知（无需改）：selector 排序键把 vision 请求的
   supports_vision 候选软优先（云模型读注册表 supports_vision，本地读
   model_type==vl），无 VL 配置时按优先级正常调度
+
+## 2026-11-14 深夜补丁 5 — 池页云端候选菜单同源修复（用户反馈：模型池无法添加）
+- 同一根因的第二入口：池页「＋ 添加候选 → 云端」菜单 cloudChoices 也只列
+  model_specs → atlaswork 启用未建 spec 的模型全部缺席（API 直加 200 正常，
+  纯 UI 数据源问题）
+- 修复：cloudChoices = specs ∪ enabled_models（去重，kimi/k3.1-pro 前缀拆分
+  正确）→ 晋升安装版

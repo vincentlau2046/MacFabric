@@ -1291,12 +1291,19 @@ struct PoolCard: View {
         return specs.first(where: { c.target?.hasSuffix("/\($0.id)") == true })?.supports_vision == true
     }
 
-    /// 可作候选的云端模型（provider/model 形式）
+    /// 可作候选的云端模型（provider/model 形式）— spec 行 ∪ 已启用未建 spec
+    /// 的发现模型（enable 只进白名单，不建 model_specs；漏掉会让已启用模型
+    /// 在池页添加菜单隐身）
     var cloudChoices: [(String, String)] {
         var out: [(String, String)] = []
         for pv in store.cloud?.providers ?? [] {
+            var seen = Set<String>()
             for spec in pv.model_specs ?? [] {
                 out.append(("\(pv.name)/\(spec.id)", pv.name))
+                seen.insert(spec.id)
+            }
+            for mid in pv.enabled_models ?? [] where !seen.contains(mid) {
+                out.append(("\(pv.name)/\(mid)", pv.name))
             }
         }
         return out

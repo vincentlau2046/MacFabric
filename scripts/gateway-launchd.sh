@@ -68,7 +68,7 @@ EOF
   pkill -f "$PY -m inferfabric.proxy.handler" 2>/dev/null || true
   sleep 1
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  echo "已安装守护: $LABEL（KeepAlive=true，日志 $LOG_DIR/gateway.launchd.log）"
+  echo "已安装守护: ${LABEL}（KeepAlive=true，日志 $LOG_DIR/gateway.launchd.log）"
   echo "注意: 调试/安装网关命令行相同 — 以后重启调试网关请勿 pkill 全局匹配，"
   echo "      用 'launchctl kickstart -k gui/$(id -u)/$LABEL' 重启安装版。"
   ;;
