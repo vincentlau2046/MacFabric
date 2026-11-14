@@ -287,7 +287,11 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
             if not suppress_client_errors:
                 send_json(handler, {"error": err, "hint": hint}, 501)
             return CloudResult(status=501, error=err, committed=False)
-        url = f"{provider_cfg.anthropic_base.rstrip('/')}/messages"
+        # 双约定兼容（与 _probe_cloud_endpoint 同逻辑）：base 尾带 /v1（预设惯例）
+        # → 拼 /messages；裸 base（如千帆 anthropic/tokenplan/personal，用户照抄
+        # 厂商文档）→ 拼 /v1/messages（Anthropic SDK 行业惯例）
+        _ab = provider_cfg.anthropic_base.rstrip('/')
+        url = (_ab + "/messages") if _ab.endswith("/v1") else (_ab + "/v1/messages")
         headers = {
             "Content-Type": "application/json",
             "x-api-key": provider_cfg.api_key,
