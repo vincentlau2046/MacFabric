@@ -207,10 +207,30 @@ final class GatewayStore: ObservableObject {
     @Published var busy = false
     @Published var models: [ModelItem] = []
     @Published var curve: [CurvePoint] = []
-    @Published var actionMessage = ""
+    /// 操作反馈横幅 — 5s 自动消退（陈旧的 ✅/❌ 长期挂在卡片上误导）
+    @Published var actionMessage = "" {
+        didSet {
+            guard !actionMessage.isEmpty else { return }
+            msgClear?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.actionMessage = "" }
+            msgClear = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
+        }
+    }
+    private var msgClear: DispatchWorkItem?
     @Published var hubExpanded = ""
     @Published var pools: PoolsPayload?
-    @Published var uninstallConfirm: String? = nil   // F2: 待确认卸载的能力包名
+    /// 待确认卸载的能力包名 — 6s 未确认自动复位（两击确认不残留）
+    @Published var uninstallConfirm: String? = nil {
+        didSet {
+            confirmResetPack?.cancel(); confirmResetPack = nil
+            guard uninstallConfirm != nil else { return }   // 手动复位/超时回 nil 时不排程
+            let work = DispatchWorkItem { [weak self] in self?.confirmResetPack = nil
+                                          self?.uninstallConfirm = nil }
+            confirmResetPack = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
+        }
+    }
     // 全局确认弹窗（SwiftUI confirmationDialog；action 在用户确认后执行）
     @Published var confirmText: String? = nil
     @Published var confirmAction: (() -> Void)? = nil
@@ -222,7 +242,19 @@ final class GatewayStore: ObservableObject {
     // F3: 云端接入 CRUD 状态
     @Published var cloud: CloudPayload?
     @Published var cloudExpanded: String? = nil
-    @Published var cloudDeleteConfirm: String? = nil
+    /// 待确认删除的服务商名 — 同款 6s 自动复位
+    @Published var cloudDeleteConfirm: String? = nil {
+        didSet {
+            confirmResetProvider?.cancel(); confirmResetProvider = nil
+            guard cloudDeleteConfirm != nil else { return }
+            let work = DispatchWorkItem { [weak self] in self?.confirmResetProvider = nil
+                                          self?.cloudDeleteConfirm = nil }
+            confirmResetProvider = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
+        }
+    }
+    private var confirmResetPack: DispatchWorkItem?
+    private var confirmResetProvider: DispatchWorkItem?
     @Published var cloudFormName = ""
     @Published var cloudFormBase = ""
     @Published var cloudFormKey = ""
@@ -531,7 +563,10 @@ final class GatewayStore: ObservableObject {
     @Published var cloudBusy = false   // 云端操作防抖：进行中忽略重复触发（双击不再产生第二次 DELETE）
 
     func cloudRequest(path: String, method: String, body: [String: Any], okMsg: String, failPrefix: String, timeout: Double = 30) {
-        guard !cloudBusy else { return }
+        guard !cloudBusy else {
+            actionMessage = "⚠️ 上一操作进行中，请稍候"
+            return
+        }
         cloudBusy = true
         var req = URLRequest(url: base.appendingPathComponent(path), timeoutInterval: timeout)
         req.httpMethod = method
@@ -711,25 +746,35 @@ final class GatewayStore: ObservableObject {
 
     func sendPrompt() {
         busy = true; reply = ""
+        // 试聊模型动态解析：首个活跃 LLM → 兜底 qwen3-4b（轻量对话包卸载后不哑）
+        let target = models.first { $0.active == true && $0.model_type == "llm" }?.name
+            ?? (models.contains { $0.name == "qwen3-4b" } ? "qwen3-4b" : (models.first?.name ?? "qwen3-4b"))
         var req = URLRequest(url: base.appendingPathComponent("/v1/chat/completions"), timeoutInterval: 180)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "model": "qwen3-4b", "max_tokens": 300,
+            "model": target, "max_tokens": 300,
             "chat_template_kwargs": ["enable_thinking": false],
             "messages": [["role": "user", "content": prompt]],
         ])
-        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
             defer { DispatchQueue.main.async { self?.busy = false } }
             guard let self, let data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let choices = obj["choices"] as? [[String: Any]],
-                  let msg = choices.first?["message"] as? [String: Any],
-                  let content = msg["content"] as? String else {
-                DispatchQueue.main.async { self?.reply = "请求失败（网关未响应或模型未加载）" }
+                  let msg = choices.first?["message"] as? [String: Any] else {
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                let detail = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                DispatchQueue.main.async {
+                    self?.reply = "请求失败(\(code)) \(detail.prefix(140)) — 若模型未装，先到能力包页安装轻量对话包"
+                }
                 return
             }
-            DispatchQueue.main.async { self.reply = content }
+            let content = (msg["content"] as? String) ?? ""
+            DispatchQueue.main.async {
+                // 思考模型可能吃满 max_tokens 致 content 为空 — 如实提示而非报错
+                self.reply = content.isEmpty ? "（模型思考占满了输出预算，未产出正文 — 重试或换个模型）" : content
+            }
         }.resume()
     }
 
