@@ -1276,10 +1276,10 @@ struct PoolCard: View {
                                 .background(Color.accent.opacity(0.15), in: RoundedRectangle(cornerRadius: 5))
                                 .foregroundColor(.accent)
                         }
-                        // 协议标签：本地 OAI 恒有 + ANT 原生；云端按注册表三态
+                        // 协议标签：本地 OAI 恒有 + ANT 协议；云端按注册表三态
                         if c.kind != "cloud" {
                             Chip("OAI")
-                            if localModel(c)?.anthropic_native == true { Chip("ANT 原生", color: Color.thJudge) }
+                            if localModel(c)?.anthropic_native == true { Chip("ANT 协议", color: Color.thJudge) }
                         } else {
                             Chip("OAI", color: Color.thLlm)
                         }
@@ -1723,7 +1723,7 @@ struct CloudProviderCard: View {
                         HStack(spacing: 6) {
                             Text(pv.name).font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
                             Chip("OAI")
-                            if (pv.anthropic_base ?? "").isEmpty == false { Chip("ANT 原生", color: Color.thJudge) }
+                            if (pv.anthropic_base ?? "").isEmpty == false { Chip("ANT 协议", color: Color.thJudge) }
                         }
                         Text(pv.openai_base ?? "").font(.system(size: 10.5, design: .monospaced))
                             .foregroundColor(.dim).lineLimit(1)
@@ -1768,9 +1768,9 @@ struct CloudProviderCard: View {
                                                model: spec.id)
                     }
                     Text(spec.id).font(.system(size: 12.5)).foregroundColor(.ink)
-                    // 协议可用性：OAI 发现恒有；ANT 原生按注册表
+                    // 协议可用性：OAI 发现恒有；ANT 协议按注册表
                     Chip("OAI", color: Color.thLlm)
-                    if spec.anthropic == true { Chip("ANT 原生", color: Color.thJudge) }
+                    if spec.anthropic == true { Chip("ANT 协议", color: Color.thJudge) }
                     if spec.manual == true { Chip("手填") }
                     // F5: VL 标签（supports_vision 三态；tag 动作切换）
                     if spec.supports_vision == true {
@@ -1819,10 +1819,10 @@ struct CloudAddCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("添加服务商 — OpenAI 兼容 base + API key（双协议统一出口 :8999）")
                     .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
-                Text("只讲 OpenAI 方言的服务商开箱可用：网关把 /v1/messages（Anthropic）翻译成 OpenAI 调用再转发；服务商有原生 Anthropic 端点时填第二行可直连免翻译")
+                Text("只讲 OpenAI 方言的服务商开箱可用：网关把 /v1/messages（Anthropic）翻译成 OpenAI 调用再转发；服务商提供 Anthropic 协议端口时填第二行可直连免翻译")
                     .font(.system(size: 11)).foregroundColor(.faint)
                 HStack(spacing: 8) {
-                    TextField("Anthropic Base URL（可选，原生直连）",
+                    TextField("Anthropic Base URL（可选，ANT 协议端口直连）",
                               text: Binding(get: { store.cloudFormAnth }, set: { store.cloudFormAnth = $0 }))
                         .textFieldStyle(.roundedBorder).font(.system(size: 12))
                 }
