@@ -8,6 +8,7 @@
   当前 revision+1 拾取，保证热加载不回退。
 """
 
+import copy
 import logging
 import os
 import tempfile
@@ -94,7 +95,8 @@ class PoolRegistry:
                  provider_route: Callable[[str], dict[str, str]] | None = None,
                  local_protocols: Callable[[str], list[str] | None] | None = None):
         self._config_path = Path(config_path)
-        self._lock = threading.Lock()
+        # RLock：purge_candidates（跨模块联动清除）持锁复用 update() 的校验+写盘路径
+        self._lock = threading.RLock()
         self._snapshot: RegistrySnapshot = _EMPTY_SNAPSHOT
         # 最后一次成功加载/写入的原始配置 dict（toggle 等字段级修改的基底，
         # 保留悬空候选/未回传字段，避免经有损视图重建丢数据）
@@ -247,6 +249,35 @@ class PoolRegistry:
             self._configured = True
             self._load_error = None
             return self._snapshot
+
+    def purge_candidates(self, predicate: Callable[[dict], bool]) -> tuple[int, int]:
+        """系统级候选清除（跨模块联动）：源模块删除模型 → 池内引用自动移除。
+
+        predicate(candidate_raw) 命中即从其所在池删除该候选（如本地模型卸载 →
+        kind=local 且 model_name 匹配；云模型移除 → provider+model_id 匹配）。
+        系统发起、无编辑者竞争语义：以当前 revision 作 expected 走 update()
+        的同一条校验+原子写盘+发布路径（RLock 允许同线程重入）。
+        Returns: (移除数, 新 revision)；无命中不写盘，返回 (0, 当前 revision)。
+        """
+        with self._lock:
+            raw = copy.deepcopy(self._raw) if self._raw is not None else None
+            if not isinstance(raw, dict):
+                return 0, self._snapshot.revision
+            removed = 0
+            for p in (raw.get("pools") or {}).values():
+                if not isinstance(p, dict):
+                    continue
+                cands = p.get("candidates")
+                if not isinstance(cands, list):
+                    continue
+                kept = [c for c in cands
+                        if not (isinstance(c, dict) and predicate(c))]
+                removed += len(cands) - len(kept)
+                p["candidates"] = kept
+            if not removed:
+                return 0, self._snapshot.revision
+            snap = self.update(raw, expected_revision=self._snapshot.revision)
+            return removed, snap.revision
 
     def compile_pool(self, config: dict, pool_name: str) -> PoolSnapshot:
         """dry-run 编辑态预览：把传入配置编译为单池快照（只读，不发布）。

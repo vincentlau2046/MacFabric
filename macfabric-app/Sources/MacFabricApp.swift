@@ -108,6 +108,17 @@ struct CurvePoint: Codable {
     var requests: Int
 }
 
+/// 弹窗确认（用户裁决：池结构性操作只拦一道确认，不校验可用性 —
+/// 可用性是源模块（本地推理/云端接入）的职责）
+func confirmDialog(_ text: String) -> Bool {
+    let a = NSAlert()
+    a.messageText = "确认操作"
+    a.informativeText = text
+    a.addButton(withTitle: "确认")
+    a.addButton(withTitle: "取消")
+    return a.runModal() == .alertFirstButtonReturn
+}
+
 struct PoolCandidate: Codable {
     var id: String
     var priority: Int
@@ -166,6 +177,7 @@ struct PackDownloadState: Codable {
     var downloaded: Int?
     var total: Int?
     var error: String?
+    var detail: String?      // 引擎构建阶段文案（"cmake 配置…"/"编译中…"）
 }
 struct ModelMetrics: Codable {
     var requests: Int?
@@ -314,16 +326,29 @@ final class GatewayStore: ObservableObject {
         }, okMsg: "✅ 优先级已更新", failPrefix: "排序失败")
     }
 
-    /// 池候选换模型（target 替换；local → name，cloud → provider/model）
+    /// 池候选换模型（target 替换；local → model_name，cloud → provider+model_id。
+    /// 候选 id 保留原值 — 身份稳定，evidence/历史不悬空）
     func replacePoolCandidate(pool: String, candidateId: String, to target: String, kind: String) {
         mutatePools({ raw in
             guard var poolsCfg = raw["pools"] as? [String: Any],
                   var poolCfg = poolsCfg[pool] as? [String: Any],
                   var cands = poolCfg["candidates"] as? [[String: Any]] else { return }
             guard let idx = cands.firstIndex(where: { $0["id"] as? String == candidateId }) else { return }
-            cands[idx]["id"] = target
-            cands[idx]["target"] = target
-            cands[idx]["kind"] = kind
+            var cand = cands[idx]
+            cand["kind"] = kind
+            if kind == "cloud" {
+                // target = "provider/model"；provider 不含 "/"（model_id 可含，切第一段）
+                let parts = target.split(separator: "/", maxSplits: 1).map(String.init)
+                guard parts.count == 2 else { return }
+                cand["provider"] = parts[0]
+                cand["model_id"] = parts[1]
+                cand.removeValue(forKey: "model_name")
+            } else {
+                cand["model_name"] = target
+                cand.removeValue(forKey: "provider")
+                cand.removeValue(forKey: "model_id")
+            }
+            cands[idx] = cand
             poolCfg["candidates"] = cands
             poolsCfg[pool] = poolCfg
             raw["pools"] = poolsCfg
@@ -343,14 +368,32 @@ final class GatewayStore: ObservableObject {
         }, okMsg: "✅ 候选已移除", failPrefix: "移除失败")
     }
 
-    /// 池候选追加
+    /// 池候选追加（schema 正确：cloud 必须 provider+model_id — 修复
+    /// "cloud candidate requires provider" 400；id 唯一化防碰撞）
     func addPoolCandidate(pool: String, target: String, kind: String) {
         mutatePools({ raw in
             guard var poolsCfg = raw["pools"] as? [String: Any],
                   var poolCfg = poolsCfg[pool] as? [String: Any],
                   var cands = poolCfg["candidates"] as? [[String: Any]] else { return }
             let maxPrio = cands.map { $0["priority"] as? Int ?? 0 }.max() ?? 0
-            cands.append(["id": target, "target": target, "kind": kind, "priority": maxPrio + 10])
+            let baseId = kind == "cloud"
+                ? target.replacingOccurrences(of: "/", with: "_")
+                : target
+            var cid = baseId
+            var n = 2
+            while cands.contains(where: { ($0["id"] as? String) == cid }) {
+                cid = "\(baseId)-\(n)"; n += 1
+            }
+            var cand: [String: Any] = ["id": cid, "kind": kind, "priority": maxPrio + 10]
+            if kind == "cloud" {
+                let parts = target.split(separator: "/", maxSplits: 1).map(String.init)
+                guard parts.count == 2 else { return }
+                cand["provider"] = parts[0]
+                cand["model_id"] = parts[1]
+            } else {
+                cand["model_name"] = target
+            }
+            cands.append(cand)
             poolCfg["candidates"] = cands
             poolsCfg[pool] = poolCfg
             raw["pools"] = poolsCfg
@@ -500,13 +543,14 @@ final class GatewayStore: ObservableObject {
     }
 
     /// 能力包一键安装：网关负责"已在盘→直接装机 / 不在→下载后装机"
-    func installPack(_ name: String, url: String, filename: String, label: String) {
+    func installPack(_ name: String, url: String, filename: String, label: String, engine: String = "") {
         actionMessage = "\(name) 安装中…"
         var req = URLRequest(url: base.appendingPathComponent("/admin/packs/download"), timeoutInterval: 30)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "name": name, "url": url, "filename": filename, "model_type_label": label])
+        var body: [String: Any] = ["name": name, "url": url, "filename": filename, "model_type_label": label]
+        if !engine.isEmpty { body["engine"] = engine }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
@@ -1289,6 +1333,7 @@ struct PoolCard: View {
                             Section("本机") {
                                 ForEach(store.models, id: \.name) { m in
                                     Button(m.name) {
+                                        guard confirmDialog("将候选 \(c.target ?? c.id) 替换为 \(m.name)？") else { return }
                                         store.replacePoolCandidate(pool: name, candidateId: c.id,
                                                                    to: m.name, kind: "local")
                                     }
@@ -1297,6 +1342,7 @@ struct PoolCard: View {
                             Section("云端") {
                                 ForEach(cloudChoices, id: \.0) { ch in
                                     Button(ch.0) {
+                                        guard confirmDialog("将候选 \(c.target ?? c.id) 替换为 \(ch.0)？") else { return }
                                         store.replacePoolCandidate(pool: name, candidateId: c.id,
                                                                    to: ch.0, kind: "cloud")
                                     }
@@ -1304,7 +1350,10 @@ struct PoolCard: View {
                             }
                         }
                         .font(.system(size: 11))
-                        SmallBtn("移除") { store.removePoolCandidate(pool: name, candidateId: c.id) }
+                        SmallBtn("移除") {
+                            guard confirmDialog("从池 iff/\(name) 移除候选 \(c.target ?? c.id)？") else { return }
+                            store.removePoolCandidate(pool: name, candidateId: c.id)
+                        }
                         // F1: 优先级可调 — ↑↓ 换相邻优先级，PUT CAS 回写
                         HStack(spacing: 3) {
                             SmallBtn("↑", disabled: idx == 0) {
@@ -1576,16 +1625,18 @@ struct PackCard: View {
     var store: GatewayStore
     let pack: (String, String, String, String?, String?)
 
-    // (下载URL, 文件名, model_type 线色标签) — 源经 HEAD 验证 200；nil = 引擎未接
-    static let packPresets: [String: (String, String, String)] = [
+    // (下载URL, 文件名, model_type 线色标签, engine?) — engine 非空 = 先项目内建引擎再下模型
+    static let packPresets: [String: (String, String, String, String?)] = [
         "bge-m3": ("https://hf-mirror.com/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf",
-                   "bge-m3-Q4_K_M.gguf", "embedding"),
+                   "bge-m3-Q4_K_M.gguf", "embedding", nil),
         "bge-reranker-v2-m3": ("https://hf-mirror.com/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf",
-                               "bge-reranker-v2-m3-Q4_K_M.gguf", "rerank"),
+                               "bge-reranker-v2-m3-Q4_K_M.gguf", "rerank", nil),
         "qwen3-1.7b": ("https://hf-mirror.com/lmstudio-community/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf",
-                       "Qwen3-1.7B-Q4_K_M.gguf", "llm"),
+                       "Qwen3-1.7B-Q4_K_M.gguf", "llm", nil),
         "qwen3-vl-4b": ("https://hf-mirror.com/lmstudio-community/Qwen3-VL-4B-Instruct-GGUF/resolve/main/Qwen3-VL-4B-Instruct-Q4_K_M.gguf",
-                        "Qwen3-VL-4B-Instruct-Q4_K_M.gguf", "vl"),
+                        "Qwen3-VL-4B-Instruct-Q4_K_M.gguf", "vl", nil),
+        "whisper-v3-turbo": ("https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+                             "ggml-large-v3-turbo.bin", "asr", "whisper"),
     ]
     var confirmingUninstall: Bool { store.uninstallConfirm == pack.1 }   // 两击确认，防误删
 
@@ -1621,13 +1672,16 @@ struct PackCard: View {
                                 SmallBtn("取消") { store.uninstallConfirm = nil }
                             } else {
                                 SmallBtn("卸载") { store.uninstallConfirm = pack.1 }
-                                    .help("停止服务并从 models.d 移除，模型文件保留在磁盘")
+                                    .help("端到端卸载：停服务 + 删配置 + 删模型文件 + 引擎环境整体移除（零系统残留）")
                             }
                         }
                     } else if let target = pack.4, let preset = PackCard.packPresets[target] {
                         // 真安装：文件在盘 → 直接装机；不在 → 网关下载后自动装机
                         let dl = store.packDownloads[target]
-                        if dl?.status == "downloading" || dl?.status == "installing" {
+                        if dl?.status == "building" {
+                            Text(dl?.detail ?? "构建引擎中…")
+                                .font(.system(size: 11, design: .monospaced)).foregroundColor(.warnC)
+                        } else if dl?.status == "downloading" || dl?.status == "installing" {
                             let pct: Int = {
                                 guard let d = dl, let t = d.total, t > 0 else { return 0 }
                                 return Int(Double(d.downloaded ?? 0) / Double(t) * 100)
@@ -1636,20 +1690,24 @@ struct PackCard: View {
                                 .font(.system(size: 11, design: .monospaced)).foregroundColor(.accent)
                         } else if dl?.status == "error" {
                             SmallBtn("重试", primary: true) {
-                                store.installPack(target, url: preset.0, filename: preset.1, label: preset.2)
+                                store.installPack(target, url: preset.0, filename: preset.1,
+                                                  label: preset.2, engine: preset.3 ?? "")
                             }
                             Text("失败").font(.system(size: 10.5)).foregroundColor(.warnC)
                                 .help(dl?.error ?? "")
                         } else {
                             SmallBtn("安装", primary: true) {
-                                store.installPack(target, url: preset.0, filename: preset.1, label: preset.2)
+                                store.installPack(target, url: preset.0, filename: preset.1,
+                                                  label: preset.2, engine: preset.3 ?? "")
                             }
-                            .help("从 hf-mirror 下载 GGUF 到 MacFabric/models 后自动写入 models.d；不自动启动")
+                            .help(preset.3 == nil
+                                  ? "从 hf-mirror 下载 GGUF 到 MacFabric/models 后自动写入 models.d；不自动启动"
+                                  : "端到端装机：项目内构建 Metal 引擎 → 下载模型 → 写入 models.d（全程隔离，卸载整体移除）")
                         }
                     } else if pack.4 != nil {
-                        // ASR/TTS：引擎未接入，诚实禁用
-                        Text("v1.5").font(.system(size: 10.5)).foregroundColor(.faint)
-                            .help("该能力的引擎未接入（P3 批次），暂不可安装")
+                        // 无 preset：引擎未接入，诚实禁用
+                        Text("待接入").font(.system(size: 10.5)).foregroundColor(.faint)
+                            .help("该能力的引擎未接入，暂不可安装")
                     }
                 }
             }

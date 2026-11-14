@@ -36,3 +36,35 @@ Docker 适用于纯 CPU 的非加速服务；对以 Metal 为第一公民的 Mac
    禁止写 /usr、/Library、禁止要求 brew
 2. YAML 配置用 `python_bin:`/绝对 `binary_path:` 显式指向项目内路径
 3. 需要系统框架（如 Vision）时只做只读 API 调用
+
+## 四、部署范式（MacFabric 与上游 InferFabric 的底层差异点）
+
+> 用户裁决（2026-11-14）：隔离不是个别引擎的做法，而是**所有部署方式的底层范式**。
+> 能力包一键安装/卸载必须端到端，不依赖任何手工部署步骤。
+
+### 每个"能力包"= 三个可整体拆除的单元
+
+| 单元 | 位置 | 生命周期 |
+|---|---|---|
+| 模型文件 | `MacFabric/models/` | 安装时下载（.part→原子改名），卸载时删除 |
+| 引擎环境 | `MacFabric/engines/<unit>/`（二进制或 venv） | 首个引用它的模型安装时创建，引用计数归零时整目录 rmtree |
+| 配置 | `macfabric_gateway/models.d/<name>.yaml` | 安装时写入（全部路径显式），卸载时删除 |
+
+### 代码落点（已实现）
+
+- **安装**：`POST /admin/packs/download` — 引擎阶段（如 whisper 需构建 →
+  `engines/whisper/`，用 `engines/_tools` 内置 cmake，零系统安装）→
+  模型下载 → yaml 装机（不启动）
+- **卸载**：`POST /admin/packs/uninstall` — 停服务 → 删 yaml → 热重载 →
+  删模型文件（仅项目 `models/`，`~/models` 用户数据不碰）→
+  `_collect_engine_refs` 引用计数：重载后无剩余模型引用该引擎单元 → 整目录移除 →
+  模型池联动清除（`PoolRegistry.purge_candidates`）
+- **跨模块联动**：本地模型卸载 / 云模型移除 / provider 删除 →
+  池内引用候选自动清除（源模块删除，池不同步即悬空）
+- **卸载响应**带 `removed_model_files` / `removed_engine_dir` /
+  `pool_candidates_purged` — 清理可审计，不静默
+
+### 卸载 = 零残留验收标准
+
+删项目目录 + `~/.inferfabric` 后系统无任何残留（无 brew 包、无 conda env、
+无 launchd 服务、无 /usr /Library 写入）；运行中卸载先停服务再拆环境。

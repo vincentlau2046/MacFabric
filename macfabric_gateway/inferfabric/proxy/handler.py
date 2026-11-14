@@ -190,6 +190,53 @@ def _serve_api_spec(handler, pm):
 from inferfabric.model_pool import admin as mp_admin  # noqa: E402
 from inferfabric.security import admin as key_admin  # noqa: E402
 
+def _collect_engine_refs(model) -> tuple[str | None, list]:
+    """采集模型配置引用的引擎单元与文件路径（容器化卸载判定用）。
+
+    Returns: (engine_unit_name | None, [绝对路径])。
+    engine_unit = 路径落在 <repo>/engines/<unit>/ 下的第一层目录名；
+    绝对/相对路径都收（相对先按网关仓库根解析，再按 cwd 兜底）。
+    """
+    from dataclasses import fields, is_dataclass
+    repo_root = Path(__file__).resolve().parents[3]
+    engines_root = (repo_root / "engines").resolve()
+    candidates: list[Path] = []
+
+    def _walk(obj):
+        if not is_dataclass(obj):
+            return
+        for f in fields(obj):
+            try:
+                v = getattr(obj, f.name)
+            except Exception:
+                continue
+            if isinstance(v, (str, Path)) and str(v):
+                sv = str(v)
+                if sv.startswith("/"):
+                    candidates.append(Path(sv))
+                elif not sv.startswith("~") and "/" in sv or sv.endswith((".gguf", ".onnx", ".bin")):
+                    # 相对路径：按仓库根解析（网关约定 cwd=仓库根）
+                    candidates.append(repo_root / sv)
+            elif is_dataclass(v):
+                _walk(v)
+
+    _walk(model)
+    engine_unit = None
+    resolved: list[Path] = []
+    for p in candidates:
+        try:
+            rp = p.resolve()
+        except OSError:
+            continue
+        resolved.append(rp)
+        if engines_root in rp.parents:
+            rel = rp.relative_to(engines_root)
+            unit = rel.parts[0] if rel.parts else None
+            if unit and engine_unit is None:
+                engine_unit = unit
+    return engine_unit, resolved
+
+
 _GET_ROUTES = {
     "/":                        lambda h, pm: h._serve_dashboard(pm),
     "/health":                  lambda h, pm: h._send_json({"status": "ok", "gpu_mode": pm.mgr.gpu_mode}),
@@ -289,6 +336,71 @@ _POST_ROUTES = {
 # 能力包下载进度登记表（模块级；键 = 模型名）
 _PACK_DOWNLOADS: dict = {}
 _PACK_DL_LOCK = threading.Lock()
+
+# ── ASR 端到端（MacFabric 差异点）：whisper 引擎项目内构建 + yaml 装机 ──
+# 隔离边界：源码/构建产物全部 engines/whisper/，cmake 用 engines/_tools 内置版，
+# 零系统安装；卸载走 _handle_pack_uninstall 的引擎单元引用计数整体拆除。
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_WHISPER_SRC = _REPO_ROOT / "engines/whisper/whisper.cpp"
+_WHISPER_BIN = _WHISPER_SRC / "build/bin/whisper-server"
+_WHISPER_CMAKE = (_REPO_ROOT / "engines/_tools/cmake-3.31.6-macos10.10-universal/"
+                  "CMake.app/Contents/bin/cmake")
+
+
+def _ensure_whisper_engine(st: dict) -> tuple[bool, str]:
+    """whisper-server 二进制在则跳过；否则后台构建（进度写 st.detail/log_tail）。"""
+    if _WHISPER_BIN.exists():
+        return True, "cached"
+    if not _WHISPER_SRC.exists():
+        return False, f"whisper.cpp source missing: {_WHISPER_SRC}"
+    import subprocess as _sp
+    env = dict(os.environ)
+    env["PATH"] = str(_WHISPER_CMAKE.parent) + ":" + env.get("PATH", "")
+    for label, argv in (
+            ("cmake 配置…", [str(_WHISPER_CMAKE), "-B", "build",
+                             "-DWHISPER_BUILD_EXAMPLES=ON", "-DWHISPER_BUILD_TESTS=OFF",
+                             "-DGGML_METAL=ON"]),
+            ("编译中…", [str(_WHISPER_CMAKE), "--build", "build",
+                         "--config", "Release", "-j", "8",
+                         "--target", "whisper-server"])):
+        st["detail"] = label
+        proc = _sp.run(argv, cwd=str(_WHISPER_SRC), env=env,
+                       capture_output=True, text=True, timeout=1800)
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "")[-2000:]
+            st["log_tail"] = tail
+            return False, f"{label} exit={proc.returncode}: {tail[-300:]}"
+    if not _WHISPER_BIN.exists():
+        return False, "build finished but whisper-server not found"
+    return True, "built"
+
+
+def _install_whisper_pack(pm, name: str, model_file: Path) -> dict:
+    """写 asr_server yaml（Metal whisper-server，OpenAI 兼容 /v1/audio/transcriptions）
+    + 热重载。绝对路径显式声明（隔离规则：不探测 conda）。"""
+    yaml_path = Path(pm.mgr.models_dir) / f"{name}.yaml"
+    if name in pm.mgr._models:
+        return {"status": "already_configured", "message": name}
+    content = f"""name: {name}
+description: "whisper.cpp ASR (Metal, OpenAI 兼容 /v1/audio/transcriptions)"
+type: asr_server
+gpu_role: none
+model_type: asr
+ledger_mode: on_demand
+asr_server:
+  conda_env: whisper            # python_bin 显式声明后不探测 conda（隔离）
+  python_bin: {_WHISPER_BIN}
+  port: 8881
+  working_dir: {_WHISPER_SRC / "build/bin"}
+  health_url: "http://127.0.0.1:8881/health"
+  health_check_timeout: 180
+  start_cmd: "{_WHISPER_BIN} --model {model_file} --host 127.0.0.1 --port 8881 --inference-path /v1/audio/transcriptions"
+"""
+    yaml_path.write_text(content, encoding="utf-8")
+    pm.mgr.reload_models()
+    return {"status": "installed", "message": f"{name} installed (not started)"}
+
 
 def _pack_download_state(name: str) -> dict:
     with _PACK_DL_LOCK:
@@ -1493,8 +1605,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # ─── MACFABRIC F2: 能力包卸载 ─────────────────────────────────
     def _handle_pack_uninstall(self, pm):
-        """卸载能力包 = 停服务（若在跑）→ 删 models.d/<name>.yaml → 热重载。
-        用户语义「卸载」由能力包页发起；模型文件（GGUF 磁盘缓存）保留，v2 再议清理。"""
+        """卸载能力包 — 端到端「容器化」清理（MacFabric 与上游的差异点）：
+
+        停服务 → 删 models.d/<name>.yaml → 热重载
+        → 模型文件清理（仅限项目内 models/，~/models 用户数据不碰）
+        → 引擎单元引用计数归零则整目录 rmtree（隔离环境整体拆除，零系统残留）
+        → 模型池联动清除引用该模型的本地候选。
+        """
         data = self._read_body()
         if data is None:
             return
@@ -1506,6 +1623,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if model is None:
             self._send_json({"error": f"Unknown model: {name}"}, 404)
             return
+        # 卸载前采集该模型引用的路径（判定引擎单元与模型文件）
+        engine_unit, owned_files = _collect_engine_refs(model)
         # 在跑先停（shared/independent 都走 stop_service）
         stopped = None
         if name in pm.mgr.active_services:
@@ -1520,12 +1639,57 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({"error": f"Delete failed: {e}"}, 500)
             return
         # D1: 下次 switch 会重读 models.d；这里主动重载使列表即时生效
-        # （必须走 mgr.reload_models：同步 _gpu_state/_lifecycle 引用；
-        #   早期版本误当 mgr 方法调 load_models → AttributeError 被 except 吞掉）
+        # （必须走 mgr.reload_models：同步 _gpu_state/_lifecycle 引用）
         pm.mgr.reload_models()
-        log.info("Pack uninstalled: %s (stopped=%s)", name, bool(stopped))
+
+        # 模型文件清理：只删项目内 models/ 下属于该模型的文件
+        removed_files = []
+        repo_root = Path(__file__).resolve().parents[3]
+        project_models = repo_root / "models"
+        for f in owned_files:
+            try:
+                rp = f.resolve()
+                if project_models == rp or project_models in rp.parents:
+                    if rp.is_file():
+                        rp.unlink()
+                        removed_files.append(str(rp))
+            except OSError:
+                continue
+
+        # 引擎单元拆除：重载后无任何剩余模型引用 engines/<unit>/ → 整目录移除
+        removed_engine = None
+        if engine_unit is not None:
+            still_used = False
+            for m in pm.mgr._models.values():
+                try:
+                    u, _ = _collect_engine_refs(m)
+                    if u == engine_unit:
+                        still_used = True
+                        break
+                except Exception:
+                    continue
+            target = repo_root / "engines" / engine_unit
+            if not still_used and target.is_dir() and target.parent.name == "engines" \
+                    and target.parent.resolve() == (repo_root / "engines").resolve():
+                import shutil
+                shutil.rmtree(target, ignore_errors=True)
+                removed_engine = str(target)
+
+        # 模型池联动：清除引用该模型的本地候选（源模块删除 → 池自动同步）
+        purged, pool_rev = 0, None
+        try:
+            purged, pool_rev = pm.pool_registry.purge_candidates(
+                lambda c: c.get("kind") == "local" and c.get("model_name") == name)
+        except Exception as e:
+            log.warning("pool purge after uninstall %s failed: %s", name, e)
+
+        log.info("Pack uninstalled: %s (stopped=%s, files=%d, engine=%s, pool_purged=%d)",
+                 name, bool(stopped), len(removed_files), removed_engine, purged)
         self._send_json({"status": "uninstalled", "model": name,
-                         "stopped": bool(stopped)})
+                         "stopped": bool(stopped),
+                         "removed_model_files": removed_files,
+                         "removed_engine_dir": removed_engine,
+                         "pool_candidates_purged": purged})
 
     def _handle_set_autostart(self, pm):
         """POST /admin/models/set-autostart {name, enabled} — 改 models.d YAML
@@ -1674,6 +1838,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         url = ((data or {}).get("url") or "").strip()
         filename = ((data or {}).get("filename") or "").strip()
         label = ((data or {}).get("model_type_label") or "").strip()
+        engine = ((data or {}).get("engine") or "").strip()   # "whisper" → 先建引擎再下模型
         if not name or not url or not filename:
             self._send_json({"error": "name/url/filename required"}, 400)
             return
@@ -1688,7 +1853,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         dest_dir = Path(self._pack_models_dir(pm))
         dest = dest_dir / filename
-        if dest.exists() and dest.stat().st_size > 0:
+        if engine != "whisper" and dest.exists() and dest.stat().st_size > 0:
             result = pm.mgr.install_model(name, "llama_cpp", model_type_label=label)
             self._send_json(result)
             return
@@ -1701,6 +1866,38 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             _pack_download_state(name).update(status="downloading", downloaded=0, total=0,
                                               error="", started=time.time())
             try:
+                # ── 引擎阶段（ASR 端到端）：whisper-server 项目内构建（Metal）──
+                if engine == "whisper":
+                    st = _pack_download_state(name)
+                    st.update(status="building", detail="检查引擎…", error="")
+                    ok, msg = _ensure_whisper_engine(st)
+                    if not ok:
+                        st.update(status="error", error=f"引擎构建失败: {msg[:300]}")
+                        return
+                    if not dest.exists() or dest.stat().st_size == 0:
+                        st.update(status="downloading", detail="下载模型…")
+                        req = _ureq.Request(url, headers={"User-Agent": "MacFabric/1.0"})
+                        with _ureq.urlopen(req, timeout=60) as resp:
+                            total = int(resp.headers.get("Content-Length") or 0)
+                            st["total"] = total
+                            tmp = dest.with_suffix(".part")
+                            done = 0
+                            with open(tmp, "wb") as f:
+                                while True:
+                                    chunk = resp.read(1024 * 1024)
+                                    if not chunk:
+                                        break
+                                    f.write(chunk)
+                                    done += len(chunk)
+                                    st["downloaded"] = done
+                            tmp.rename(dest)
+                    st.update(status="installing", detail="写配置…")
+                    result = _install_whisper_pack(pm, name, dest)
+                    st["status"] = ("installed" if result.get("status") in
+                                    ("installed", "already_configured") else "error")
+                    st["error"] = result.get("message", "")
+                    log.info("ASR pack install %s: %s", name, result)
+                    return
                 req = _ureq.Request(url, headers={"User-Agent": "MacFabric/1.0"})
                 with _ureq.urlopen(req, timeout=60) as resp:
                     total = int(resp.headers.get("Content-Length") or 0)
@@ -2371,6 +2568,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 log.error("Failed to drop provider '%s': %s", name, e)
                 self._send_json({"error": f"Failed to delete provider: {e}"}, 500)
                 return
+            # 源模块删除 → 模型池联动清除该 provider 全部云候选
+            try:
+                pp, _prev = pm.pool_registry.purge_candidates(
+                    lambda c: c.get("kind") == "cloud" and c.get("provider") == name)
+                if pp:
+                    log.info("pool purge after provider drop %s: %d candidates", name, pp)
+            except Exception as e:
+                log.warning("pool purge after provider drop %s failed: %s", name, e)
             try:
                 pm.cloud.save_config()
             except Exception as e:
@@ -2527,6 +2732,18 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 count = pm.cloud.update_model_spec(provider, model, caps)
             else:  # remove
                 count = pm.cloud.remove_manual_model(provider, model)
+                # 源模块删除 → 模型池联动清除对应云候选
+                try:
+                    pp, prev = pm.pool_registry.purge_candidates(
+                        lambda c: c.get("kind") == "cloud"
+                        and c.get("provider") == provider
+                        and c.get("model_id") == model)
+                    if pp:
+                        log.info("pool purge after cloud model remove %s/%s: %d candidates",
+                                 provider, model, pp)
+                except Exception as e:
+                    log.warning("pool purge after cloud remove %s/%s failed: %s",
+                                provider, model, e)
         except KeyError as e:
             # 策展方法抛 KeyError：参数是 provider 名 → 404 provider；否则 → 404 model
             what = e.args[0] if e.args else provider
