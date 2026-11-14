@@ -199,3 +199,19 @@
 
 ### 图标（上条补丁遗漏记录）
 - scripts/make-icon.swift CoreGraphics 绘制 → AppIcon.icns，Dock 生效
+
+## 2026-11-14 晚间补丁 — 安装版/调试版分离（用户裁决）
+
+- 双档位：安装版(/Applications, :8999, ~/.inferfabric) vs 调试版(build/MacFabric-dev.app,
+  :8998, ~/.inferfabric-dev)，bundle id/显示名/状态目录/模型配置全隔离
+- 网关：MACFABRIC_STATE_DIR / MACFABRIC_MODELS_DIR 环境变量覆盖（默认零变化）
+- App：build.sh --debug 写 DEV_PROFILE 标记 → 全局 GW_PORT/GW_BASE（21 处调用面）
+- 配置：dev-gateway.sh 首次一次性快照复制安装版配置；promote-install.sh 晋升流程
+- 实测：双网关并行 8998/8999 双 200；调试版配置快照含 qianfan；
+  MacFabric-dev.app 进程与 :8998 ESTABLISHED；安装版状态目录零污染
+- 文档：docs/DEV-INSTALL-SEPARATION.md
+
+## 2026-11-14 晚间补丁 2 — 千帆接入 + Anthropic 双约定
+- qianfan 服务商（双协议端点+key），glm-5.3/deepseek-v4.1-flash 手填
+- forwarder 修 Anthropic 路径拼接：base 尾带 /v1 拼 /messages，裸 base 拼 /v1/messages
+- 双协议经 :8999 实测：glm-5.3（openai）、deepseek-v4.1-flash（anthropic 原生直连）

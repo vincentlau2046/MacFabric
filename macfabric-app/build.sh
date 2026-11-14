@@ -1,8 +1,20 @@
 #!/bin/bash
-# MacFabric App 构建 — swiftc 直编（无 Xcode，CLT SDK）→ MacFabric.app
+# MacFabric App 构建 — swiftc 直编（无 Xcode，CLT SDK）
+#   build.sh            → 正式版 build/MacFabric.app（晋升 /Applications 用）
+#   build.sh --debug    → 调试版 build/MacFabric-dev.app（bundle id/名称/网关端口 8998 独立）
 set -euo pipefail
 cd "$(dirname "$0")"
-APP=build/MacFabric.app
+DEBUG=0
+[ "${1:-}" = "--debug" ] && DEBUG=1
+if [ "$DEBUG" = "1" ]; then
+  APP=build/MacFabric-dev.app
+  BUNDLE_ID=io.macfabric.app.dev
+  BUNDLE_NAME="MacFabric Dev"
+else
+  APP=build/MacFabric.app
+  BUNDLE_ID=io.macfabric.app
+  BUNDLE_NAME="MacFabric"
+fi
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cat > build/Info.plist <<EOF
@@ -11,8 +23,9 @@ cat > build/Info.plist <<EOF
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key><string>MacFabric</string>
-  <key>CFBundleIdentifier</key><string>io.macfabric.app</string>
-  <key>CFBundleName</key><string>MacFabric</string>
+  <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
+  <key>CFBundleName</key><string>${BUNDLE_NAME}</string>
+  <key>CFBundleDisplayName</key><string>${BUNDLE_NAME}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
@@ -22,6 +35,9 @@ cat > build/Info.plist <<EOF
 </dict>
 </plist>
 EOF
+# 调试标记：App 启动时检测 → 网关指向 :8998（调试网关，状态 ~/.inferfabric-dev）
+rm -f "$APP/Contents/Resources/DEV_PROFILE"
+[ "$DEBUG" = "1" ] && printf 'dev' > "$APP/Contents/Resources/DEV_PROFILE"
 
 swiftc -O \
   -framework SwiftUI -framework AppKit \
@@ -31,4 +47,8 @@ cp build/Info.plist "$APP/Contents/Info.plist"
 # 图标（scripts/make-icon.swift 生成 build/AppIcon.icns；缺失时跳过不阻塞构建）
 [ -f build/AppIcon.icns ] && cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
-echo "构建完成: ${APP}  (open ${APP} 启动)"
+if [ "$DEBUG" = "1" ]; then
+  echo "构建完成(调试版): ${APP} — 先跑 scripts/dev-gateway.sh 再 open ${APP}"
+else
+  echo "构建完成: ${APP}  (open ${APP} 启动；成熟后 scripts/promote-install.sh 晋升)"
+fi

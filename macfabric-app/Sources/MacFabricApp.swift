@@ -108,6 +108,13 @@ struct CurvePoint: Codable {
     var requests: Int
 }
 
+// ── 安装版/调试版分离：bundle 含 DEV_PROFILE 标记（build.sh --debug 写入）
+// → 调试档网关 :8998（scripts/dev-gateway.sh，状态 ~/.inferfabric-dev）；
+//   正式档 :8999（/Applications/MacFabric.app，状态 ~/.inferfabric）
+let IS_DEV_PROFILE = Bundle.main.url(forResource: "DEV_PROFILE", withExtension: nil) != nil
+let GW_PORT = IS_DEV_PROFILE ? 8998 : 8999
+let GW_BASE = "http://127.0.0.1:\(GW_PORT)"
+
 struct PoolCandidate: Codable {
     var id: String
     var priority: Int
@@ -230,7 +237,7 @@ final class GatewayStore: ObservableObject {
     @Published var packDownloads: [String: PackDownloadState] = [:]
     var onMemoryInsufficient: ((_ name: String, _ reason: String) -> Void)?
 
-    private let base = URL(string: "http://127.0.0.1:8999")!
+    private var base: URL { URL(string: GW_BASE)! }
     private var timer: Timer?
     private var curveTimer: Timer?
 
@@ -278,7 +285,7 @@ final class GatewayStore: ObservableObject {
     /// mutate(raw) 在后台线程改 priorities/candidates，POST CAS 回写。
     func mutatePools(_ mutate: @escaping (inout [String: Any]) -> Void,
                      okMsg: String, failPrefix: String) {
-        guard let url = URL(string: "http://127.0.0.1:8999/admin/model-pools") else { return }
+        guard let url = URL(string: "\(GW_BASE)/admin/model-pools") else { return }
         URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
             guard let self, let data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -865,7 +872,7 @@ struct OverviewView: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
                     Circle().fill(store.gatewayUp ? Color.okC : Color.red).frame(width: 9, height: 9)
-                    Text(store.gatewayUp ? "网关运行中 :8999" : "网关未响应")
+                    Text(store.gatewayUp ? "网关运行中 :\(GW_PORT)" : "网关未响应")
                         .font(.system(size: 12.5)).foregroundColor(.dim)
                     Spacer()
                     Text(store.snapshot?.status.gpu_mode ?? "idle")
@@ -890,7 +897,7 @@ struct OverviewView: View {
                              k: "运行中 · \(store.models.count) 个模型")
                     StatCard(v: "\(store.totalRequests)", k: "24h 请求")
                     StatCard(v: formatCount(store.totalTokens), k: "24h 本地 tokens")
-                    StatCard(v: store.gatewayUp ? "在线" : "离线", k: "网关 :8999")
+                    StatCard(v: store.gatewayUp ? "在线" : "离线", k: "网关 :\(GW_PORT)")
                 }
                 // 能力卡格
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 168), spacing: 12)], spacing: 12) {
@@ -976,10 +983,10 @@ struct HubView: View {
                 Card {
                     HStack(spacing: 10) {
                         Chip("接入地址")
-                        Text("http://127.0.0.1:8999").font(.system(size: 12, design: .monospaced)).foregroundColor(.ink)
+                        Text(GW_BASE).font(.system(size: 12, design: .monospaced)).foregroundColor(.ink)
                         Chip("鉴权未启用")
                         Spacer()
-                        CopyButton("复制 Base URL", text: "http://127.0.0.1:8999", small: true)
+                        CopyButton("复制 Base URL", text: GW_BASE, small: true)
                     }.padding(.horizontal, 12).padding(.vertical, 8)
                 }
                 ForEach(store.models, id: \.name) { m in
@@ -1020,9 +1027,9 @@ struct HubRow: View {
 
                 if expanded {
                     VStack(alignment: .leading, spacing: 5) {
-                        FieldRow(k: "OpenAI", v: "http://127.0.0.1:8999/v1 · 模型 ID: \(model.name)")
-                        FieldRow(k: "Anthropic", v: "http://127.0.0.1:8999 · ANTHROPIC_MODEL=\(model.name)")
-                        CopyButton("复制环境变量", text: "export ANTHROPIC_BASE_URL=http://127.0.0.1:8999\nexport ANTHROPIC_MODEL=\(model.name)", small: true)
+                        FieldRow(k: "OpenAI", v: "\(GW_BASE)/v1 · 模型 ID: \(model.name)")
+                        FieldRow(k: "Anthropic", v: "\(GW_BASE) · ANTHROPIC_MODEL=\(model.name)")
+                        CopyButton("复制环境变量", text: "export ANTHROPIC_BASE_URL=\(GW_BASE)\nexport ANTHROPIC_MODEL=\(model.name)", small: true)
                         Text("已停止的按需模型照样能调 — 首请求自动唤醒，约 2s")
                             .font(.system(size: 10.5)).foregroundColor(.faint)
                     }
@@ -1032,10 +1039,10 @@ struct HubRow: View {
         }
     }
     var configJSON: String {
-        "{\"base_url\": \"http://127.0.0.1:8999/v1\", \"model\": \"\(model.name)\", \"api_key\": \"未启用鉴权\"}"
+        "{\"base_url\": \"\(GW_BASE)/v1\", \"model\": \"\(model.name)\", \"api_key\": \"未启用鉴权\"}"
     }
     var curlFor: String {
-        "curl http://127.0.0.1:8999/v1/chat/completions -H \"Content-Type: application/json\" -d '{\"model\":\"\(model.name)\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}'"
+        "curl \(GW_BASE)/v1/chat/completions -H \"Content-Type: application/json\" -d '{\"model\":\"\(model.name)\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}'"
     }
 }
 
@@ -1196,7 +1203,7 @@ struct ChatStrip: View {
     @ObservedObject var store: GatewayStore
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("试聊 · 经 :8999 网关").font(.system(size: 11.5)).foregroundColor(.faint)
+            Text("试聊 · 经 :\(GW_PORT) 网关").font(.system(size: 11.5)).foregroundColor(.faint)
             HStack(spacing: 8) {
                 TextField("输入…", text: Binding(get: { store.prompt }, set: { store.prompt = $0 }))
                     .textFieldStyle(.roundedBorder)
@@ -1766,7 +1773,7 @@ struct CloudView: View {
                     }
                     Spacer()
                 }
-                Text("统一入口 :8999 覆盖全部类型：/v1/chat/completions · /v1/messages · /v1/embeddings · /v1/audio/* · /v1/images/* · /ocr — 本地与云端候选共用同一调用面；API key 写入 secrets.env，YAML 只存 ${REF} 引用")
+                Text("统一入口 :\(GW_PORT) 覆盖全部类型：/v1/chat/completions · /v1/messages · /v1/embeddings · /v1/audio/* · /v1/images/* · /ocr — 本地与云端候选共用同一调用面；API key 写入 secrets.env，YAML 只存 ${REF} 引用")
                     .font(.system(size: 11)).foregroundColor(.faint)
             }.padding(16)
         }
@@ -1782,8 +1789,8 @@ struct CloudProviderCard: View {
     func copyUnifiedConfig(_ pv: CloudProvider) {
         let lines = [
             "# MacFabric 统一入口（本机任一协议任选）",
-            "export OPENAI_BASE_URL=http://127.0.0.1:8999/v1",
-            "export ANTHROPIC_BASE_URL=http://127.0.0.1:8999",
+            "export OPENAI_BASE_URL=\(GW_BASE)/v1",
+            "export ANTHROPIC_BASE_URL=\(GW_BASE)",
             "# 服务商 \(pv.name)（已由网关聚合，客户端无需直连）",
             "#   OpenAI base:    \(pv.openai_base ?? "-")",
             "#   Anthropic base: \(pv.anthropic_base ?? "未配置（走网关翻译桥）")",
@@ -1898,7 +1905,7 @@ struct CloudAddCard: View {
     var body: some View {
         Card {
             VStack(alignment: .leading, spacing: 8) {
-                Text("添加服务商 — OpenAI 兼容 base + API key（双协议统一出口 :8999）")
+                Text("添加服务商 — OpenAI 兼容 base + API key（双协议统一出口 :\(GW_PORT)）")
                     .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
                 Text("只讲 OpenAI 方言的服务商开箱可用：网关把 /v1/messages（Anthropic）翻译成 OpenAI 调用再转发；服务商提供 Anthropic 协议端口时填第二行可直连免翻译")
                     .font(.system(size: 11)).foregroundColor(.faint)
@@ -1974,7 +1981,7 @@ struct SettingsView: View {
                                    desc: "需在终端执行 scripts/install-launchd.sh install 批准（v1.5 App 内一键）",
                                    on: false, disabled: true)
                         SettingRow(title: "仅本机监听",
-                                   desc: "关闭后局域网设备可访问 :8999（设计稿 v1.5 项，网关端点后接）",
+                                   desc: "关闭后局域网设备可访问 :\(GW_PORT)（设计稿 v1.5 项，网关端点后接）",
                                    on: true, disabled: true)
                         SettingRow(title: "API Key 鉴权",
                                    desc: "客户端需携带密钥调用（设计稿 v1.5 项，网关端点后接）",
@@ -2091,7 +2098,7 @@ struct WizardView: View {
     private var welcomePage: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("欢迎用 MacFabric").font(.system(size: 20, weight: .bold)).foregroundColor(.ink)
-            Text("Apple Silicon 小模型聚合平台 — 一个网关 :8999 同时讲 OpenAI 与 Anthropic 两种方言，本地小模型与云端大模型同一调用面。")
+            Text("Apple Silicon 小模型聚合平台 — 一个网关 :\(GW_PORT) 同时讲 OpenAI 与 Anthropic 两种方言，本地小模型与云端大模型同一调用面。")
                 .font(.system(size: 13)).foregroundColor(.dim).fixedSize(horizontal: false, vertical: true)
             Label("检测到内存：\(ramGB) GB", systemImage: "memorychip")
                 .font(.system(size: 13)).foregroundColor(.accent)
@@ -2129,7 +2136,7 @@ struct WizardView: View {
     private var donePage: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("一切就绪").font(.system(size: 20, weight: .bold)).foregroundColor(.ink)
-            Text("• 网关已就绪 :8999（OpenAI /v1/chat/completions · Anthropic /v1/messages）\n• 模型不默认启动 — 首个请求自动唤醒，约 3s\n• 能力包页可安装/卸载模型，模型池页可调路由优先级")
+            Text("• 网关已就绪 :\(GW_PORT)（OpenAI /v1/chat/completions · Anthropic /v1/messages）\n• 模型不默认启动 — 首个请求自动唤醒，约 3s\n• 能力包页可安装/卸载模型，模型池页可调路由优先级")
                 .font(.system(size: 13)).foregroundColor(.dim).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -2305,7 +2312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let overview = NSMenuItem(title: "打开总览", action: #selector(showOverview), keyEquivalent: "o")
         overview.target = self
         menu.addItem(overview)
-        let dash = NSMenuItem(title: "打开网关面板 :8999", action: #selector(openDashboard), keyEquivalent: "d")
+        let dash = NSMenuItem(title: "打开网关面板 :\(GW_PORT)", action: #selector(openDashboard), keyEquivalent: "d")
         dash.target = self
         menu.addItem(dash)
         menu.addItem(.separator())
@@ -2336,7 +2343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func openDashboard() {
-        if let url = URL(string: "http://127.0.0.1:8999/") { NSWorkspace.shared.open(url) }
+        if let url = URL(string: GW_BASE + "/") { NSWorkspace.shared.open(url) }
     }
 }
 

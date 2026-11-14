@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import json
+import os
 import yaml
 import hashlib
 import dataclasses
@@ -29,8 +30,14 @@ _PROTECTED_ENV_KEYS = frozenset({"PATH", "HOME", "CONDA_DEFAULT_ENV", "CUDA_VISI
 # ─── Path Constants ──────────────────────────────────────────────
 
 BASE_DIR = Path(__file__).parent.parent
-MODELS_DIR = BASE_DIR / "models.d"
-IFF_DATA_DIR = Path.home() / ".inferfabric"
+# MACFABRIC 安装版/调试版分离（用户裁决）：调试网关用 MACFABRIC_STATE_DIR /
+# MACFABRIC_MODELS_DIR 指向独立目录（scripts/dev-gateway.sh → ~/.inferfabric-dev），
+# 与安装版（默认 ~/.inferfabric + 仓库 models.d）完全隔离，互不污染。
+# 端口隔离用既有 EDGE_PROXY_PORT（调试=8998，安装=8999）。
+MODELS_DIR = Path(os.environ["MACFABRIC_MODELS_DIR"]) \
+    if os.environ.get("MACFABRIC_MODELS_DIR") else BASE_DIR / "models.d"
+IFF_DATA_DIR = Path(os.environ["MACFABRIC_STATE_DIR"]) \
+    if os.environ.get("MACFABRIC_STATE_DIR") else Path.home() / ".inferfabric"
 DEFAULT_STATE_DB = IFF_DATA_DIR / "state.db"
 DEFAULT_REQUEST_LOG_DB = IFF_DATA_DIR / "request_log.db"
 DEFAULT_LOG_DIR = IFF_DATA_DIR / "logs"
