@@ -16,27 +16,27 @@ extension Color {
                   green: Double((hex >> 8) & 0xff) / 255,
                   blue: Double(hex & 0xff) / 255)
     }
-    static let desk = Color(hex: 0x101014)      // 桌面
-    static let panel = Color(hex: 0x17171c)     // 窗口面板
-    static let chrome = Color(hex: 0x1e1e25)    // 标题栏
-    static let glass = Color.white.opacity(0.055)
-    static let lineC = Color.white.opacity(0.10)
-    static let ink = Color(hex: 0xf5f5f7)
-    static let dim = Color(hex: 0xa3a3ad)
-    static let faint = Color(hex: 0x6d6d78)
-    static let accent = Color(hex: 0x5f7dff)    // 织物蓝
-    static let okC = Color(hex: 0x32d74b)
-    static let warnC = Color(hex: 0xffd60a)
+    static let desk = Color(hex: 0xf5f5f8)      // 桌面（light 默认 — 用户偏好）
+    static let panel = Color(hex: 0xffffff)     // 窗口面板
+    static let chrome = Color(hex: 0xececf1)    // 标题栏
+    static let glass = Color.black.opacity(0.045)
+    static let lineC = Color.black.opacity(0.10)
+    static let ink = Color(hex: 0x1d1d22)
+    static let dim = Color(hex: 0x55555f)
+    static let faint = Color(hex: 0x85858f)
+    static let accent = Color(hex: 0x4a63e8)    // 织物蓝
+    static let okC = Color(hex: 0x1fa843)
+    static let warnC = Color(hex: 0xb06000)
     // 能力线色（九根线 = 九类能力）
-    static let thJudge = Color(hex: 0xc79bff)
-    static let thLlm = Color(hex: 0x7a8cff)
-    static let thVl = Color(hex: 0xff7fa3)
-    static let thEmb = Color(hex: 0x4fd8b8)
-    static let thRerank = Color(hex: 0x66b8ff)
-    static let thAsr = Color(hex: 0xffc266)
-    static let thTts = Color(hex: 0xff8f6b)
-    static let thOcr = Color(hex: 0xa8e063)
-    static let thImg = Color(hex: 0x6fe0e0)
+    static let thJudge = Color(hex: 0x8e4fd8)
+    static let thLlm = Color(hex: 0x4c5fe0)
+    static let thVl = Color(hex: 0xe0508b)
+    static let thEmb = Color(hex: 0x0f9c77)
+    static let thRerank = Color(hex: 0x2b7fd4)
+    static let thAsr = Color(hex: 0xc78a1f)
+    static let thTts = Color(hex: 0xd45f35)
+    static let thOcr = Color(hex: 0x6b9c1f)
+    static let thImg = Color(hex: 0x1c9fa0)
 }
 
 /// 能力线色 + 人话名（设计稿：能力名用人话说，模型真名放小字）
@@ -803,7 +803,7 @@ struct WeaveBar: View {
             }
         }
         .frame(height: 34)
-        .background(Color.white.opacity(0.035))
+        .background(Color.black.opacity(0.03))
         .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.lineC, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 9))
     }
@@ -834,7 +834,7 @@ struct Sidebar: View {
         }
         .frame(width: 172)
         .padding(.horizontal, 8)
-        .background(Color.white.opacity(0.028))
+        .background(Color.black.opacity(0.025))
     }
 }
 
@@ -921,9 +921,9 @@ struct OverviewView: View {
             segs.append(WeaveSeg(color: threadColor(m.model_type), ratio: ratio, name: m.name,
                          gb: String(format: "%.1f", Double(mb) / 1024)))
         }
-        segs.append(WeaveSeg(color: Color.white.opacity(0.05), ratio: store.freeRatio, name: "空闲",
+        segs.append(WeaveSeg(color: Color.black.opacity(0.06), ratio: store.freeRatio, name: "空闲",
                      gb: String(format: "%.1f", Double(max(store.budgetMB - store.usedMB - store.reserveMB, 0)) / 1024)))
-        segs.append(WeaveSeg(color: Color.white.opacity(0.10), ratio: Double(store.reserveMB) / Double(max(store.budgetMB, 1)), name: "系统保留", gb: "8.0"))
+        segs.append(WeaveSeg(color: Color.black.opacity(0.10), ratio: Double(store.reserveMB) / Double(max(store.budgetMB, 1)), name: "系统保留", gb: "8.0"))
         return segs
     }
 
@@ -1056,7 +1056,7 @@ struct Chip: View {
             .foregroundColor(color ?? .dim)
             .padding(.horizontal, 9).padding(.vertical, 2)
             .overlay(Capsule().stroke(color ?? Color.lineC, lineWidth: 1))
-            .background(color.map { $0.opacity(0.10) } ?? Color.white.opacity(0.03), in: Capsule())
+            .background(color.map { $0.opacity(0.10) } ?? Color.black.opacity(0.045), in: Capsule())
     }
 }
 
@@ -1089,7 +1089,7 @@ struct CopyButton: View {
         .buttonStyle(.plain)
         .padding(.horizontal, small ? 7 : 10).padding(.vertical, 3)
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.lineC, lineWidth: 1))
-        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+        .background(Color.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
         .foregroundColor(.ink)
     }
 }
@@ -1192,7 +1192,7 @@ struct SmallBtn: View {
             .disabled(disabled)
             .opacity(disabled ? 0.35 : 1)
             .padding(.horizontal, 10).padding(.vertical, 3)
-            .background(primary ? Color.accent : Color.white.opacity(0.06),
+            .background(primary ? Color.accent : Color.black.opacity(0.05),
                         in: RoundedRectangle(cornerRadius: 6))
             .overlay(RoundedRectangle(cornerRadius: 6)
                 .stroke(primary ? Color.accent : Color.lineC, lineWidth: 1))
@@ -1493,6 +1493,8 @@ struct MonitorView: View {
                 Card {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("模型指标（24h）").font(.system(size: 12.5)).foregroundColor(.dim)
+                        // 列宽合计 610pt+ — 窄窗口横向滚动，不裁切
+                        ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 0) {
                             metricHead("模型").frame(width: 130, alignment: .leading)
                             metricHead("来源").frame(width: 50)
@@ -1524,6 +1526,7 @@ struct MonitorView: View {
                         }
                         if metricRows.isEmpty {
                             Text("暂无调用数据").font(.system(size: 11.5)).foregroundColor(.faint)
+                        }
                         }
                     }.padding(14)
                 }
@@ -1575,7 +1578,7 @@ struct MainWindowView: View {
                 .background(Color.panel)
         }
         .background(Color.panel)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(.light)
         .confirmationDialog(store.confirmText ?? "",
                             isPresented: Binding(get: { store.confirmText != nil },
                                                  set: { if !$0 { store.confirmText = nil; store.confirmAction = nil } }),
@@ -2111,7 +2114,7 @@ struct WizardView: View {
             HStack(spacing: 6) {
                 ForEach(0..<4, id: \.self) { i in
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(i <= ws.page ? Color.accent : Color.white.opacity(0.10))
+                        .fill(i <= ws.page ? Color.accent : Color.black.opacity(0.12))
                         .frame(height: 4)
                 }
             }
@@ -2138,7 +2141,7 @@ struct WizardView: View {
         }
         .frame(width: 520, height: 360)
         .background(Color.panel)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(.light)
     }
 
     private var welcomePage: some View {
@@ -2194,7 +2197,7 @@ struct WizardView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 12)
-        .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 9))
+        .background(Color.black.opacity(0.03), in: RoundedRectangle(cornerRadius: 9))
     }
 
     private func poolRow(_ name: String, _ use: String, _ chain: String) -> some View {
@@ -2206,7 +2209,7 @@ struct WizardView: View {
             Text(chain).font(.system(size: 11, design: .monospaced)).foregroundColor(.faint)
         }
         .padding(.vertical, 6).padding(.horizontal, 10)
-        .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 7))
+        .background(Color.black.opacity(0.025), in: RoundedRectangle(cornerRadius: 7))
     }
 }
 
@@ -2248,7 +2251,7 @@ struct MiniWeaveView: View {
         let used = Double(miniStore.snapshot?.status.gpu_used_mb ?? 0)
         let total = Double(miniStore.snapshot?.status.gpu_total_mb ?? 0)
         if total > 0 { segs.append((Color.accent.opacity(0.75), min(used / total, 1.0))) }
-        segs.append((Color.white.opacity(0.07), total > 0 ? max(1 - used / total, 0.02) : 1.0))
+        segs.append((Color.black.opacity(0.08), total > 0 ? max(1 - used / total, 0.02) : 1.0))
         return segs
     }
 
@@ -2289,7 +2292,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var wizardWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        NSApp.appearance = NSAppearance(named: .darkAqua)
+        NSApp.appearance = NSAppearance(named: .aqua)   // light 默认（用户偏好）
         buildMenuBarItem()
         store.onMemoryInsufficient = { [weak self] name, reason in
             self?.showMemoryDialog(name: name, reason: reason)
@@ -2376,7 +2379,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             win.title = "MacFabric"
             win.center()
             win.delegate = self
-            win.backgroundColor = NSColor(red: 0x10/255, green: 0x10/255, blue: 0x14/255, alpha: 1)
+            win.backgroundColor = NSColor(red: 0xf5/255, green: 0xf5/255, blue: 0xf8/255, alpha: 1)
             window = win
         }
         guard let win = window else { return }
