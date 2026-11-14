@@ -1291,6 +1291,17 @@ struct PoolCard: View {
         return specs.first(where: { c.target?.hasSuffix("/\($0.id)") == true })?.supports_vision == true
     }
 
+    /// 云端候选是否支持 anthropic 协议（注册表 anthropic_available 三态；
+    /// target 形如 "atlaswork/kimi/k3.1-pro"，按首个 "/" 拆 provider/model_id）
+    func cloudAnthropic(_ c: PoolCandidate) -> Bool {
+        guard let target = c.target, let slash = target.firstIndex(of: "/") else { return false }
+        let provider = String(target[target.startIndex..<slash])
+        let mid = String(target[target.index(after: slash)...])
+        let list = store.cloud?.models ?? []
+        let hit = list.first(where: { m in m.provider == provider && m.id == mid })
+        return hit?.anthropic_available == true
+    }
+
     /// 可作候选的云端模型（provider/model 形式）— spec 行 ∪ 已启用未建 spec
     /// 的发现模型（enable 只进白名单，不建 model_specs；漏掉会让已启用模型
     /// 在池页添加菜单隐身）
@@ -1348,6 +1359,7 @@ struct PoolCard: View {
                             if localModel(c)?.anthropic_native == true { Chip("anthropic", color: Color.thJudge) }
                         } else {
                             Chip("openai", color: Color.thLlm)
+                            if cloudAnthropic(c) { Chip("anthropic", color: Color.thJudge) }
                         }
                         Spacer()
                         // 换模型：本机 + 云端全部模型可作候选
@@ -1889,6 +1901,11 @@ struct CloudProviderCard: View {
                                                tools: spec.supports_tools)
                     }
                     if spec.supports_tools == true { Chip("工具", color: Color.thLlm) }
+                    SmallBtn(spec.supports_tools == true ? "去工具" : "标工具") {
+                        store.cloudModelAction(pv.name, action: "tag", model: spec.id,
+                                               vision: spec.supports_vision,
+                                               tools: spec.supports_tools != true)
+                    }
                     Spacer()
                     // 移除：所有模型可删（手填=删 spec；发现的=出白名单+不再重新发现）
                     SmallBtn("移除") { store.cloudModelAction(pv.name, action: "remove", model: spec.id) }
