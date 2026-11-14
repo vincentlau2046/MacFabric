@@ -255,3 +255,9 @@
   纯 UI 数据源问题）
 - 修复：cloudChoices = specs ∪ enabled_models（去重，kimi/k3.1-pro 前缀拆分
   正确）→ 晋升安装版
+
+## 2026-11-14 深夜补丁 6 — 网关守护上线（用户批准执行）
+- scripts/gateway-launchd.sh install 成功（com.macfabric.gateway，KeepAlive+自启）
+- 修复脚本 bug：$LABEL 后跟全角括号被 bash 吞进变量名 → ${LABEL}
+- 端到端实测：杀网关进程 → 3s 离线（ThrottleInterval 窗口）→ 12s 自动拉起
+  （pid 26498→26534）→ :8999 恢复 200；"一杀就永久离线"根因闭环
