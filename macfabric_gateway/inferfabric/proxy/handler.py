@@ -2562,7 +2562,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             try:
                 pm.cloud.drop_provider(name)
             except KeyError:
-                self._send_json({"error": f"Provider '{name}' not found"}, 404)
+                # 幂等删除：目标已不存在 = 目标状态已达成，返回成功而非 404
+                # （双击/重复请求不再报"删除失败"，用户看到的一直是成功）
+                self._send_json({"status": "already_deleted", "provider": name})
                 return
             except Exception as e:
                 log.error("Failed to drop provider '%s': %s", name, e)
@@ -2745,10 +2747,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     log.warning("pool purge after cloud remove %s/%s failed: %s",
                                 provider, model, e)
         except KeyError as e:
-            # 策展方法抛 KeyError：参数是 provider 名 → 404 provider；否则 → 404 model
+            # 策展方法抛 KeyError：参数是 provider 名 → 404 provider；
+            # remove 动作对已不存在的模型幂等（= 已达成删除目标）
             what = e.args[0] if e.args else provider
             if what == provider:
                 self._send_json({"error": f"Provider '{provider}' not found"}, 404)
+            elif action == "remove":
+                self._send_json({"status": "already_removed", "provider": provider,
+                                 "model": model})
             else:
                 self._send_json({"error": f"Model '{what}' not found for provider "
                                           f"'{provider}'"}, 404)

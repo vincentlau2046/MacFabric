@@ -123,6 +123,8 @@ class ProviderConfig:
     preset_id: str = ""            # 来源预设 ID（可选）
     # v4.6.0: 模型能力属性手动覆盖
     model_specs: dict[str, dict] = field(default_factory=dict)
+    # MACFABRIC: 用户明确移除的模型 — 发现循环跳过（否则下轮 discovery 重新出现）
+    excluded_models: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -515,13 +517,25 @@ class CloudDiscovery:
         return self._routable_count(provider)
 
     def remove_manual_model(self, provider: str, model_id: str) -> int:
-        """移除手填模型（不存在 → KeyError，handler 映射 404）。"""
+        """移除模型（MacFabric 扩展：手填与发现的模型都可删）。
+
+        - 手填：删 model_specs 条目
+        - 发现的：出白名单 + 进 excluded_models（下轮 discovery 不再出现）
+        两者都清 routable 注册表；池候选联动由 handler 层负责。
+        """
         with self._models_lock:
             cfg = self._providers.get(provider)
             if cfg is None:
                 raise KeyError(provider)
-            if cfg.model_specs.pop(model_id, None) is None:
+            is_manual = model_id in cfg.model_specs
+            in_whitelist = model_id in cfg.enabled_models
+            if not is_manual and not in_whitelist and model_id not in cfg.excluded_models:
                 raise KeyError(model_id)
+            cfg.model_specs.pop(model_id, None)
+            if model_id in cfg.enabled_models:
+                cfg.enabled_models.remove(model_id)
+            if not is_manual and model_id not in cfg.excluded_models:
+                cfg.excluded_models.append(model_id)
             self._rebuild_provider_registry(provider, cfg)
         return self._routable_count(provider)
 
@@ -725,6 +739,8 @@ class CloudDiscovery:
                 pd["discovery_interval"] = p.discovery_interval
             if p.include_pattern:
                 pd["include_pattern"] = p.include_pattern
+            if p.excluded_models:
+                pd["excluded_models"] = list(p.excluded_models)
             # v6.1 Phase 1: 白名单（勾选的发现候选；非空才写）
             if p.enabled_models:
                 pd["enabled_models"] = list(p.enabled_models)
@@ -956,6 +972,7 @@ class CloudDiscovery:
                 discovery_endpoint=discovery.get("endpoint", "/models"),
                 discovery_interval=discovery.get("interval", 3600),
                 include_pattern=discovery.get("filter", {}).get("include_pattern", ""),
+                excluded_models=list(discovery.get("excluded_models", []) or []),
                 routing_default=routing.get("default", "cloud_only"),
                 # v6.1 Phase 1: 白名单
                 enabled_models=list(pcfg.get("enabled_models") or []),
@@ -1012,6 +1029,8 @@ class CloudDiscovery:
                 continue
             if pattern and not pattern.match(mid):
                 continue
+            if mid in cfg.excluded_models:
+                continue   # 用户已移除 — 不再进入候选
             results.append(CloudModel(
                 model_id=mid,
                 provider=cfg.name,

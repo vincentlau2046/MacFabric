@@ -108,22 +108,13 @@ struct CurvePoint: Codable {
     var requests: Int
 }
 
-/// 弹窗确认（用户裁决：池结构性操作只拦一道确认，不校验可用性 —
-/// 可用性是源模块（本地推理/云端接入）的职责）
-func confirmDialog(_ text: String) -> Bool {
-    let a = NSAlert()
-    a.messageText = "确认操作"
-    a.informativeText = text
-    a.addButton(withTitle: "确认")
-    a.addButton(withTitle: "取消")
-    return a.runModal() == .alertFirstButtonReturn
-}
-
 struct PoolCandidate: Codable {
     var id: String
     var priority: Int
     var kind: String?
     var target: String?
+    /// 行身份含内容 — 换模型后 target 变化强制 SwiftUI 重渲染该行（防 diffing 陈旧）
+    var rowKey: String { "\(id)|\(target ?? "")|\(kind ?? "")|\(priority)" }
 }
 struct PoolDef: Codable {
     var enabled: Bool?
@@ -213,6 +204,14 @@ final class GatewayStore: ObservableObject {
     @Published var hubExpanded = ""
     @Published var pools: PoolsPayload?
     @Published var uninstallConfirm: String? = nil   // F2: 待确认卸载的能力包名
+    // 全局确认弹窗（SwiftUI confirmationDialog；action 在用户确认后执行）
+    @Published var confirmText: String? = nil
+    @Published var confirmAction: (() -> Void)? = nil
+
+    func confirm(_ text: String, _ action: @escaping () -> Void) {
+        confirmText = text
+        confirmAction = action
+    }
     // F3: 云端接入 CRUD 状态
     @Published var cloud: CloudPayload?
     @Published var cloudExpanded: String? = nil
@@ -516,7 +515,11 @@ final class GatewayStore: ObservableObject {
         }.resume()
     }
 
+    @Published var cloudBusy = false   // 云端操作防抖：进行中忽略重复触发（双击不再产生第二次 DELETE）
+
     func cloudRequest(path: String, method: String, body: [String: Any], okMsg: String, failPrefix: String) {
+        guard !cloudBusy else { return }
+        cloudBusy = true
         var req = URLRequest(url: base.appendingPathComponent(path), timeoutInterval: 30)
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -525,6 +528,7 @@ final class GatewayStore: ObservableObject {
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             DispatchQueue.main.async {
+                self?.cloudBusy = false
                 self?.actionMessage = (200..<300).contains(code)
                     ? okMsg : "❌ \(failPrefix)(\(code)): \(body.prefix(100))"
                 self?.fetchCloud()
@@ -1306,7 +1310,7 @@ struct PoolCard: View {
                         store.togglePool(name, enabled: !(def.enabled ?? true))
                     }
                 }
-                ForEach(Array(candidates.enumerated()), id: \.element.id) { idx, c in
+                ForEach(Array(candidates.enumerated()), id: \.element.rowKey) { idx, c in
                     HStack(spacing: 8) {
                         Text("\(c.priority)").font(.system(size: 11, design: .monospaced)).foregroundColor(.faint)
                             .frame(width: 16)
@@ -1337,26 +1341,29 @@ struct PoolCard: View {
                             Section("本机") {
                                 ForEach(store.models, id: \.name) { m in
                                     Button(m.name) {
-                                        guard confirmDialog("将候选 \(c.target ?? c.id) 替换为 \(m.name)？") else { return }
-                                        store.replacePoolCandidate(pool: name, candidateId: c.id,
-                                                                   to: m.name, kind: "local")
+                                        store.confirm("将候选 \(c.target ?? c.id) 替换为 \(m.name)？") {
+                                            store.replacePoolCandidate(pool: name, candidateId: c.id,
+                                                                       to: m.name, kind: "local")
+                                        }
                                     }
                                 }
                             }
                             Section("云端") {
                                 ForEach(cloudChoices, id: \.0) { ch in
                                     Button(ch.0) {
-                                        guard confirmDialog("将候选 \(c.target ?? c.id) 替换为 \(ch.0)？") else { return }
-                                        store.replacePoolCandidate(pool: name, candidateId: c.id,
-                                                                   to: ch.0, kind: "cloud")
+                                        store.confirm("将候选 \(c.target ?? c.id) 替换为 \(ch.0)？") {
+                                            store.replacePoolCandidate(pool: name, candidateId: c.id,
+                                                                       to: ch.0, kind: "cloud")
+                                        }
                                     }
                                 }
                             }
                         }
                         .font(.system(size: 11))
                         SmallBtn("移除") {
-                            guard confirmDialog("从池 iff/\(name) 移除候选 \(c.target ?? c.id)？") else { return }
-                            store.removePoolCandidate(pool: name, candidateId: c.id)
+                            store.confirm("从池 iff/\(name) 移除候选 \(c.target ?? c.id)？") {
+                                store.removePoolCandidate(pool: name, candidateId: c.id)
+                            }
                         }
                         // F1: 优先级可调 — ↑↓ 换相邻优先级，PUT CAS 回写
                         HStack(spacing: 3) {
@@ -1531,6 +1538,20 @@ struct MainWindowView: View {
         }
         .background(Color.panel)
         .preferredColorScheme(.dark)
+        .confirmationDialog(store.confirmText ?? "",
+                            isPresented: Binding(get: { store.confirmText != nil },
+                                                 set: { if !$0 { store.confirmText = nil; store.confirmAction = nil } }),
+                            titleVisibility: .visible) {
+            Button("确认", role: .destructive) {
+                store.confirmAction?()
+                store.confirmText = nil; store.confirmAction = nil
+            }
+            Button("取消", role: .cancel) {
+                store.confirmText = nil; store.confirmAction = nil
+            }
+        } message: {
+            Text(store.confirmText ?? "")
+        }
     }
 
     @ViewBuilder private var content: some View {
@@ -1845,10 +1866,8 @@ struct CloudProviderCard: View {
                     }
                     if spec.supports_tools == true { Chip("工具", color: Color.thLlm) }
                     Spacer()
-                    // remove 仅手填模型（发现的由 disable 控制）
-                    if spec.manual == true {
-                        SmallBtn("移除") { store.cloudModelAction(pv.name, action: "remove", model: spec.id) }
-                    }
+                    // 移除：所有模型可删（手填=删 spec；发现的=出白名单+不再重新发现）
+                    SmallBtn("移除") { store.cloudModelAction(pv.name, action: "remove", model: spec.id) }
                 }
                 .padding(.vertical, 2)
             }
