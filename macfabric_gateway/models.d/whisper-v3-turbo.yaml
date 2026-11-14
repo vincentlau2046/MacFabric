@@ -1,0 +1,14 @@
+name: whisper-v3-turbo
+description: "whisper.cpp ASR (Metal, OpenAI 兼容 /v1/audio/transcriptions)"
+type: asr_server
+gpu_role: none
+model_type: asr
+ledger_mode: on_demand
+asr_server:
+  conda_env: whisper            # python_bin 显式声明后不探测 conda（隔离）
+  python_bin: /Users/Apple/Documents/MacFabric/engines/whisper/whisper.cpp/build/bin/whisper-server
+  port: 8881
+  working_dir: /Users/Apple/Documents/MacFabric/engines/whisper/whisper.cpp/build/bin
+  health_url: "http://127.0.0.1:8881/health"
+  health_check_timeout: 180
+  start_cmd: "/Users/Apple/Documents/MacFabric/engines/whisper/whisper.cpp/build/bin/whisper-server --model /Users/Apple/Documents/MacFabric/models/ggml-large-v3-turbo.bin --host 127.0.0.1 --port 8881 --inference-path /v1/audio/transcriptions"

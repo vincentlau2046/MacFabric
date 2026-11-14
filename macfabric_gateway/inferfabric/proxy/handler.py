@@ -1802,7 +1802,24 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """POST /v1/audio/transcriptions — OpenAI 兼容 ASR（multipart），转发到 asr_server。"""
         name, port = self._find_active_server_port(pm, "asr_server")
         if port is None:
-            self._send_json({"error": "ASR 服务未启动 — 启动 whisper 后重试"}, 503)
+            # 首个请求自动唤醒（统一入口承诺「模型不默认启动 — 首个请求才唤醒」
+            # 对 ASR 同样成立）：与 /switch 同通道按需拉起，Metal 加载数秒级
+            asr_names = sorted(n for n, m in pm.mgr._models.items()
+                               if m.type == "asr_server")
+            if asr_names:
+                target = asr_names[0]
+                pm.mgr.state.clear_manual_stop(target)
+                result = pm.mgr.switch(target)
+                if result.get("status") == "memory_insufficient":
+                    self._send_json({"error": "ASR 自动唤醒内存不足 — 请释放内存后重试",
+                                     "status": "memory_insufficient"}, 503)
+                    return
+                deadline = time.time() + 90
+                while time.time() < deadline and port is None:
+                    time.sleep(1)
+                    name, port = self._find_active_server_port(pm, "asr_server")
+        if port is None:
+            self._send_json({"error": "ASR 服务未就绪 — 可在能力包页安装 whisper 或稍后重试"}, 503)
             return
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         conn = pm.make_conn(port, timeout=300)
