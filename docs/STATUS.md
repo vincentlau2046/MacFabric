@@ -119,3 +119,49 @@
 - ASR/TTS 包诚实禁用（"v1.5"，引擎未接）；App 卡片实时进度/重试
 - 实测：bge-m3 全链路 下载417MB→装机→/v1/embeddings 返回1024维
   （首请求自动唤醒生效）
+
+## 2026-11-14 下午补丁 3 — O 批次（agent 输入输出模型）+ 隔离 + 图标
+
+### OCR（零模型方案）
+- `POST /ocr {image_path}`：macOS Vision 框架（tools/ocr-helper，只读调用系统能力）
+- 不下任何模型、不吃内存账本 — 端侧 OCR 的 Metal 时代最优解
+
+### TTS（已落地、实测通过）
+- 引擎：kokoro-onnx v1.1-zh（82M ONNX CPU），venv 隔离在 engines/kokoro/
+- `engines/kokoro/server.py`：OpenAI 兼容 /v1/audio/speech → WAV 24kHz
+  （中文音色 zf_001；lang 码修正 cmn 而非 zh — espeak backend 约束）
+- `models.d/kokoro-82m.yaml`：tts_server 块 + on_demand；经 :8999/v1/audio/speech
+  网关转发实测中英双语 RIFF WAV
+
+### 环境隔离（用户要求：不影响 macOS 系统层面）
+- docs/ISOLATION.md：Docker 否决理由（macOS Docker=Linux VM，无 Metal 直通，
+  推理慢 5–15 倍 + 双倍内存与账本冲突）→ 用户态自包含（engines/ 独立二进制与 venv）
+- TTSConfig/ASRConfig 新增 `python_bin` 显式路径字段（process manager 不再探测 conda）；
+  移除 ~/miniconda3/kokoro symlink；系统级安装为零
+
+### 云端接入 UI（用户四问收口）
+- 统一转换出口**早已实现**（anthropic_translate 桥 + :8999/v1/messages）；缺的是表单字段
+- 添加服务商表单新增「Anthropic Base URL（可选，原生直连）」→ POST anthropic_base
+- 服务商卡：OAI/ANT 原生 chip + 「拷贝配置」按钮（双协议统一入口 env 块进剪贴板）
+- 模型 curation 行：OAI / ANT 原生 chip（网关 model_specs 新增 anthropic 字段，
+  与注册表 anthropic_available 同源 = bool(cfg.anthropic_base)）
+
+### 模型池修复（用户报告三项）
+- 顺序调整失效根因：App 缓存 _poolsRawCache 陈旧 → mutatePools 改为每次变更
+  fresh GET raw + expected_revision CAS
+- 候选「换模型」Menu（云端已启用模型任选）+ 移除 + ↑↓ + ＋添加候选
+- 协议/VL 标签修正：OAI/ANT 按 anthropic_native（本地）/anthropic_base（云），
+  VL 按 model_type/supports_vision 真数据
+
+### macOS 进程停止真化
+- `_pkill_by_port_macos`：lsof 定位 PID → SIGTERM → 校验 → SIGKILL
+  （原 fuser 是 Linux 命令，Mac 上静默失效导致孤儿进程被 reconcile 收养成"假自启"）
+
+### App 图标（用户要求：告别空白图标）
+- scripts/make-icon.swift：CoreGraphics 矢量绘制 — 深蓝 squircle + 四色渐变
+  编织线（fabric 意象）+ 中央芯片轮廓 + 发光枢纽（统一入口）→ iconset → icns
+- build.sh 接线 CFBundleIconFile + Resources/AppIcon.icns；Dock 已生效
+
+### 待办
+- ASR：engines/whisper/build-server.sh 就绪（Claude Code 权限分类器拦截执行），
+  用户运行后 → whisper ggml-large-v3-turbo 下载 → models.d yaml → ASR 能力包解禁

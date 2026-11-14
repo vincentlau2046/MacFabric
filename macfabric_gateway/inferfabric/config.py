@@ -291,6 +291,8 @@ class TTSConfig:
     health_url: str = ""
     health_check_timeout: int = 180  # seconds; TTS warmup can be slow
     start_cmd: str = "python -m api.main"
+    # MACFABRIC 环境隔离：显式 python 路径（项目内 venv），设置后不走 conda_env 探测
+    python_bin: str = ""
     extra_env: dict[str, str] = field(default_factory=dict)  # inject into subprocess env
 
     @property
@@ -313,6 +315,8 @@ class ASRConfig:
     health_url: str = ""
     health_check_timeout: int = 120  # seconds; ASR models load faster than TTS
     start_cmd: str = "funasr-server --model sensevoice --device cuda"
+    # MACFABRIC 环境隔离：显式解释器/二进制路径，设置后不走 conda_env 探测
+    python_bin: str = ""
     extra_env: dict[str, str] = field(default_factory=dict)  # inject into subprocess env
 
     @property

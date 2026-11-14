@@ -72,3 +72,28 @@
 - 还原：rev3 回 qwen3-4b 首选
 - 卸载：stopped=true → /models=[] → 重复 404 → 还原恢复
 - App 构建：`macfabric-app/build.sh` 通过
+
+
+## 四、I/O 能力包落地（O 批次，2026-11-14 规划）
+
+> 动机：agent 普遍需要 OCR/ASR/TTS 输入输出模型；端侧工作站没有这三样等于半残。
+> 调研结论（互联网核验 + 代码勘察，2026-11-14）：
+
+### 选型（全部 Apple Silicon Metal/原生，全部 OpenAI 兼容协议）
+
+| 能力 | 引擎 | 模型 | 大小 | 接入方式 |
+|---|---|---|---|---|
+| OCR | **macOS Vision 框架**（已构建 tools/ocr-helper ✓） | 零模型（系统内置） | 0 | 网关 /ocr 端点包装二进制；Qwen3-VL-4B 作"看图理解"上层（已可安装） |
+| ASR | **whisper.cpp whisper-server**（Metal 一等公民，`--inference-path /v1/audio/transcriptions` 直接 OpenAI 兼容） | ggml-large-v3-turbo（ggerganov/whisper.cpp） | 1.5GB | cmake 构建 + pack download 复用 + asr block（start_cmd 绝对路径，无需 conda） |
+| TTS | **kokoro-onnx**（thewh1teagle，v1.1-zh 中文增强，ONNX CPU 够快） | kokoro-v1.1-zh.onnx 310MB + voices-v1.1-zh.bin 51MB + espeak-ng-data 12MB | ~373MB | 自写 ~80 行 FastAPI（OpenAI /v1/audio/speech）放 venv；进程管理器走 ~/miniconda3/envs/<name>/bin/python 探测 → 建 venv 即兼容 |
+
+否决项：Kokoro-FastAPI（remsky）功能全但要 torch（2GB+ 依赖树）；sherpa-onnx 中文音色一般；FunASR sensevoice 中文强但服务端面向 CUDA；ollama pull 不支持 GGUF 语音模型。
+
+### 网关新增路由
+- `POST /ocr` {image_path} → ocr-helper（Vision）
+- `POST /v1/audio/transcriptions`（multipart）→ 转发 ASR 端口 8881
+- `POST /v1/audio/speech`（json）→ 转发 TTS 端口 8880，回传音频字节
+
+### 批次
+- O1 OCR 路由（零下载）→ O2 TTS（373MB + venv）→ O3 ASR（cmake 构建 + 1.5GB）
+- 能力包页 ASR/TTS 卡安装按钮在引擎就绪后点亮

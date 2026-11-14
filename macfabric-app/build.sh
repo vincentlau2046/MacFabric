@@ -18,6 +18,7 @@ cat > build/Info.plist <<EOF
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
 </dict>
 </plist>
 EOF
@@ -27,5 +28,7 @@ swiftc -O \
   Sources/MacFabricApp.swift -o "$APP/Contents/MacOS/MacFabric"
 
 cp build/Info.plist "$APP/Contents/Info.plist"
+# 图标（scripts/make-icon.swift 生成 build/AppIcon.icns；缺失时跳过不阻塞构建）
+[ -f build/AppIcon.icns ] && cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 echo "构建完成: ${APP}  (open ${APP} 启动)"

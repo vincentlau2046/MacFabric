@@ -44,7 +44,8 @@ class TTSProcessManager(BaseProcessManager):
         Reuses the same Popen + start_new_session pattern as ComfyUI,
         with extra_env injection from model YAML config.
         """
-        python_bin = CONDA_ENVS / cfg.conda_env / "bin" / "python"
+        # 环境隔离：python_bin 显式路径优先（项目内 venv）；否则回退 conda 探测
+        python_bin = Path(cfg.python_bin) if getattr(cfg, "python_bin", "") else CONDA_ENVS / cfg.conda_env / "bin" / "python"
         if not python_bin.exists():
             log.error("Python binary not found: %s", python_bin)
             return {"status": "error", "message": f"python not found in conda env {cfg.conda_env}"}

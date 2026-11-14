@@ -198,6 +198,7 @@ _GET_ROUTES = {
     "/profiles":                lambda h, pm: (log.warning("/profiles is deprecated"), h._send_json(pm.mgr.list_models()))[1],
     "/local-models":            lambda h, pm: h._send_json(pm.mgr.discover_local_models()),
     "/admin/packs/download-status": _admin(lambda h, pm: h._send_json(_pack_downloads_snapshot())),
+    "/ocr":                     _admin(lambda h, pm: h._handle_ocr(pm)),
     "/v1/models":               lambda h, pm: h._handle_v1_models(pm),
     "/system":                  lambda h, pm: h._send_json(h._system_info()),
     "/api/metrics":             lambda h, pm: h._handle_api_metrics(pm),
@@ -280,6 +281,8 @@ _POST_ROUTES = {
     # 单池 enabled 原子开关（服务端字段级修改，CAS；非客户端读-改-写）
     "/admin/model-pools/toggle": _admin(lambda h, pm: mp_admin.handle_post_model_pools_toggle(h, pm)),
     "/v1/embeddings":           lambda h, pm: h._handle_embeddings(pm),
+    "/v1/audio/speech":         lambda h, pm: h._handle_audio_speech(pm),
+    "/v1/audio/transcriptions": lambda h, pm: h._handle_audio_transcriptions(pm),
     "/v1/rerank":               lambda h, pm: h._handle_rerank(pm),
 }
 
@@ -1564,6 +1567,97 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         log.info("Autostart %s -> %s", name, enabled)
         self._send_json({"status": "ok", "model": name, "autostart": enabled})
 
+    def _handle_ocr(self, pm):
+        """POST /ocr {image_path} — macOS Vision 框架 OCR（零模型，中文支持）。
+
+        包装 tools/ocr-helper（swiftc 构建）；agent 截图/文档识别统一入口。
+        返回 {text, lines}。"""
+        data = self._read_body()
+        img = ((data or {}).get("image_path") or "").strip()
+        if not img:
+            self._send_json({"error": "Missing image_path"}, 400)
+            return
+        p = Path(img).expanduser()
+        if not p.exists():
+            self._send_json({"error": f"Image not found: {img}"}, 404)
+            return
+        helper = Path(__file__).resolve().parents[3] / "tools" / "ocr-helper"
+        if not helper.exists():
+            self._send_json({"error": f"ocr-helper not found: {helper}"}, 500)
+            return
+        try:
+            import subprocess as _sp
+            r = _sp.run([str(helper), str(p)], capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                self._send_json({"error": r.stderr.strip()[:300] or "ocr failed"}, 500)
+                return
+            text = r.stdout
+            self._send_json({"text": text,
+                             "lines": [ln for ln in text.split("\n") if ln.strip()],
+                             "engine": "macos-vision"})
+        except Exception as e:
+            self._send_json({"error": f"OCR failed: {e}"}, 500)
+
+    def _find_active_server_port(self, pm, type_key: str) -> tuple[str | None, int | None]:
+        """找首个活跃的指定类型服务 → (model_name, port)；支持请求时自动拉起。"""
+        for name in pm.mgr.active_services:
+            m = pm.mgr._models.get(name)
+            if m is not None and m.type == type_key:
+                port = None
+                if type_key == "tts_server" and m.tts:
+                    port = m.tts.port
+                elif type_key == "asr_server" and m.asr:
+                    port = m.asr.port
+                if port:
+                    return name, port
+        return None, None
+
+    def _handle_audio_speech(self, pm):
+        """POST /v1/audio/speech — OpenAI 兼容 TTS，转发到活跃 tts_server。"""
+        name, port = self._find_active_server_port(pm, "tts_server")
+        if port is None:
+            self._send_json({"error": "TTS 服务未启动 — 在本地推理页启动 kokoro-82m"}, 503)
+            return
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        conn = pm.make_conn(port, timeout=300)
+        try:
+            conn.request("POST", "/v1/audio/speech", body=body,
+                         headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            data = resp.read()
+            self.send_response(resp.status)
+            self.send_header("Content-Type", resp.headers.get("Content-Type", "audio/wav"))
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self._safe_write(data)
+        except Exception as e:
+            self._send_json({"error": f"TTS forward failed: {e}"}, 502)
+        finally:
+            conn.close()
+
+    def _handle_audio_transcriptions(self, pm):
+        """POST /v1/audio/transcriptions — OpenAI 兼容 ASR（multipart），转发到 asr_server。"""
+        name, port = self._find_active_server_port(pm, "asr_server")
+        if port is None:
+            self._send_json({"error": "ASR 服务未启动 — 启动 whisper 后重试"}, 503)
+            return
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        conn = pm.make_conn(port, timeout=300)
+        try:
+            conn.request("POST", "/v1/audio/transcriptions", body=body,
+                         headers={"Content-Type": self.headers.get("Content-Type", "multipart/form-data")})
+            resp = conn.getresponse()
+            data = resp.read()
+            self.send_response(resp.status)
+            self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self._safe_write(data)
+        except Exception as e:
+            self._send_json({"error": f"ASR forward failed: {e}"}, 502)
+        finally:
+            conn.close()
+
     def _handle_pack_download(self, pm):
         """POST /admin/packs/download {name, url, filename, model_type_label?}
 
@@ -2220,7 +2314,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "model_specs": [
                         {"id": mid, "manual": not bool(spec),
                          "supports_vision": (spec or {}).get("supports_vision"),
-                         "supports_tools": (spec or {}).get("supports_tools")}
+                         "supports_tools": (spec or {}).get("supports_tools"),
+                         # 与注册表 anthropic_available 同源（_rebuild_provider_registry
+                         # 即以 bool(cfg.anthropic_base) 逐模型置位）— 供前端 ANT 原生 chip
+                         "anthropic": bool(cfg.anthropic_base)}
                         for mid, spec in cfg.model_specs.items()
                     ],
                     "candidates": [c.model_id for c in pm.cloud.get_candidates(name)],

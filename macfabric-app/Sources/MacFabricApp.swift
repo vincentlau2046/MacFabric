@@ -98,6 +98,7 @@ struct ModelItem: Codable {
     var peak_vram_mb: Int?
     var ledger_mode: String?
     var autostart: Bool?
+    var anthropic_native: Bool?
     var ledgerMode: String { ledger_mode ?? "on_demand" }
 }
 
@@ -126,11 +127,13 @@ struct CloudModelSpec: Codable {
     var manual: Bool?
     var supports_vision: Bool?
     var supports_tools: Bool?
+    var anthropic: Bool?          // 注册表 anthropic_available（非 spec 原生字段，运行时合成）
 }
 struct CloudProvider: Codable {
     var name: String
     var enabled: Bool?
     var openai_base: String?
+    var anthropic_base: String?
     var discovery_enabled: Bool?
     var enabled_models: [String]?
     var model_specs: [CloudModelSpec]?
@@ -140,6 +143,13 @@ struct CloudProvider: Codable {
 struct CloudPayload: Codable {
     var providers: [CloudProvider]?
     var total_cloud_models: Int?
+    var models: [CloudModelInfo]?
+}
+struct CloudModelInfo: Codable {
+    var id: String
+    var provider: String?
+    var openai_available: Bool?
+    var anthropic_available: Bool?
 }
 struct LocalDiscovered: Codable {
     var name: String
@@ -198,6 +208,7 @@ final class GatewayStore: ObservableObject {
     @Published var cloudFormName = ""
     @Published var cloudFormBase = ""
     @Published var cloudFormKey = ""
+    @Published var cloudFormAnth = ""
     @Published var cloudAddModel = ""
     // F4: 本地模型发现/安装
     @Published var localDiscovered: [LocalDiscovered] = []
@@ -213,7 +224,7 @@ final class GatewayStore: ObservableObject {
     private var curveTimer: Timer?
 
     init() {
-        refresh(); fetchModels(); fetchCurve(); fetchPools(); cachePoolsRaw(); fetchCloud(); scanLocalModels(); fetchMetrics()
+        refresh(); fetchModels(); fetchCurve(); fetchPools(); fetchCloud(); scanLocalModels(); fetchMetrics()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             self?.refresh(); self?.fetchModels(); self?.fetchDownloadStatus()
         }
@@ -251,55 +262,99 @@ final class GatewayStore: ObservableObject {
         }.resume()
     }
 
-    /// F1: 候选优先级上移/下移 — raw 为基底改 priority，PUT + expected_revision (CAS)
-    func reorderCandidate(pool: String, candidateId: String, up: Bool) {
-        guard var raw = poolsRaw,
-              var poolsCfg = raw["pools"] as? [String: Any],
-              var cands = (poolsCfg[pool] as? [String: Any])?["candidates"] as? [[String: Any]],
-              let rev = pools?.revision else { return }
-        cands.sort { ($0["priority"] as? Int ?? 0) < ($1["priority"] as? Int ?? 0) }
-        guard let idx = cands.firstIndex(where: { $0["id"] as? String == candidateId }) else { return }
-        let swap = up ? idx - 1 : idx + 1
-        guard cands.indices.contains(swap) else { return }
-        let a = cands[idx]["priority"] as? Int ?? 0
-        let b = cands[swap]["priority"] as? Int ?? 0
-        cands[idx]["priority"] = b
-        cands[swap]["priority"] = a
-        if var poolCfg = poolsCfg[pool] as? [String: Any] {
-            poolCfg["candidates"] = cands
-            poolsCfg[pool] = poolCfg
-        }
-        raw["pools"] = poolsCfg
-        raw["expected_revision"] = rev
-        var req = URLRequest(url: base.appendingPathComponent("/admin/model-pools"), timeoutInterval: 30)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: raw)
-        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-            DispatchQueue.main.async {
-                self?.actionMessage = (200..<300).contains(code)
-                    ? "✅ 优先级已更新" : "❌ 更新失败(\(code)): \(body.prefix(100))"
-                self?.fetchPools()
-            }
-        }.resume()
-    }
-
-    var poolsRaw: [String: Any]? {
-        // raw 由 GET 携带（编辑基底）；解码到 [String: Any] 供 CAS 回写
-        if let raw = _poolsRawCache { return raw }
-        return nil
-    }
-    private var _poolsRawCache: [String: Any]?
-    func cachePoolsRaw() {
+    /// F1: 候选操作统一入口 — 每次现取 raw（旧版缓存导致网关重启后 ↑↓ 静默失效）。
+    /// mutate(raw) 在后台线程改 priorities/candidates，POST CAS 回写。
+    func mutatePools(_ mutate: @escaping (inout [String: Any]) -> Void,
+                     okMsg: String, failPrefix: String) {
         guard let url = URL(string: "http://127.0.0.1:8999/admin/model-pools") else { return }
         URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
             guard let self, let data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let raw = obj["raw"] as? [String: Any] else { return }
-            DispatchQueue.main.async { self._poolsRawCache = raw }
+                  var raw = obj["raw"] as? [String: Any],
+                  let rev = obj["revision"] as? Int else {
+                DispatchQueue.main.async { self?.actionMessage = "❌ 池配置读取失败" }
+                return
+            }
+            mutate(&raw)
+            raw["expected_revision"] = rev
+            var req = URLRequest(url: url, timeoutInterval: 30)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try? JSONSerialization.data(withJSONObject: raw)
+            URLSession.shared.dataTask(with: req) { [weak self] data2, resp, _ in
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                let body = data2.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                DispatchQueue.main.async {
+                    self?.actionMessage = (200..<300).contains(code)
+                        ? okMsg : "❌ \(failPrefix)(\(code)): \(body.prefix(100))"
+                    self?.fetchPools()
+                }
+            }.resume()
         }.resume()
+    }
+
+    /// F1: 候选优先级上移/下移（换相邻 priority）
+    func reorderCandidate(pool: String, candidateId: String, up: Bool) {
+        mutatePools({ raw in
+            guard var poolsCfg = raw["pools"] as? [String: Any],
+                  var cands = (poolsCfg[pool] as? [String: Any])?["candidates"] as? [[String: Any]] else { return }
+            cands.sort { ($0["priority"] as? Int ?? 0) < ($1["priority"] as? Int ?? 0) }
+            guard let idx = cands.firstIndex(where: { $0["id"] as? String == candidateId }) else { return }
+            let swap = up ? idx - 1 : idx + 1
+            guard cands.indices.contains(swap) else { return }
+            let a = cands[idx]["priority"] as? Int ?? 0
+            let b = cands[swap]["priority"] as? Int ?? 0
+            cands[idx]["priority"] = b
+            cands[swap]["priority"] = a
+            if var poolCfg = poolsCfg[pool] as? [String: Any] {
+                poolCfg["candidates"] = cands
+                poolsCfg[pool] = poolCfg
+            }
+            raw["pools"] = poolsCfg
+        }, okMsg: "✅ 优先级已更新", failPrefix: "排序失败")
+    }
+
+    /// 池候选换模型（target 替换；local → name，cloud → provider/model）
+    func replacePoolCandidate(pool: String, candidateId: String, to target: String, kind: String) {
+        mutatePools({ raw in
+            guard var poolsCfg = raw["pools"] as? [String: Any],
+                  var poolCfg = poolsCfg[pool] as? [String: Any],
+                  var cands = poolCfg["candidates"] as? [[String: Any]] else { return }
+            guard let idx = cands.firstIndex(where: { $0["id"] as? String == candidateId }) else { return }
+            cands[idx]["id"] = target
+            cands[idx]["target"] = target
+            cands[idx]["kind"] = kind
+            poolCfg["candidates"] = cands
+            poolsCfg[pool] = poolCfg
+            raw["pools"] = poolsCfg
+        }, okMsg: "✅ 候选已换为 \(target)", failPrefix: "换候选失败")
+    }
+
+    /// 池候选移除
+    func removePoolCandidate(pool: String, candidateId: String) {
+        mutatePools({ raw in
+            guard var poolsCfg = raw["pools"] as? [String: Any],
+                  var poolCfg = poolsCfg[pool] as? [String: Any],
+                  var cands = poolCfg["candidates"] as? [[String: Any]] else { return }
+            cands.removeAll { $0["id"] as? String == candidateId }
+            poolCfg["candidates"] = cands
+            poolsCfg[pool] = poolCfg
+            raw["pools"] = poolsCfg
+        }, okMsg: "✅ 候选已移除", failPrefix: "移除失败")
+    }
+
+    /// 池候选追加
+    func addPoolCandidate(pool: String, target: String, kind: String) {
+        mutatePools({ raw in
+            guard var poolsCfg = raw["pools"] as? [String: Any],
+                  var poolCfg = poolsCfg[pool] as? [String: Any],
+                  var cands = poolCfg["candidates"] as? [[String: Any]] else { return }
+            let maxPrio = cands.map { $0["priority"] as? Int ?? 0 }.max() ?? 0
+            cands.append(["id": target, "target": target, "kind": kind, "priority": maxPrio + 10])
+            poolCfg["candidates"] = cands
+            poolsCfg[pool] = poolCfg
+            raw["pools"] = poolsCfg
+        }, okMsg: "✅ 已加候选 \(target)", failPrefix: "加候选失败")
     }
 
     /// F8: 单池 enabled 开关（服务端字段级原子修改 + expected_revision CAS）
@@ -315,7 +370,7 @@ final class GatewayStore: ObservableObject {
             DispatchQueue.main.async {
                 self?.actionMessage = (200..<300).contains(code)
                     ? "✅ iff/\(name) 已\(enabled ? "启用" : "停用")" : "❌ 开关失败(\(code)): \(body.prefix(100))"
-                self?.fetchPools(); self?.cachePoolsRaw()
+                self?.fetchPools()
             }
         }.resume()
     }
@@ -354,6 +409,8 @@ final class GatewayStore: ObservableObject {
             actionMessage = "⚠️ 名称与 Base URL 必填"; return
         }
         var body: [String: Any] = ["name": name, "openai_base": burl, "discovery_enabled": true]
+        let aburl = cloudFormAnth.trimmingCharacters(in: .whitespaces)
+        if !aburl.isEmpty { body["anthropic_base"] = aburl }   // 原生 Anthropic 直连（可选）
         let key = cloudFormKey.trimmingCharacters(in: .whitespaces)
         if !key.isEmpty { body["api_key"] = key }
         cloudRequest(path: "/admin/cloud/providers", method: "POST", body: body,
@@ -424,7 +481,7 @@ final class GatewayStore: ObservableObject {
                 self?.actionMessage = (200..<300).contains(code)
                     ? okMsg : "❌ \(failPrefix)(\(code)): \(body.prefix(100))"
                 self?.fetchCloud()
-                self?.fetchPools(); self?.cachePoolsRaw()
+                self?.fetchPools()
             }
         }.resume()
     }
@@ -1169,7 +1226,21 @@ struct PoolCard: View {
         store.models.first { $0.name == (c.target ?? c.id) }
     }
     func isVL(_ c: PoolCandidate) -> Bool {
-        c.kind == "cloud" ? false : localModel(c)?.model_type == "vl"
+        if c.kind != "cloud" { return localModel(c)?.model_type == "vl" }
+        // 云端候选：按注册表 supports_vision 三态
+        guard let specs = store.cloud?.providers?.first(where: { c.target?.hasPrefix("\($0.name)/") == true })?.model_specs else { return false }
+        return specs.first(where: { c.target?.hasSuffix("/\($0.id)") == true })?.supports_vision == true
+    }
+
+    /// 可作候选的云端模型（provider/model 形式）
+    var cloudChoices: [(String, String)] {
+        var out: [(String, String)] = []
+        for pv in store.cloud?.providers ?? [] {
+            for spec in pv.model_specs ?? [] {
+                out.append(("\(pv.name)/\(spec.id)", pv.name))
+            }
+        }
+        return out
     }
 
     var body: some View {
@@ -1205,7 +1276,35 @@ struct PoolCard: View {
                                 .background(Color.accent.opacity(0.15), in: RoundedRectangle(cornerRadius: 5))
                                 .foregroundColor(.accent)
                         }
+                        // 协议标签：本地 OAI 恒有 + ANT 原生；云端按注册表三态
+                        if c.kind != "cloud" {
+                            Chip("OAI")
+                            if localModel(c)?.anthropic_native == true { Chip("ANT 原生", color: Color.thJudge) }
+                        } else {
+                            Chip("OAI", color: Color.thLlm)
+                        }
                         Spacer()
+                        // 换模型：本机 + 云端全部模型可作候选
+                        Menu("换") {
+                            Section("本机") {
+                                ForEach(store.models, id: \.name) { m in
+                                    Button(m.name) {
+                                        store.replacePoolCandidate(pool: name, candidateId: c.id,
+                                                                   to: m.name, kind: "local")
+                                    }
+                                }
+                            }
+                            Section("云端") {
+                                ForEach(cloudChoices, id: \.0) { ch in
+                                    Button(ch.0) {
+                                        store.replacePoolCandidate(pool: name, candidateId: c.id,
+                                                                   to: ch.0, kind: "cloud")
+                                    }
+                                }
+                            }
+                        }
+                        .font(.system(size: 11))
+                        SmallBtn("移除") { store.removePoolCandidate(pool: name, candidateId: c.id) }
                         // F1: 优先级可调 — ↑↓ 换相邻优先级，PUT CAS 回写
                         HStack(spacing: 3) {
                             SmallBtn("↑", disabled: idx == 0) {
@@ -1218,9 +1317,44 @@ struct PoolCard: View {
                     }
                     .padding(.vertical, 3)
                 }
+                // 追加候选
+                HStack(spacing: 8) {
+                    Menu("＋ 添加候选") {
+                        Section("本机") {
+                            ForEach(store.models, id: \.name) { m in
+                                Button(m.name) { store.addPoolCandidate(pool: name, target: m.name, kind: "local") }
+                            }
+                        }
+                        Section("云端") {
+                            ForEach(cloudChoices, id: \.0) { ch in
+                                Button(ch.0) { store.addPoolCandidate(pool: name, target: ch.0, kind: "cloud") }
+                            }
+                        }
+                    }
+                    .font(.system(size: 11))
+                    Spacer()
+                    SmallBtn("复制池配置") { copyPoolYAML() }
+                        .help("复制本池 YAML 片段到剪贴板")
+                }
+                .padding(.top, 4)
             }
             .padding(12)
         }
+    }
+
+    /// 一键拷贝池 YAML 片段（含 iff/<pool> 全路径头，可直接粘进 model_pools.yaml）
+    func copyPoolYAML() {
+        var lines = ["\(name):", "  enabled: \(def.enabled ?? true)", "  candidates:"]
+        for c in candidates {
+            lines.append("    - id: \(c.target ?? c.id)")
+            lines.append("      target: \(c.target ?? c.id)")
+            lines.append("      kind: \(c.kind ?? "local")")
+            lines.append("      priority: \(c.priority)")
+        }
+        let text = lines.joined(separator: "\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        store.actionMessage = "✅ 池配置已复制到剪贴板"
     }
 }
 
@@ -1561,6 +1695,21 @@ struct CloudProviderCard: View {
     let pv: CloudProvider
     var expanded: Bool { store.cloudExpanded == pv.name }
 
+    /// 一键拷贝：双协议统一入口 env 块（客户端零改动，换方言只换 BASE_URL 变量）
+    func copyUnifiedConfig(_ pv: CloudProvider) {
+        let lines = [
+            "# MacFabric 统一入口（本机任一协议任选）",
+            "export OPENAI_BASE_URL=http://127.0.0.1:8999/v1",
+            "export ANTHROPIC_BASE_URL=http://127.0.0.1:8999",
+            "# 服务商 \(pv.name)（已由网关聚合，客户端无需直连）",
+            "#   OpenAI base:    \(pv.openai_base ?? "-")",
+            "#   Anthropic base: \(pv.anthropic_base ?? "未配置（走网关翻译桥）")",
+        ]
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+        store.actionMessage = "✅ 统一入口配置已复制到剪贴板"
+    }
+
     var body: some View {
         Card {
             VStack(alignment: .leading, spacing: 6) {
@@ -1571,11 +1720,17 @@ struct CloudProviderCard: View {
                         .background(Color.accent.opacity(0.8), in: RoundedRectangle(cornerRadius: 6))
                         .foregroundColor(.white)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(pv.name).font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
+                        HStack(spacing: 6) {
+                            Text(pv.name).font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
+                            Chip("OAI")
+                            if (pv.anthropic_base ?? "").isEmpty == false { Chip("ANT 原生", color: Color.thJudge) }
+                        }
                         Text(pv.openai_base ?? "").font(.system(size: 10.5, design: .monospaced))
                             .foregroundColor(.dim).lineLimit(1)
                     }
                     Spacer()
+                    SmallBtn("拷贝配置") { copyUnifiedConfig(pv) }
+                        .help("复制双协议统一入口配置（环境变量块）到剪贴板")
                     if pv.key_env_set == true { Chip("key ✓", color: Color.okC) } else { Chip("未设 key", color: Color.warnC) }
                     Chip("\(pv.routable_count ?? 0) 模型")
                     SmallBtn(expanded ? "收起" : "模型") { store.cloudExpanded = expanded ? nil : pv.name }
@@ -1613,6 +1768,9 @@ struct CloudProviderCard: View {
                                                model: spec.id)
                     }
                     Text(spec.id).font(.system(size: 12.5)).foregroundColor(.ink)
+                    // 协议可用性：OAI 发现恒有；ANT 原生按注册表
+                    Chip("OAI", color: Color.thLlm)
+                    if spec.anthropic == true { Chip("ANT 原生", color: Color.thJudge) }
                     if spec.manual == true { Chip("手填") }
                     // F5: VL 标签（supports_vision 三态；tag 动作切换）
                     if spec.supports_vision == true {
@@ -1659,7 +1817,15 @@ struct CloudAddCard: View {
     var body: some View {
         Card {
             VStack(alignment: .leading, spacing: 8) {
-                Text("添加服务商 — OpenAI 兼容 base + API key").font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
+                Text("添加服务商 — OpenAI 兼容 base + API key（双协议统一出口 :8999）")
+                    .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
+                Text("只讲 OpenAI 方言的服务商开箱可用：网关把 /v1/messages（Anthropic）翻译成 OpenAI 调用再转发；服务商有原生 Anthropic 端点时填第二行可直连免翻译")
+                    .font(.system(size: 11)).foregroundColor(.faint)
+                HStack(spacing: 8) {
+                    TextField("Anthropic Base URL（可选，原生直连）",
+                              text: Binding(get: { store.cloudFormAnth }, set: { store.cloudFormAnth = $0 }))
+                        .textFieldStyle(.roundedBorder).font(.system(size: 12))
+                }
                 HStack(spacing: 8) {
                     TextField("名称（如 deepseek）",
                               text: Binding(get: { store.cloudFormName }, set: { store.cloudFormName = $0 }))
@@ -1672,7 +1838,8 @@ struct CloudAddCard: View {
                         .textFieldStyle(.roundedBorder).font(.system(size: 12))
                     SmallBtn("添加", primary: true) {
                         store.addCloudProvider()
-                        store.cloudFormName = ""; store.cloudFormBase = ""; store.cloudFormKey = ""
+                        store.cloudFormName = ""; store.cloudFormBase = ""
+                        store.cloudFormKey = ""; store.cloudFormAnth = ""
                     }
                 }
             }.padding(12)

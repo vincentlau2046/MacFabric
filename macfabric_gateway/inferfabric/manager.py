@@ -221,6 +221,7 @@ class ModelManager:
                 'peak_vram_mb': m.peak_vram_mb,
                 'ledger_mode': getattr(m, 'ledger_mode', ''),
                 'autostart': getattr(m, 'autostart', False),
+                'anthropic_native': getattr(m, 'anthropic_native', False),
             }
             for m in self._models.values()
             if m.type != 'ollama_daemon'
