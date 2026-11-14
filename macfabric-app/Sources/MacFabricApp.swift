@@ -1278,7 +1278,14 @@ struct PoolCard: View {
     var activeCount: Int { candidates.filter { isActive($0) }.count }
 
     func isActive(_ c: PoolCandidate) -> Bool {
-        if c.kind == "cloud" { return false }
+        if c.kind == "cloud" {
+            // 云端候选：注册表在位即可路由（云端无"启动中"状态，灰点会被
+            // 误读为不可用）— 按 provider/model_id 精确比对
+            guard let target = c.target, let slash = target.firstIndex(of: "/") else { return false }
+            let provider = String(target[target.startIndex..<slash])
+            let mid = String(target[target.index(after: slash)...])
+            return (store.cloud?.models ?? []).contains { $0.provider == provider && $0.id == mid }
+        }
         return localModel(c)?.active == true
     }
     func localModel(_ c: PoolCandidate) -> ModelItem? {
@@ -1402,6 +1409,10 @@ struct PoolCard: View {
                         }
                     }
                     .padding(.vertical, 3)
+                }
+                if candidates.isEmpty {
+                    Text("暂无候选 — 点下方「＋ 添加候选」选本机或云端模型")
+                        .font(.system(size: 11)).foregroundColor(.faint).padding(.vertical, 4)
                 }
                 // 追加候选
                 HStack(spacing: 8) {
