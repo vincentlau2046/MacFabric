@@ -96,6 +96,8 @@ struct ModelItem: Codable {
     var active: Bool?
     var context_window: Int?
     var peak_vram_mb: Int?
+    var ledger_mode: String?
+    var ledgerMode: String { ledger_mode ?? "on_demand" }
 }
 
 struct CurvePoint: Codable {
@@ -114,6 +116,7 @@ final class GatewayStore: ObservableObject {
     @Published var models: [ModelItem] = []
     @Published var curve: [CurvePoint] = []
     @Published var actionMessage = ""
+    @Published var hubExpanded = ""
     var onMemoryInsufficient: ((_ name: String, _ reason: String) -> Void)?
 
     private let base = URL(string: "http://127.0.0.1:8999")!
@@ -339,10 +342,10 @@ struct Sidebar: View {
             Text("获取").font(.system(size: 11)).foregroundColor(.faint)
                 .padding(10).padding(.top, 14)
             ForEach(acquire, id: \.1) { item in
-                SideItem(label: item.1, on: false, placeholder: true) {}
+                SideItem(label: item.1, on: tab.wrappedValue == item.0) { tab.wrappedValue = item.0 }
             }
             Spacer()
-            SideItem(label: "设置", on: false, placeholder: true) {}
+            SideItem(label: "设置", on: tab.wrappedValue == 7) { tab.wrappedValue = 7 }
                 .padding(.bottom, 10)
         }
         .frame(width: 172)
@@ -491,67 +494,72 @@ struct CapabilityCard: View {
 
 struct HubView: View {
     var store: GatewayStore
-
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
                 Card {
                     HStack(spacing: 10) {
                         Chip("接入地址")
-                        Text("http://127.0.0.1:8999").font(.system(size: 12.5, design: .monospaced))
+                        Text("http://127.0.0.1:8999").font(.system(size: 12, design: .monospaced)).foregroundColor(.ink)
                         Chip("鉴权未启用")
                         Spacer()
-                        CopyButton("复制 Base URL", text: "http://127.0.0.1:8999")
-                    }.padding(12)
+                        CopyButton("复制 Base URL", text: "http://127.0.0.1:8999", small: true)
+                    }.padding(.horizontal, 12).padding(.vertical, 8)
                 }
                 ForEach(store.models, id: \.name) { m in
-                    Card {
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack(spacing: 8) {
-                                RoundedRectangle(cornerRadius: 4).fill(threadColor(m.model_type))
-                                    .frame(width: 10, height: 10)
-                                Text(m.name).font(.system(size: 13.5, weight: .semibold)).foregroundColor(.ink)
-                                Chip("本机 · \(humanName(m.model_type))")
-                                if m.active == true { Pill(kind: .run) } else { Pill(kind: .stop) }
-                                Spacer()
-                                CopyButton("复制全部配置 · JSON", text: configJSON(m))
-                                CopyButton("复制 cURL", text: curlFor(m))
-                            }
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("OpenAI 协议").font(.system(size: 11)).foregroundColor(.faint)
-                                FieldRow(k: "Base URL", v: "http://127.0.0.1:8999/v1")
-                                FieldRow(k: "模型 ID", v: m.name)
-                                FieldRow(k: "端点", v: endpointFor(m))
-                                Text("Anthropic 协议（/v1/messages）").font(.system(size: 11)).foregroundColor(.faint)
-                                FieldRow(k: "环境变量", v: "ANTHROPIC_BASE_URL=http://127.0.0.1:8999 ANTHROPIC_MODEL=\(m.name)")
-                                Text("已停止的按需模型照样能调 — 首请求自动唤醒，约 2s")
-                                    .font(.system(size: 10.5)).foregroundColor(.faint)
-                            }
-                        }.padding(14)
-                    }
+                    HubRow(model: m,
+                           sleeping: store.snapshot?.status.sleep_states?[m.name] != nil,
+                           expanded: Binding(get: { store.hubExpanded == m.name },
+                                             set: { store.hubExpanded = $0 ? m.name : "" }))
                 }
-            }.padding(18)
+            }.padding(16)
         }
     }
+}
 
-    private func endpointFor(_ m: ModelItem) -> String {
-        switch m.model_type {
-        case "embedding": return "http://127.0.0.1:8999/v1/embeddings"
-        case "asr": return "http://127.0.0.1:8999/v1/audio/transcriptions"
-        case "tts": return "http://127.0.0.1:8999/v1/audio/speech"
-        case "aigc": return "http://127.0.0.1:8999/v1/images/generations"
-        default: return "http://127.0.0.1:8999/v1/chat/completions"
+struct HubRow: View {
+    let model: ModelItem
+    var sleeping: Bool
+    @Binding var expanded: Bool
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 0) {
+                Button { expanded.toggle() } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .bold)).foregroundColor(.faint)
+                        RoundedRectangle(cornerRadius: 3).fill(threadColor(model.model_type))
+                            .frame(width: 9, height: 9)
+                        Text(model.name).font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
+                        Chip("本机 · \(humanName(model.model_type))")
+                        if sleeping { Pill(kind: .sleep) } else { Pill.make(active: model.active, health: nil) }
+                        Spacer()
+                        CopyButton("复制配置", text: configJSON, small: true)
+                        CopyButton("cURL", text: curlFor, small: true)
+                    }
+                    .contentShape(Rectangle())
+                }.buttonStyle(.plain)
+                .padding(.horizontal, 12).padding(.vertical, 7)
+
+                if expanded {
+                    VStack(alignment: .leading, spacing: 5) {
+                        FieldRow(k: "OpenAI", v: "http://127.0.0.1:8999/v1 · 模型 ID: \(model.name)")
+                        FieldRow(k: "Anthropic", v: "http://127.0.0.1:8999 · ANTHROPIC_MODEL=\(model.name)")
+                        CopyButton("复制环境变量", text: "export ANTHROPIC_BASE_URL=http://127.0.0.1:8999\nexport ANTHROPIC_MODEL=\(model.name)", small: true)
+                        Text("已停止的按需模型照样能调 — 首请求自动唤醒，约 2s")
+                            .font(.system(size: 10.5)).foregroundColor(.faint)
+                    }
+                    .padding(.leading, 12).padding(.bottom, 10).padding(.trailing, 12)
+                }
+            }
         }
     }
-    private func configJSON(_ m: ModelItem) -> String {
-        """
-        {"base_url": "http://127.0.0.1:8999/v1", "model": "\(m.name)", "api_key": "未启用鉴权"}
-        """
+    var configJSON: String {
+        "{\"base_url\": \"http://127.0.0.1:8999/v1\", \"model\": \"\(model.name)\", \"api_key\": \"未启用鉴权\"}"
     }
-    private func curlFor(_ m: ModelItem) -> String {
-        """
-        curl http://127.0.0.1:8999/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"\(m.name)","messages":[{"role":"user","content":"hello"}]}'
-        """
+    var curlFor: String {
+        "curl http://127.0.0.1:8999/v1/chat/completions -H \"Content-Type: application/json\" -d '{\"model\":\"\(model.name)\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}'"
     }
 }
 
@@ -608,98 +616,192 @@ struct InferenceView: View {
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
-                VStack(spacing: 9) {
+                VStack(spacing: 8) {
                     ForEach(store.models, id: \.name) { m in
-                        Card {
-                            HStack(spacing: 12) {
-                                RoundedRectangle(cornerRadius: 4).fill(threadColor(m.model_type))
-                                    .frame(width: 10, height: 10)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(m.name).font(.system(size: 13.5, weight: .semibold)).foregroundColor(.ink)
-                                    Text("\(m.mode ?? "") · 上下文 \(m.context_window ?? 0)")
-                                        .font(.system(size: 12)).foregroundColor(.faint)
-                                }
-                                Spacer()
-                                let sleeping = store.snapshot?.status.sleep_states?[m.name] != nil
-                                Pill.make(active: m.active, health: nil, sleeping: sleeping)
-                                if sleeping {
-                                    Button("唤醒") { store.wakeModel(m.name) }.buttonStyle(.plain)
-                                        .font(.system(size: 11.5)).foregroundColor(.accent)
-                                        .padding(.horizontal, 9).padding(.vertical, 3)
-                                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.accent.opacity(0.5), lineWidth: 1))
-                                } else if m.active == true {
-                                    Button("睡眠") { store.sleepModel(m.name) }.buttonStyle(.plain)
-                                        .font(.system(size: 11.5))
-                                        .padding(.horizontal, 9).padding(.vertical, 3)
-                                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.lineC, lineWidth: 1))
-                                    Button("停止") { store.stopService(m.name) }.buttonStyle(.plain)
-                                        .font(.system(size: 11.5))
-                                        .padding(.horizontal, 9).padding(.vertical, 3)
-                                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.lineC, lineWidth: 1))
-                                } else {
-                                    Button("切换到此模型") { store.switchModel(m.name) }.buttonStyle(.plain)
-                                        .font(.system(size: 11.5)).foregroundColor(.accent)
-                                        .padding(.horizontal, 9).padding(.vertical, 3)
-                                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.accent.opacity(0.5), lineWidth: 1))
-                                }
-                            }.padding(.horizontal, 14).padding(.vertical, 12)
-                        }
+                        ModelRowView(store: store, m: m,
+                                     sleeping: store.snapshot?.status.sleep_states?[m.name] != nil)
                     }
-                }.padding(18)
+                }.padding(16)
             }
             Divider().overlay(Color.lineC)
-            VStack(alignment: .leading, spacing: 10) {
-                Text("试聊 · qwen3-4b").font(.system(size: 12.5)).foregroundColor(.faint)
-                HStack {
-                    TextField("输入…", text: Binding(get: { store.prompt }, set: { store.prompt = $0 }))
-                        .textFieldStyle(.roundedBorder)
-                    Button(store.busy ? "推理中…" : "发送") { store.sendPrompt() }.disabled(store.busy)
+            ChatStrip(store: store)
+        }
+    }
+}
+
+/// 设计稿 .mrow：一行一模型 — 状态、装载模式、内存账、三个动作
+struct ModelRowView: View {
+    var store: GatewayStore
+    let m: ModelItem
+    var sleeping: Bool
+
+    var body: some View {
+        Card {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 4).fill(threadColor(m.model_type))
+                    .frame(width: 10, height: 10)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(m.name).font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
+                    Text("\(engineLabel) · :\(portText)")
+                        .font(.system(size: 11, design: .monospaced)).foregroundColor(.faint)
                 }
-                if !store.reply.isEmpty {
-                    ScrollView {
-                        Text(store.reply).font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading)
-                    }.frame(maxHeight: 140)
+                if sleeping { Pill(kind: .sleep) } else { Pill.make(active: m.active, health: nil) }
+                Chip(loadChip)                       // 装载模式 chip
+                Text("基线 \(baselineGB)")
+                    .font(.system(size: 11, design: .monospaced)).foregroundColor(.dim)
+                Spacer()
+                HStack(spacing: 6) {
+                    if sleeping {
+                        SmallBtn("唤醒", primary: true) { store.wakeModel(m.name) }
+                    } else if m.active == true {
+                        SmallBtn("睡眠") { store.sleepModel(m.name) }
+                        SmallBtn("停止") { store.stopService(m.name) }
+                    } else {
+                        SmallBtn("启动", primary: true) { store.switchModel(m.name) }
+                    }
                 }
             }
-            .padding(14)
+            .padding(.horizontal, 12).padding(.vertical, 8)
         }
+    }
+
+    var engineLabel: String {
+        m.type == "llama_cpp" ? "llama.cpp" : (m.type ?? "")
+    }
+    var portText: String {
+        store.snapshot?.status.services_info?[m.name]?.port.map(String.init) ?? "—"
+    }
+    var loadChip: String {
+        (m.ledgerMode == "resident") ? "常驻" : "按需 · 空闲30min卸载"
+    }
+    var baselineGB: String {
+        let mb = m.peak_vram_mb ?? 0
+        return mb > 0 ? String(format: "%.1f GB", Double(mb) / 1024) : "—"
+    }
+}
+
+struct SmallBtn: View {
+    var title: String
+    var primary = false
+    let action: () -> Void
+    init(_ title: String, primary: Bool = false, action: @escaping () -> Void) {
+        self.title = title; self.primary = primary; self.action = action
+    }
+    var body: some View {
+        Button(title, action: action)
+            .font(.system(size: 11.5, weight: primary ? .semibold : .regular))
+            .buttonStyle(.plain)
+            .padding(.horizontal, 10).padding(.vertical, 3)
+            .background(primary ? Color.accent : Color.white.opacity(0.06),
+                        in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .stroke(primary ? Color.accent : Color.lineC, lineWidth: 1))
+            .foregroundColor(primary ? .white : .ink)
+    }
+}
+
+struct ChatStrip: View {
+    @ObservedObject var store: GatewayStore
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("试聊 · 经 :8999 网关").font(.system(size: 11.5)).foregroundColor(.faint)
+            HStack(spacing: 8) {
+                TextField("输入…", text: Binding(get: { store.prompt }, set: { store.prompt = $0 }))
+                    .textFieldStyle(.roundedBorder)
+                SmallBtn(store.busy ? "推理中…" : "发送", primary: !store.busy) { store.sendPrompt() }
+                    .disabled(store.busy)
+            }
+            if !store.reply.isEmpty {
+                ScrollView {
+                    Text(store.reply).font(.system(size: 12.5))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(maxHeight: 110)
+            }
+        }
+        .padding(12)
     }
 }
 
 // ─── 模型池 / 监控台 ────────────────────────────────────────────
 
+/// 设计稿默认池五件套（v1 静态目录，候选点亮跟实际运行态走）
+let defaultPools: [(String, String, [(String, String, Bool)])] = [
+    ("iff/fast", "快速对话",
+     [("1", "qwen3-4b", true), ("2", "glm-5", false)]),
+    ("iff/small", "轻量任务 · 意图分类",
+     [("1", "qwen3-1.7b", true), ("2", "glm-5-flash", false)]),
+    ("iff/premium", "高质量长文",
+     [("1", "glm-5", false)]),
+    ("iff/txt2img", "文生图",
+     [("1", "mflux-schnell", true), ("2", "seedream-4.0", false)]),
+    ("iff/img2img", "图生图 · 编辑",
+     [("1", "mflux-schnell-edit", true), ("2", "seedream-edit", false)]),
+]
+
 struct PoolsView: View {
     var store: GatewayStore
+
     var body: some View {
-        VStack(spacing: 0) {
-            if !store.actionMessage.isEmpty {
-                Text(store.actionMessage).font(.system(size: 12.5))
-                    .padding(8).frame(maxWidth: .infinity)
-                    .background(Color.accent.opacity(0.10))
-            }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("默认池（规划中：iff/fast · iff/small · iff/premium · 文生图 · 图生图）")
-                        .font(.system(size: 12)).foregroundColor(.faint)
-                    ForEach(store.models, id: \.name) { m in
-                        Card {
-                            HStack(spacing: 10) {
-                                RoundedRectangle(cornerRadius: 4).fill(threadColor(m.model_type))
-                                    .frame(width: 10, height: 10)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(m.name).font(.system(size: 13, weight: .medium)).foregroundColor(.ink)
-                                    Text(m.description ?? "").font(.system(size: 11.5))
-                                        .foregroundColor(.dim).lineLimit(1)
-                                }
-                                Spacer()
-                                Pill.make(active: m.active, health: nil,
-                                          sleeping: store.snapshot?.status.sleep_states?[m.name] != nil)
-                            }.padding(12)
-                        }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if !store.actionMessage.isEmpty {
+                    Text(store.actionMessage).font(.system(size: 12))
+                        .padding(8).frame(maxWidth: .infinity)
+                        .background(Color.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+                }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 340), spacing: 12)], spacing: 12) {
+                    ForEach(defaultPools, id: \.0) { pool in
+                        PoolCard(store: store, name: pool.0, use: pool.1, candidates: pool.2)
                     }
-                }.padding(18)
-            }
+                }
+                Text("嵌入与重排不入池 — 基本不更换的能力走静态直连；池配置当前为规划目录，网关侧 iff/<pool> 路由接入后此页即实时")
+                    .font(.system(size: 11)).foregroundColor(.faint)
+            }.padding(16)
         }
+    }
+}
+
+struct PoolCard: View {
+    var store: GatewayStore
+    let name: String
+    let use: String
+    let candidates: [(String, String, Bool)]
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(name).font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
+                    Text(use).font(.system(size: 11.5)).foregroundColor(.dim)
+                    Spacer()
+                    let onCount = candidates.filter { isCandidateActive($0.1) }.count
+                    Text(onCount > 0 ? "● 调用中" : "\(onCount) 就绪")
+                        .font(.system(size: 11)).foregroundColor(onCount > 0 ? .okC : .faint)
+                }
+                ForEach(candidates, id: \.1) { c in
+                    HStack(spacing: 8) {
+                        Text(c.0).font(.system(size: 11, design: .monospaced)).foregroundColor(.faint)
+                            .frame(width: 12)
+                        Circle().fill(isCandidateActive(c.1) ? Color.okC : Color.faint.opacity(0.5))
+                            .frame(width: 7, height: 7)
+                        Text(c.1).font(.system(size: 12.5)).foregroundColor(.ink)
+                        Chip(isLocal(c.1) ? "本机" : "云端")
+                        Spacer()
+                        Text(isCandidateActive(c.1) ? "调用中" : "待命")
+                            .font(.system(size: 11)).foregroundColor(isCandidateActive(c.1) ? .okC : .dim)
+                    }
+                    .padding(.vertical, 3)
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    func isLocal(_ name: String) -> Bool {
+        store.models.contains { $0.name == name }
+    }
+    func isCandidateActive(_ name: String) -> Bool {
+        store.models.first { $0.name == name }?.active == true
     }
 }
 
@@ -761,8 +863,212 @@ struct MainWindowView: View {
         case 2: InferenceView(store: store)
         case 3: PoolsView(store: store)
         case 4: MonitorView(store: store)
+        case 5: PacksView(store: store)
+        case 6: CloudView(store: store)
+        case 7: SettingsView(store: store)
         default: OverviewView(store: store)
         }
+    }
+}
+
+/// 能力包：产品主入口 —— 装的是能力不是模型文件（v1 静态目录 + 安装态对齐 models.d）
+struct PacksView: View {
+    var store: GatewayStore
+
+    // (线色 model_type, 能力名, 描述, 大小GB nil=内置, 对应模型名)
+    let packs: [(String, String, String, String?, String?)] = [
+        ("llm", "轻量对话", "qwen3-4b · 中文对话与工具调用 · 按需", "3.1", "qwen3-4b"),
+        ("embedding", "通用文本嵌入", "bge-m3 · 中英多语 · 常驻", "1.2", "bge-m3"),
+        ("judge", "决策判官", "qwen3-1.7b · 意图分类与路由 · 常驻", "1.4", "qwen3-1.7b"),
+        ("rerank", "检索重排", "bge-reranker-v2-m3 · 常驻", "1.2", "bge-reranker-v2-m3"),
+        ("tts", "中文语音合成", "kokoro-82m · 含系统语音兜底 · 常驻", "0.6", "kokoro-82m"),
+        ("asr", "语音转写", "whisper-v3-turbo · 中英 · 按需", "1.6", "whisper-v3-turbo"),
+        ("vl", "轻量看图", "qwen3-vl-4b · 截图理解 · 按需", "3.8", "qwen3-vl-4b"),
+        ("ocr", "屏幕与文档识别", "macOS 视觉框架 · 零模型 · 常驻", nil, nil),
+    ]
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
+                ForEach(packs, id: \.1) { pk in
+                    PackCard(store: store, pack: pk)
+                }
+            }
+            .padding(16)
+        }
+    }
+}
+
+struct PackCard: View {
+    var store: GatewayStore
+    let pack: (String, String, String, String?, String?)
+
+    var installed: Bool {
+        guard let target = pack.4 else { return true }          // OCR 内置即就绪
+        return store.models.contains { $0.name == target }
+    }
+    var modelType: String? {
+        guard let target = pack.4 else { return "ocr" }
+        return store.models.first { $0.name == target }?.model_type ?? pack.0
+    }
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 8) {
+                    RoundedRectangle(cornerRadius: 4).fill(threadColor(modelType))
+                        .frame(width: 10, height: 10)
+                    Text(pack.1).font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
+                }
+                Text(pack.2).font(.system(size: 11.5)).foregroundColor(.dim).lineLimit(2)
+                HStack {
+                    Text(pack.3 ?? "内置").font(.system(size: 11.5, design: .monospaced)).foregroundColor(.faint)
+                    Spacer()
+                    if installed {
+                        Chip(pack.4 == nil ? "已就绪" : "已安装")
+                    } else {
+                        Text("安装").font(.system(size: 11, weight: .semibold))
+                            .padding(.horizontal, 9).padding(.vertical, 3)
+                            .background(Color.accent, in: RoundedRectangle(cornerRadius: 6))
+                            .foregroundColor(.white)
+                            .help("能力包安装将写入 models.d（P3 端点落地后启用）")
+                            .onHover { _ in }
+                    }
+                }
+            }
+            .padding(12)
+        }
+    }
+}
+
+/// 云端接入：服务商行 + 云端模型卡（v1 静态演示目录，/admin/cloud 数据接入后实时）
+struct CloudView: View {
+    var store: GatewayStore
+
+    let providers: [(String, String, String, String)] = [
+        ("智", "#3b6cff", "智谱AI", "OpenAI + Anthropic · 自动发现 3 个模型"),
+        ("深", "#2b7de1", "DeepSeek", "OpenAI · 自动发现 2 个模型"),
+        ("火", "#7a5cf0", "火山方舟", "OpenAI · 自动发现 4 个模型"),
+        ("百", "#8a8a95", "百度千帆", "规格预设 · 无 /models 端点，手工声明模型"),
+    ]
+    let cloudModels: [(String, String)] = [
+        ("glm-5", "智谱AI · 旗舰 · OpenAI + Anthropic"),
+        ("glm-5-flash", "智谱AI · 快速 · OpenAI"),
+        ("deepseek-v4", "DeepSeek · 推理 · OpenAI"),
+        ("seedream-4.0", "火山方舟 · 图像 · OpenAI"),
+    ]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Card {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(providers, id: \.2) { pv in
+                            HStack(spacing: 10) {
+                                Text(pv.0).font(.system(size: 14, weight: .bold))
+                                    .frame(width: 26, height: 26)
+                                    .background(Color(hexString: pv.1), in: RoundedRectangle(cornerRadius: 6))
+                                    .foregroundColor(.white)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(pv.2).font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
+                                    Text(pv.3).font(.system(size: 11)).foregroundColor(.dim)
+                                }
+                                Spacer()
+                                Chip(pv.2 == "百度千帆" ? "未测试" : "已连接")
+                                SmallBtn("测试") {}
+                            }
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                        }
+                    }
+                }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
+                    ForEach(cloudModels, id: \.0) { cm in
+                        Card {
+                            VStack(alignment: .leading, spacing: 7) {
+                                Text(cm.0).font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
+                                Text(cm.1).font(.system(size: 11.5)).foregroundColor(.dim).lineLimit(2)
+                                HStack {
+                                    Spacer()
+                                    Chip("未入池 · 演示目录")
+                                }
+                            }.padding(12)
+                        }
+                    }
+                }
+                Text("统一入口 :8999 覆盖全部类型：/v1/chat/completions · /v1/messages · /v1/embeddings · /v1/audio/* · /v1/images/* · /ocr — 本地与云端候选共用同一调用面")
+                    .font(.system(size: 11)).foregroundColor(.faint)
+            }.padding(16)
+        }
+    }
+}
+
+extension Color {
+    init(hexString: String) {
+        let h = hexString.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        var v: UInt64 = 0
+        Scanner(string: h).scanHexInt64(&v)
+        self.init(hex: UInt32(v))
+    }
+}
+
+/// 设置：审查钉死的默认值都编码在这里（v1 展示真实值；开关后接 admin 端点）
+struct SettingsView: View {
+    var store: GatewayStore
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                SettingRow(title: "开机时启动网关",
+                           desc: "通过系统 LaunchAgent 常驻，App 不开也在服务（需在终端执行 scripts/install-launchd.sh install 批准）",
+                           on: false)
+                SettingRow(title: "HuggingFace 镜像加速",
+                           desc: "模型下载走 hf-mirror.com，国内网络建议开启",
+                           on: true)
+                SettingRow(title: "仅本机监听",
+                           desc: "关闭后局域网设备可访问 :8999，将强制启用 API 鉴权",
+                           on: true)
+                SettingRow(title: "API Key 鉴权",
+                           desc: "客户端需携带密钥调用，密钥仅生成时展示一次",
+                           on: false)
+                SettingRow(title: "模型目录",
+                           desc: "模型文件与引擎环境所在位置",
+                           path: "/Users/Apple/Documents/MacFabric/models")
+                SettingRow(title: "内存保留",
+                           desc: "为系统与其他 App 保留的内存 — 全局唯一公式 B = RAM − 8G 的唯一入口，无第二道上限",
+                           path: "8 GB")
+                SettingRow(title: "检查更新",
+                           desc: "llama.cpp b12361 · 引擎目录 engines/llama-b12361",
+                           path: nil, button: "检查")
+            }.padding(16)
+        }
+    }
+}
+
+struct SettingRow: View {
+    let title: String
+    let desc: String
+    var on = false
+    var path: String? = nil
+    var button: String? = nil
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
+                Text(desc).font(.system(size: 11.5)).foregroundColor(.faint)
+            }
+            Spacer()
+            if let path {
+                Text(path).font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim)
+            }
+            if let button {
+                SmallBtn(button) {}
+            } else if path == nil {
+                Toggle("", isOn: .constant(on)).labelsHidden().toggleStyle(.switch).controlSize(.small)
+            }
+        }
+        .padding(.vertical, 10)
+        Divider().overlay(Color.lineC)
     }
 }
 
