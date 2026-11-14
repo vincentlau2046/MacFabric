@@ -165,3 +165,37 @@
 ### 待办
 - ASR：engines/whisper/build-server.sh 就绪（Claude Code 权限分类器拦截执行），
   用户运行后 → whisper ggml-large-v3-turbo 下载 → models.d yaml → ASR 能力包解禁
+
+## 2026-11-14 下午补丁 4 — 隔离成为部署底层范式 + 池候选联动 + ASR 端到端
+
+### 部署范式化（用户裁决：所有部署方式统一，存量已审计合规）
+- 卸载=容器化拆除：停服务→删yaml→热重载→删模型文件（仅项目 models/）→
+  引擎单元引用计数归零整目录 rmtree → 池候选联动清除；响应带清理审计字段
+- `_collect_engine_refs`：dataclass 递归收集绝对/相对路径，engines/<unit> 归属判定
+- 范式文档化：docs/ISOLATION.md 第四章（三单元生命周期表 + 验收标准）
+- 存量审计：bge-m3/qwen3-4b/kokoro 三 yaml 全部合规（项目内模型+引擎+显式路径）
+
+### 模型池 ↔ 源模块自动联动（用户要求）
+- `PoolRegistry.purge_candidates(predicate)`：RLock 重入复用 update() 校验+
+  原子写盘+发布路径；无命中不写盘；单测覆盖（local清除/provider清除/无操作/持久化）
+- 挂钩三处：pack 卸载（local 候选）、云模型 remove（provider+model_id）、
+  provider 删除（该 provider 全部云候选）
+
+### 池候选 schema 修复（用户截图的 400 根因）
+- 加候选/换候选此前写 `target` 字段（网关不认识）→ cloud 必须 provider+model_id，
+  local 必须 model_name；换候选保留原 id（身份稳定）；加候选 id 唯一化
+- 实测：add/replace/remove 三链路 200，终态校验通过
+- 替换/移除挂 NSAlert 确认弹窗（用户裁决：只拦确认，不校验可用性 —
+  可用性是本地推理/云端接入模块的职责）；↑↓ 非破坏性直接执行
+
+### ASR 能力包端到端（不再依赖手工构建）
+- `/admin/packs/download` 新增 engine 阶段：engine=whisper → 项目内构建
+  whisper-server（engines/_tools 内置 cmake，Metal）→ 下载 ggml-large-v3-turbo
+  → 写 asr_server yaml（python_bin=二进制路径显式声明，OpenAI 兼容
+  /v1/audio/transcriptions）→ 热重载；进度状态 building/downloading/installing
+- App 卡片接线：ASR 从"v1.5 待接入"转为可安装，构建阶段实时文案
+- 注：端到端触发验证被 Claude Code 权限分类器拦截（下载+构建动作），
+  功能已接线，待用户在 App 内点击安装验证全链路
+
+### 图标（上条补丁遗漏记录）
+- scripts/make-icon.swift CoreGraphics 绘制 → AppIcon.icns，Dock 生效
