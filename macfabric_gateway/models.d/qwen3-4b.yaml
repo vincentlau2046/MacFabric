@@ -2,6 +2,7 @@
 # P1: binary_path 显式配置（Metal 构建第一公民）+ --alias 规范化 model 回显
 # P1 后续: 迁移为 mem_baseline_mb/mode/idle_timeout_min 三字段账本模型
 name: qwen3-4b
+autostart: false
 description: "Qwen3-4B Q4_K_M — 基线对话模型 (llama-server Metal offload)"
 type: llama_cpp
 gpu_role: shared

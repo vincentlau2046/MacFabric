@@ -97,6 +97,7 @@ struct ModelItem: Codable {
     var context_window: Int?
     var peak_vram_mb: Int?
     var ledger_mode: String?
+    var autostart: Bool?
     var ledgerMode: String { ledger_mode ?? "on_demand" }
 }
 
@@ -426,6 +427,24 @@ final class GatewayStore: ObservableObject {
             guard let self, let data,
                   let mp = try? JSONDecoder().decode(MetricsPayload.self, from: data) else { return }
             DispatchQueue.main.async { self.metrics = mp }
+        }.resume()
+    }
+
+    /// 默认启动开关 — 改 models.d YAML autostart 字段（默认 false 不自动启动）
+    func setAutostart(_ name: String, _ enabled: Bool) {
+        var req = URLRequest(url: base.appendingPathComponent("/admin/models/set-autostart"), timeoutInterval: 30)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": name, "enabled": enabled])
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                self?.actionMessage = (200..<300).contains(code)
+                    ? (enabled ? "✅ \(name) 将随网关启动" : "✅ \(name) 不再随网关启动")
+                    : "❌ 设置失败(\(code)): \(body.prefix(100))"
+                self?.fetchModels()
+            }
         }.resume()
     }
 
@@ -956,6 +975,15 @@ struct ModelRowView: View {
                 // F5: VL 能力徽章（model_type == vl）
                 if m.model_type == "vl" { Chip("VL", color: Color.thVl) }
                 Chip(loadChip)                       // 装载模式 chip
+                // 默认启动开关（用户裁决：默认 false 不自动启动）
+                HStack(spacing: 4) {
+                    Text("默认启动").font(.system(size: 10.5)).foregroundColor(.faint)
+                    Toggle("", isOn: Binding(
+                        get: { m.autostart ?? false },
+                        set: { store.setAutostart(m.name, $0) }))
+                        .labelsHidden().toggleStyle(.switch).controlSize(.mini)
+                        .help("开启后网关启动时自动拉起该模型；默认关闭 — 首个请求才唤醒")
+                }
                 Text("基线 \(baselineGB)")
                     .font(.system(size: 11, design: .monospaced)).foregroundColor(.dim)
                 Spacer()

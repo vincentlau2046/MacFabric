@@ -220,6 +220,7 @@ class ModelManager:
                 # MACFABRIC P2: 织物条分段宽度需要内存基线（MB）
                 'peak_vram_mb': m.peak_vram_mb,
                 'ledger_mode': getattr(m, 'ledger_mode', ''),
+                'autostart': getattr(m, 'autostart', False),
             }
             for m in self._models.values()
             if m.type != 'ollama_daemon'

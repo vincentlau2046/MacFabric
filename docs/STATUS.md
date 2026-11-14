@@ -86,3 +86,19 @@
 ## P3 能力包 — ⏳ 未开始
 
 ## P4 打磨 — ⏳ 未开始
+
+
+## 2026-11-14 下午补丁 — 停止失效根因修复 + 默认启动设置
+
+### 停止失效（用户报"自动默认启动"的真因）
+- `_pkill_by_port` 依赖 Linux `fuser`（macOS 无此命令），fallback pkill 模式只匹配 vllm/sglang → Mac 上"停止"从未真正杀过进程
+- 孤儿 llama-server 占着端口 → 网关重启时 `gpu_state.reconcile()` 扫到真实端口收养回 active_services → 表现为"自动启动"
+- 修复：darwin 路径走 `lsof -ti tcp:PORT` → SIGTERM → 校验存活再 SIGKILL；杀不掉记 warning
+- 实测：停止后 PID 死亡、8010 释放、重启后 active_services=[] ✓
+
+### 默认启动设置（每模型开关，默认不自动启动）
+- YAML `autostart: false`（默认）— 独立于 ledger_mode（resident 是"常驻不睡"，autostart 是"开机即起"）
+- 网关启动钩子：autostart 模型 best-effort switch（失败只记日志）
+- `POST /admin/models/set-autostart {name, enabled}`：改 YAML + 热重载；/models 输出 autostart 字段
+- App 本地推理行新增"默认启动"开关
+- 全语义闭环实测：false→重启零自启；true→重启自动拉起；关回+停止→保持停止

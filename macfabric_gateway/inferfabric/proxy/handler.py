@@ -260,6 +260,7 @@ _POST_ROUTES = {
     # MACFABRIC F2: 能力包卸载（安装管理的减法 — 停服务+删 YAML+重载）
     "/admin/packs/uninstall":  _admin(lambda h, pm: h._handle_pack_uninstall(pm)),
     "/admin/packs/install":    _admin(lambda h, pm: h._handle_pack_install(pm)),
+    "/admin/models/set-autostart": _admin(lambda h, pm: h._handle_set_autostart(pm)),
 
     # ─── Admin: Cloud Provider Management (PR-D) ─────────────────
     "/admin/cloud/reload":      _admin(lambda h, pm: h._handle_cloud_reload(pm)),
@@ -1509,6 +1510,46 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._send_json({"status": "uninstalled", "model": name,
                          "stopped": bool(stopped)})
 
+    def _handle_set_autostart(self, pm):
+        """POST /admin/models/set-autostart {name, enabled} — 改 models.d YAML
+        autostart 字段 + 热重载。默认 False（不自动启动）。"""
+        data = self._read_body()
+        name = ((data or {}).get("name") or "").strip()
+        enabled = bool((data or {}).get("enabled", False))
+        model = pm.mgr._models.get(name)
+        if model is None:
+            self._send_json({"error": f"Unknown model: {name}"}, 404)
+            return
+        yaml_path = getattr(model, "yaml_path", None)
+        if not yaml_path or not Path(yaml_path).exists():
+            self._send_json({"error": f"YAML not found: {yaml_path}"}, 404)
+            return
+        try:
+            text = Path(yaml_path).read_text()
+            lines = text.split("\n")
+            flag_line = f"autostart: {'true' if enabled else 'false'}"
+            replaced = False
+            out = []
+            for ln in lines:
+                if ln.startswith("autostart:"):
+                    out.append(flag_line)
+                    replaced = True
+                else:
+                    out.append(ln)
+            if not replaced:
+                # 插到首个顶级字段（name:）之后，保持可读
+                for i, ln in enumerate(out):
+                    if ln.startswith("name:"):
+                        out.insert(i + 1, flag_line)
+                        break
+            Path(yaml_path).write_text("\n".join(out))
+        except Exception as e:
+            self._send_json({"error": f"YAML update failed: {e}"}, 500)
+            return
+        pm.mgr.reload_models()
+        log.info("Autostart %s -> %s", name, enabled)
+        self._send_json({"status": "ok", "model": name, "autostart": enabled})
+
     def _handle_pack_install(self, pm):
         """安装能力包 = 发现产物写 models.d YAML + 热重载，不启动（Mac 语义）。"""
         data = self._read_body()
@@ -2704,6 +2745,26 @@ def main():
     server = _create_server()
     server.proxy_mgr = mgr
     server.watchdog = watchdog
+
+    # MACFABRIC: autostart 模型开机拉起（用户裁决默认 False —— 不自动启动）。
+    # best-effort 逐个 switch，失败仅记日志不阻断网关。
+    def _autostart_models():
+        import time as _time
+        _time.sleep(2)  # 等服务端口就绪
+        for m in mgr.mgr._models.values():
+            if not getattr(m, "autostart", False):
+                continue
+            name = m.name
+            if name in mgr.mgr.active_services:
+                continue
+            log.info("Autostart: launching %s (autostart: true)", name)
+            try:
+                result = mgr.mgr.switch(name)
+                log.info("Autostart %s -> %s", name, result.get("status"))
+            except Exception as e:
+                log.error("Autostart %s failed: %s", name, e)
+    threading.Thread(target=_autostart_models, daemon=True,
+                     name="macfabric-autostart").start()
 
     _notify_socket = os.environ.get('NOTIFY_SOCKET')
     _notify_enabled = bool(_notify_socket)

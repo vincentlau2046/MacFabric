@@ -6,6 +6,7 @@ for per-engine sub-managers.
 import os
 import time
 import signal
+import sys
 import json
 import logging
 import subprocess
@@ -39,7 +40,13 @@ class BaseProcessManager:
         """Kill any remaining process listening on a specific port.
 
         Safety net for orphaned processes not tracked in state.db.
+        macOS: fuser 不存在（Linux 工具）且 pkill -f 的 vllm/sglang 模式匹配
+        不到 llama-server —— 用 lsof 取 pid 后 kill（MACFABRIC 修复：Mac 上
+        停止从未真正生效，孤儿被 reconcile 收养成"假自启"）。
         """
+        if sys.platform == "darwin":
+            self._pkill_by_port_macos(port)
+            return
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
                 result = subprocess.run(
@@ -74,6 +81,34 @@ class BaseProcessManager:
                 log.warning("fuser on port %d timed out, skipping", port)
                 break
         time.sleep(1)
+
+    def _pkill_by_port_macos(self, port: int) -> None:
+        """macOS 端口清理：lsof -ti tcp:PORT → SIGTERM → 存活则 SIGKILL。
+
+        返回前校验端口确实释放，杀不掉记 warning（不再静默假成功）。"""
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            pids = self._pids_on_port(port)
+            if not pids:
+                break
+            for pid in pids:
+                try:
+                    os.kill(pid, sig)
+                    log.info("killed pid %d on port %d (sig=%d)", pid, port, sig)
+                except ProcessLookupError:
+                    pass
+            time.sleep(1)
+        if self._pids_on_port(port):
+            log.warning("port %d still occupied after SIGKILL — manual check needed", port)
+
+    def _pids_on_port(self, port: int) -> list[int]:
+        try:
+            result = subprocess.run(
+                ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+                timeout=5, check=False, capture_output=True, text=True,
+            )
+            return [int(x) for x in result.stdout.split() if x.strip().isdigit()]
+        except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+            return []
 
     def _validate_pid(self, pid: int, expected_substring: str) -> bool:
         """P1-2: Validate that a PID still belongs to the expected process.

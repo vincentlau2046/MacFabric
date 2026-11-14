@@ -449,6 +449,9 @@ class ModelConfig:
     mem_baseline_mb: int = 0
     ledger_mode: str = ""          # "resident" | "on_demand"（空=on_demand）
     idle_timeout_min: float = 30.0
+    # MACFABRIC: 网关启动时是否自动拉起该模型（用户裁决：默认不自动启动）。
+    # 独立于 ledger_mode —— resident 是"常驻不睡"，autostart 是"开机即起"。
+    autostart: bool = False
     vllm: Optional[VLLMConfig] = None
     sglang: Optional[SGLangConfig] = None
     comfyui: Optional[ComfyUIConfig] = None
@@ -920,6 +923,7 @@ def load_models(models_dir: Path = MODELS_DIR, include_applied: bool = True) -> 
             mem_baseline_mb=int(raw.get("mem_baseline_mb", 0)),
             ledger_mode=_ledger_mode,
             idle_timeout_min=float(raw.get("idle_timeout_min", 30)),
+            autostart=bool(raw.get("autostart", False)),
         )
         # 场景预设（iff tune）: 顶层 presets（内联兜底）+ 源 YAML 路径。
         # active_preset 不从 YAML 读——应用层（APPLIED_SCENARIOS_FILE）是单一来源。
