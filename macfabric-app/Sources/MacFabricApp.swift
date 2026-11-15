@@ -126,6 +126,8 @@ struct PoolCandidate: Codable {
 struct PoolDef: Codable {
     var enabled: Bool?
     var candidates: [PoolCandidate]?
+    var max_attempts: Int?      // Task 6 范围 1–10（新写入）；缺省 = 服务端默认 2
+    var deadline_ms: Int?       // 1000–300000 ms；缺省 = 服务端默认 60000
 }
 struct PoolsPayload: Codable {
     var revision: Int
@@ -443,31 +445,65 @@ final class GatewayStore: ObservableObject {
         }.resume()
     }
 
-    func fetchPools() {
+    func fetchPools(completion: (() -> Void)? = nil) {
         URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/model-pools")) { [weak self] data, _, _ in
             guard let self, let data,
-                  let pl = try? JSONDecoder().decode(PoolsPayload.self, from: data) else { return }
-            DispatchQueue.main.async { self.pools = pl }
+                  let pl = try? JSONDecoder().decode(PoolsPayload.self, from: data) else {
+                DispatchQueue.main.async { completion?() }
+                return
+            }
+            DispatchQueue.main.async {
+                self.pools = pl
+                completion?()
+            }
         }.resume()
     }
 
     /// F1: 候选操作统一入口 — 每次现取 raw（旧版缓存导致网关重启后 ↑↓ 静默失效）。
     /// mutate(raw) 在后台线程改 priorities/candidates，POST CAS 回写。
-    /// 409（连点/竞态）自动以新 revision 重放一次同一语义操作，不丢点击。
+    /// Task 9：mutation 按用户意图顺序**串行**执行（连点排序不交错）；
+    /// 409（连点/竞态）自动以新 revision 重放同一语义操作（字段级修改在
+    /// 新基点上做，不覆盖他人配置），重放失败则显式报错回滚可解释。
     func mutatePools(_ mutate: @escaping (inout [String: Any]) -> Void,
                      okMsg: String, failPrefix: String) {
-        postPoolsMutation(mutate, okMsg: okMsg, failPrefix: failPrefix, allowRetry: true)
+        enqueuePoolMutation {
+            self.postPoolsMutation(mutate, okMsg: okMsg, failPrefix: failPrefix, allowRetry: true)
+        }
+    }
+
+    // 池 mutation 串行队列：入队后逐个执行，前一个完成（含失败/重放入队）
+    // 才跑下一个 — 意图顺序与点击顺序一致
+    private var poolMutationQueue: [() -> Void] = []
+    private var poolMutationRunning = false
+
+    private func enqueuePoolMutation(_ work: @escaping () -> Void) {
+        poolMutationQueue.append(work)
+        drainPoolMutations()
+    }
+
+    private func drainPoolMutations() {
+        guard !poolMutationRunning, !poolMutationQueue.isEmpty else { return }
+        poolMutationRunning = true
+        poolMutationQueue.removeFirst()()
+    }
+
+    private func poolMutationDone() {
+        poolMutationRunning = false
+        drainPoolMutations()
     }
 
     private func postPoolsMutation(_ mutate: @escaping (inout [String: Any]) -> Void,
                                    okMsg: String, failPrefix: String, allowRetry: Bool) {
-        guard let url = URL(string: "\(GW_BASE)/admin/model-pools") else { return }
+        guard let url = URL(string: "\(GW_BASE)/admin/model-pools") else { poolMutationDone(); return }
         URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
             guard let self, let data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   var raw = obj["raw"] as? [String: Any],
                   let rev = obj["revision"] as? Int else {
-                DispatchQueue.main.async { self?.actionMessage = "❌ 池配置读取失败" }
+                DispatchQueue.main.async {
+                    self?.actionMessage = "❌ 池配置读取失败"
+                    self?.poolMutationDone()
+                }
                 return
             }
             mutate(&raw)
@@ -481,13 +517,19 @@ final class GatewayStore: ObservableObject {
                 let body = data2.flatMap { String(data: $0, encoding: .utf8) } ?? ""
                 DispatchQueue.main.async {
                     if code == 409 && allowRetry {
-                        // revision 过期（连点/与轮询竞态）— 取新基点重放同一语义，不报错不丢点击
-                        self?.postPoolsMutation(mutate, okMsg: okMsg, failPrefix: failPrefix, allowRetry: false)
+                        // revision 过期（连点/与轮询竞态）— 重放排到队尾按序执行
+                        // （同语义操作在新基点上重做，不静默覆盖他人字段级修改）
+                        self?.poolMutationDone()
+                        self?.enqueuePoolMutation {
+                            self?.postPoolsMutation(mutate, okMsg: okMsg,
+                                                    failPrefix: failPrefix, allowRetry: false)
+                        }
                         return
                     }
                     self?.actionMessage = (200..<300).contains(code)
                         ? okMsg : "❌ \(failPrefix)(\(code)): \(body.prefix(100))"
                     self?.fetchPools()
+                    self?.poolMutationDone()
                 }
             }.resume()
         }.resume()
@@ -533,8 +575,13 @@ final class GatewayStore: ObservableObject {
         }, okMsg: "✅ 优先级已更新", failPrefix: "排序失败")
     }
 
-    // ── 池候选拖拽排序（onDrag/onDrop；拖拽中候选 id）──
+    // ── 池候选拖拽排序（onDrag/onDrop）──
+    // Task 9：poolDragging 携带 "pool|candidate" 双身份 — 跨池拖放被
+    // DropDelegate 拒绝（同 id 候选可存在于多个池，只带 id 会误操作其他池）；
+    // 取消（落到容器空白处/切换页签）清理高亮
     @Published var poolDragging: String? = nil
+
+    func cancelPoolDrag() { poolDragging = nil }
 
     /// 拖拽落点：dragged 移动到 target 位置，全量重建 priority = index*10（CAS 回写）
     func moveCandidate(pool: String, dragged: String, target: String) {
@@ -636,8 +683,10 @@ final class GatewayStore: ObservableObject {
         }, okMsg: "✅ 已加候选 \(target)", failPrefix: "加候选失败")
     }
 
-    /// F8: 单池 enabled 开关（服务端字段级原子修改 + expected_revision CAS）
-    func togglePool(_ name: String, enabled: Bool) {
+    /// F8: 单池 enabled 开关（服务端字段级原子修改 + expected_revision CAS；
+    /// 409 重取基点重放一次 — 网关重启 revision 重置后同样以新基点重建，
+    /// 不存在"永久忽略较小 revision"）
+    func togglePool(_ name: String, enabled: Bool, retried: Bool = false) {
         guard let rev = pools?.revision else { return }
         var req = URLRequest(url: base.appendingPathComponent("/admin/model-pools/toggle"), timeoutInterval: 30)
         req.httpMethod = "POST"
@@ -647,11 +696,78 @@ final class GatewayStore: ObservableObject {
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             DispatchQueue.main.async {
-                self?.actionMessage = (200..<300).contains(code)
+                guard let self else { return }
+                if code == 409 && !retried {
+                    self.fetchPools {
+                        self.togglePool(name, enabled: enabled, retried: true)
+                    }
+                    return
+                }
+                self.actionMessage = (200..<300).contains(code)
                     ? "✅ iff/\(name) 已\(enabled ? "启用" : "停用")" : "❌ 开关失败(\(code)): \(body.prefix(100))"
-                self?.fetchPools()
+                self.fetchPools()
             }
         }.resume()
+    }
+
+    // ── 池高级设置（Task 6 max_attempts/deadline_ms 接入；Task 9 一致性）──
+    // 范围与服务端严格校验一致：1–10 次 / 1000–300000ms。CAS 走 mutatePools
+    // （raw 基底改字段，未修改字段原样保留，不重建有损配置）
+    @Published var poolAdvExpanded: String? = nil
+    @Published var poolAdvAttempts = ""
+    @Published var poolAdvDeadline = ""
+    @Published var poolAdvError = ""
+
+    func togglePoolAdvanced(_ name: String, def: PoolDef) {
+        if poolAdvExpanded == name {
+            poolAdvExpanded = nil
+            return
+        }
+        poolAdvExpanded = name
+        poolAdvAttempts = ""      // 留空 = 不修改（占位提示当前值）
+        poolAdvDeadline = ""
+        poolAdvError = ""
+    }
+
+    func savePoolAdvanced(_ name: String) {
+        let aRaw = poolAdvAttempts.trimmingCharacters(in: .whitespaces)
+        let dRaw = poolAdvDeadline.trimmingCharacters(in: .whitespaces)
+        var aSet: Int? = nil; var aTouch = false
+        var dSet: Int? = nil; var dTouch = false
+        if !aRaw.isEmpty {
+            guard let n = Int(aRaw), (1...10).contains(n) else {
+                poolAdvError = "max_attempts 需为 1–10 的整数（当前输入保留）"; return
+            }
+            aSet = n; aTouch = true
+        }
+        if !dRaw.isEmpty {
+            guard let n = Int(dRaw), (1000...300000).contains(n) else {
+                poolAdvError = "deadline_ms 需为 1000–300000 的整数（当前输入保留）"; return
+            }
+            dSet = n; dTouch = true
+        }
+        guard aTouch || dTouch else { poolAdvError = "两个字段都为空 — 无可保存的修改"; return }
+        poolAdvError = ""
+        mutatePools({ raw in
+            guard var poolsCfg = raw["pools"] as? [String: Any],
+                  var pc = poolsCfg[name] as? [String: Any] else { return }
+            if let n = aSet { pc["max_attempts"] = n }
+            if let n = dSet { pc["deadline_ms"] = n }
+            poolsCfg[name] = pc
+            raw["pools"] = poolsCfg
+        }, okMsg: "✅ iff/\(name) 池参数已更新", failPrefix: "池参数保存失败")
+    }
+
+    /// 恢复服务端默认：删除这两个键（服务端缺省 max_attempts=2 / deadline_ms=60000）
+    func resetPoolAdvanced(_ name: String) {
+        mutatePools({ raw in
+            guard var poolsCfg = raw["pools"] as? [String: Any],
+                  var pc = poolsCfg[name] as? [String: Any] else { return }
+            pc.removeValue(forKey: "max_attempts")
+            pc.removeValue(forKey: "deadline_ms")
+            poolsCfg[name] = pc
+            raw["pools"] = poolsCfg
+        }, okMsg: "✅ iff/\(name) 池参数已恢复默认", failPrefix: "池参数恢复失败")
     }
 
     /// F2: 能力包卸载 = 停服务 + 删 models.d YAML + 热重载
@@ -781,12 +897,15 @@ final class GatewayStore: ObservableObject {
         }.resume()
     }
 
-    /// F3: 添加服务商（name + openai_base + api_key；key 写 secrets.env，YAML 只存 ${REF}）
-    func addCloudProvider() {
+    /// F3: 添加服务商（name + openai_base + api_key；key 写 secrets.env，YAML 只存 ${REF}）。
+    /// Task 9：completion(ok) — 失败不丢草稿（调用方按 ok 决定是否清空表单）
+    func addCloudProvider(completion: ((Bool) -> Void)? = nil) {
         let name = cloudFormName.trimmingCharacters(in: .whitespaces)
         let burl = cloudFormBase.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty, !burl.isEmpty else {
-            actionMessage = "⚠️ 名称与 Base URL 必填"; return
+            actionMessage = "⚠️ 名称与 Base URL 必填"
+            completion?(false)
+            return
         }
         var body: [String: Any] = ["name": name, "openai_base": burl, "discovery_enabled": true]
         let aburl = cloudFormAnth.trimmingCharacters(in: .whitespaces)
@@ -794,7 +913,8 @@ final class GatewayStore: ObservableObject {
         let key = cloudFormKey.trimmingCharacters(in: .whitespaces)
         if !key.isEmpty { body["api_key"] = key }
         cloudRequest(path: "/admin/cloud/providers", method: "POST", body: body,
-                     okMsg: "✅ 服务商 \(name) 已添加", failPrefix: "添加失败")
+                     okMsg: "✅ 服务商 \(name) 已添加", failPrefix: "添加失败",
+                     completion: completion)
     }
 
     /// F3: 删除服务商（两击确认）
@@ -815,13 +935,15 @@ final class GatewayStore: ObservableObject {
     /// NSNull = 清除属性 — JSON null 直通网关清除语义）
     func cloudModelAction(_ provider: String, action: String, model: String,
                           vision: Bool? = nil, tools: Bool? = nil,
-                          extra: [String: Any]? = nil) {
+                          extra: [String: Any]? = nil,
+                          completion: ((Bool) -> Void)? = nil) {
         var body: [String: Any] = ["provider": provider, "action": action, "model": model]
         if let v = vision { body["supports_vision"] = v }
         if let t = tools { body["supports_tools"] = t }
         if let e = extra { for (k, val) in e { body[k] = val } }
         cloudRequest(path: "/admin/cloud/provider-models", method: "POST", body: body,
-                     okMsg: "✅ \(model) · \(action) 成功", failPrefix: "\(model) \(action) 失败")
+                     okMsg: "✅ \(model) · \(action) 成功", failPrefix: "\(model) \(action) 失败",
+                     completion: completion)
     }
 
     // ── 云端模型属性浮窗（点击模型行 → 配置属性/单独删除）──
@@ -836,6 +958,10 @@ final class GatewayStore: ObservableObject {
     @Published var editorPriceIn = ""
     @Published var editorPriceOut = ""
     @Published var editorConfirmDelete = false
+    // Task 9：字段内报错（键 = 字段标题）+ 保存中状态 + 未保存修改标记
+    @Published var editorFieldErrors: [String: String] = [:]
+    @Published var editorSaving = false
+    @Published var editorDirty = false   // 浮窗内任何草稿改动 → 关闭前确认丢弃
 
     func openCloudModelEditor(provider: String, spec: CloudModelSpec, enabled: Bool) {
         cloudEditorProvider = provider
@@ -848,30 +974,56 @@ final class GatewayStore: ObservableObject {
         editorPriceIn = (spec.price_input ?? 0) > 0 ? String(format: "%g", spec.price_input!) : ""
         editorPriceOut = (spec.price_output ?? 0) > 0 ? String(format: "%g", spec.price_output!) : ""
         editorConfirmDelete = false
+        editorFieldErrors = [:]
+        editorSaving = false
+        editorDirty = false
     }
 
     func closeCloudModelEditor() {
         cloudEditorProvider = nil
         cloudEditorSpec = nil
         editorConfirmDelete = false
+        editorFieldErrors = [:]
+        editorSaving = false
+        editorDirty = false
     }
 
     /// 浮窗保存 = 一次 tag 请求落全部字段（能力 + 属性；NSNull = 清除）。
-    /// 启用/停用不在此混发 — 云请求防抖下第二个请求会被拒，勾选仍在行内按钮。
+    /// Task 9 一致性：
+    /// - 空白 = 清除（合法）；非空但非法 → 字段内报错、保留输入、不发请求不关闭；
+    /// - 请求返回成功并应用后才关闭浮窗 — 失败/断网不关、草稿不丢；
+    /// - 启用/停用不在此混发 — 云请求防抖下第二个请求会被拒，勾选仍在行内按钮。
     func saveCloudModelEditor() {
         guard let provider = cloudEditorProvider, let spec = cloudEditorSpec else { return }
+        var errs: [String: String] = [:]
         var extra: [String: Any] = [:]
-        let ctx = editorCtx.trimmingCharacters(in: .whitespaces)
-        let out = editorOut.trimmingCharacters(in: .whitespaces)
-        let pin = editorPriceIn.trimmingCharacters(in: .whitespaces)
-        let pout = editorPriceOut.trimmingCharacters(in: .whitespaces)
-        if let n = Int(ctx), n > 0 { extra["context_window"] = n } else { extra["context_window"] = NSNull() }
-        if let n = Int(out), n > 0 { extra["max_output_tokens"] = n } else { extra["max_output_tokens"] = NSNull() }
-        if let d = Double(pin), d >= 0 { extra["price_input"] = d } else { extra["price_input"] = NSNull() }
-        if let d = Double(pout), d >= 0 { extra["price_output"] = d } else { extra["price_output"] = NSNull() }
+        func intField(_ raw: String, _ title: String, _ key: String) {
+            let t = raw.trimmingCharacters(in: .whitespaces)
+            if t.isEmpty { extra[key] = NSNull(); return }          // 空白 = 清除
+            if let n = Int(t), n > 0 { extra[key] = n }
+            else { errs[title] = "需为正整数（留空 = 清除）" }       // 非法：保留输入
+        }
+        func priceField(_ raw: String, _ title: String, _ key: String) {
+            let t = raw.trimmingCharacters(in: .whitespaces)
+            if t.isEmpty { extra[key] = NSNull(); return }
+            if let d = Double(t), d >= 0 { extra[key] = d }
+            else { errs[title] = "需为非负数字（¥/1M tokens）" }
+        }
+        intField(editorCtx, "上下文窗口（tokens）", "context_window")
+        intField(editorOut, "最大输出（tokens）", "max_output_tokens")
+        priceField(editorPriceIn, "输入价 ¥/1M", "price_input")
+        priceField(editorPriceOut, "输出价 ¥/1M", "price_output")
+        guard errs.isEmpty else {
+            editorFieldErrors = errs   // 草稿原样保留，字段内可见报错
+            return
+        }
+        editorFieldErrors = [:]
+        editorSaving = true
         cloudModelAction(provider, action: "tag", model: spec.id,
-                         vision: editorVision, tools: editorTools, extra: extra)
-        closeCloudModelEditor()
+                         vision: editorVision, tools: editorTools, extra: extra) { ok in
+            self.editorSaving = false
+            if ok { self.closeCloudModelEditor() }   // 成功才关闭
+        }
     }
 
     /// F3: 连通性测试（用已存 key 探测全部 base）
@@ -906,9 +1058,10 @@ final class GatewayStore: ObservableObject {
 
     @Published var cloudBusy = false   // 云端操作防抖：进行中忽略重复触发（双击不再产生第二次 DELETE）
 
-    func cloudRequest(path: String, method: String, body: [String: Any], okMsg: String, failPrefix: String, timeout: Double = 30) {
+    func cloudRequest(path: String, method: String, body: [String: Any], okMsg: String, failPrefix: String, timeout: Double = 30, completion: ((Bool) -> Void)? = nil) {
         guard !cloudBusy else {
             actionMessage = "⚠️ 上一操作进行中，请稍候"
+            completion?(false)
             return
         }
         cloudBusy = true
@@ -919,12 +1072,13 @@ final class GatewayStore: ObservableObject {
         URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            let ok = (200..<300).contains(code)
             DispatchQueue.main.async {
                 self?.cloudBusy = false
-                self?.actionMessage = (200..<300).contains(code)
-                    ? okMsg : "❌ \(failPrefix)(\(code)): \(body.prefix(100))"
+                self?.actionMessage = ok ? okMsg : "❌ \(failPrefix)(\(code)): \(body.prefix(100))"
                 self?.fetchCloud()
                 self?.fetchPools()
+                completion?(ok)
             }
         }.resume()
     }
@@ -1897,10 +2051,10 @@ struct PoolCard: View {
                         }
                     }
                     .padding(.vertical, 3)
-                    .opacity(store.poolDragging == c.id ? 0.4 : 1)
+                    .opacity(store.poolDragging == "\(name)|\(c.id)" ? 0.4 : 1)
                     .onDrag {
-                        store.poolDragging = c.id
-                        return NSItemProvider(object: c.id as NSString)
+                        store.poolDragging = "\(name)|\(c.id)"
+                        return NSItemProvider(object: "\(name)|\(c.id)" as NSString)
                     }
                     .onDrop(of: ["public.utf8-plain-text"],
                             delegate: PoolRowDropDelegate(store: store, pool: name, targetId: c.id))
@@ -1927,28 +2081,104 @@ struct PoolCard: View {
                     Spacer()
                 }
                 .padding(.top, 4)
+                // 高级设置（Task 6 参数接入 — Task 9 一致性）
+                poolAdvanced
             }
             .padding(12)
+            .onDrop(of: ["public.utf8-plain-text"], delegate: PoolCancelDropDelegate(store: store))
+        }
+    }
+
+    // ── 高级设置：max_attempts / deadline_ms（Task 6 范围 1–10 / 1000–300000）──
+    @ViewBuilder private var poolAdvanced: some View {
+        Divider().padding(.vertical, 4)
+        HStack(spacing: 8) {
+            Button {
+                store.togglePoolAdvanced(name, def: def)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: store.poolAdvExpanded == name ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9)).foregroundColor(.faint)
+                    Text("高级设置").font(.system(size: 11)).foregroundColor(.dim)
+                }
+            }.buttonStyle(.plain)
+            Text("重试上限 \(def.max_attempts.map(String.init) ?? "2（默认）") 次 · 截止预算 \(def.deadline_ms.map(String.init) ?? "60000（默认）")ms")
+                .font(.system(size: 10.5)).foregroundColor(.faint)
+            Spacer()
+        }
+        if store.poolAdvExpanded == name {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("重试也消耗尝试次数；截止预算（deadline）包含排队与回退时间。留空 = 不修改。")
+                    .font(.system(size: 10.5)).foregroundColor(.faint)
+                HStack(spacing: 10) {
+                    advField("max_attempts（1–10 次）", store.poolAdvAttempts,
+                             set: { store.poolAdvAttempts = $0 })
+                        .frame(maxWidth: 200)
+                    advField("deadline_ms（1000–300000 毫秒）", store.poolAdvDeadline,
+                             set: { store.poolAdvDeadline = $0 })
+                        .frame(maxWidth: 240)
+                }
+                if !store.poolAdvError.isEmpty {
+                    Text(store.poolAdvError).font(.system(size: 10.5)).foregroundColor(.warnC)
+                }
+                HStack {
+                    SmallBtn("保存参数", primary: true) { store.savePoolAdvanced(name) }
+                    SmallBtn("恢复默认") { store.resetPoolAdvanced(name) }
+                }
+            }
+            .padding(10)
+            .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private func advField(_ title: String, _ text: String, set: @escaping (String) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.system(size: 10)).foregroundColor(.faint)
+            TextField("留空 = 不修改", text: Binding(get: { text }, set: set))
+                .textFieldStyle(.roundedBorder).font(.system(size: 11, design: .monospaced))
         }
     }
 }
 
-// 池候选行拖拽落点 — 命中即把拖拽候选移到本行位置（priority 全量重建，CAS 回写）
+// 池候选行拖拽落点 — 命中即把拖拽候选移到本行位置（priority 全量重建，CAS 回写）。
+// Task 9：drop 身份是 "pool|candidate"，仅同池放行 — 禁止跨池误操作
 struct PoolRowDropDelegate: DropDelegate {
     var store: GatewayStore
     let pool: String
     let targetId: String
 
+    /// "pool|id" → (pool, id)；旧格式（纯 id）解析失败返回 nil
+    private func parse(_ s: String) -> (String, String)? {
+        let parts = s.split(separator: "|", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return nil }
+        return (parts[0], parts[1])
+    }
     func validateDrop(info: DropInfo) -> Bool {
-        guard let dragging = store.poolDragging else { return false }
-        return dragging != targetId
+        guard let dragging = store.poolDragging,
+              let (srcPool, srcId) = parse(dragging),
+              srcPool == pool, srcId != targetId else { return false }
+        return true
     }
     func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+    func dropExited(info: DropInfo) {}
     func performDrop(info: DropInfo) -> Bool {
-        guard let dragged = store.poolDragging else { return false }
-        store.poolDragging = nil
+        defer { store.poolDragging = nil }   // 取消/完成都清理高亮
+        guard let dragging = store.poolDragging,
+              let (srcPool, dragged) = parse(dragging),
+              srcPool == pool else { return false }   // 跨池拒绝，不动其他池配置
         guard dragged != targetId else { return true }
         store.moveCandidate(pool: pool, dragged: dragged, target: targetId)
+        return true
+    }
+}
+
+/// 拖拽取消落点：候选链容器空白处接住放下的拖拽 — 清理高亮、不产生任何改动
+struct PoolCancelDropDelegate: DropDelegate {
+    var store: GatewayStore
+    func validateDrop(info: DropInfo) -> Bool { store.poolDragging != nil }
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .cancel) }
+    func performDrop(info: DropInfo) -> Bool {
+        store.poolDragging = nil
         return true
     }
 }
@@ -2305,7 +2535,10 @@ struct MainWindowView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Sidebar(tab: Binding(get: { store.tab }, set: { store.tab = $0 }))
+            Sidebar(tab: Binding(get: { store.tab }, set: {
+                store.tab = $0
+                store.cancelPoolDrag()   // 离开池页清拖拽高亮，不残留
+            }))
             Rectangle().fill(Color.lineC).frame(width: 1)
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2703,7 +2936,7 @@ struct CloudModelEditorSheet: View {
             HStack {
                 Text("模型属性 — \(spec.id)").font(.system(size: 14, weight: .semibold)).foregroundColor(.ink)
                 Spacer()
-                SmallBtn("关闭") { store.closeCloudModelEditor() }
+                SmallBtn("关闭") { requestClose() }
             }
             HStack(spacing: 6) {
                 Chip("openai", color: Color.thLlm)
@@ -2713,9 +2946,11 @@ struct CloudModelEditorSheet: View {
             }
             VStack(alignment: .leading, spacing: 8) {
                 editorToggle("视觉（VL）— VL 请求调度排最前",
-                             Binding(get: { store.editorVision }, set: { store.editorVision = $0 }))
+                             Binding(get: { store.editorVision },
+                                     set: { store.editorVision = $0; store.editorDirty = true }))
                 editorToggle("工具调用 — agent/函数调用基础能力",
-                             Binding(get: { store.editorTools }, set: { store.editorTools = $0 }))
+                             Binding(get: { store.editorTools },
+                                     set: { store.editorTools = $0; store.editorDirty = true }))
             }
             Divider()
             VStack(alignment: .leading, spacing: 8) {
@@ -2737,8 +2972,10 @@ struct CloudModelEditorSheet: View {
             HStack {
                 if store.editorConfirmDelete {
                     SmallBtn("确认移除", primary: true) {
-                        store.cloudModelAction(provider, action: "remove", model: spec.id)
-                        store.closeCloudModelEditor()
+                        // Task 9：移除成功才关闭浮窗（失败可见错误，浮窗保留）
+                        store.cloudModelAction(provider, action: "remove", model: spec.id) { ok in
+                            if ok { store.closeCloudModelEditor() }
+                        }
                     }
                     SmallBtn("取消") { store.editorConfirmDelete = false }
                     Text("发现模型移除后不再重新出现").font(.system(size: 10.5)).foregroundColor(.faint)
@@ -2746,11 +2983,24 @@ struct CloudModelEditorSheet: View {
                     SmallBtn("移除此模型") { store.editorConfirmDelete = true }
                 }
                 Spacer()
-                SmallBtn("保存", primary: true) { store.saveCloudModelEditor() }
+                SmallBtn(store.editorSaving ? "保存中…" : "保存", primary: true) {
+                    store.saveCloudModelEditor()
+                }
+                .disabled(store.editorSaving)
             }
         }
         .padding(18)
         .frame(width: 440)
+        // Esc：有未保存修改先确认丢弃，不静默关闭（Task 9）
+        .onExitCommand { requestClose() }
+    }
+
+    /// 关闭请求：无修改直接关；有未保存修改 → 确认丢弃
+    private func requestClose() {
+        guard store.editorDirty else { store.closeCloudModelEditor(); return }
+        store.confirm("浮窗内有未保存的修改 — 丢弃并关闭？") {
+            store.closeCloudModelEditor()
+        }
     }
 
     private func editorToggle(_ title: String, _ isOn: Binding<Bool>) -> some View {
@@ -2760,7 +3010,17 @@ struct CloudModelEditorSheet: View {
     private func editorField(_ title: String, _ text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.system(size: 10.5)).foregroundColor(.dim)
-            TextField("", text: text).textFieldStyle(.roundedBorder).font(.system(size: 12))
+            TextField("", text: Binding(
+                get: { text.wrappedValue },
+                set: {
+                    text.wrappedValue = $0
+                    store.editorFieldErrors[title] = nil   // 修改即清错，报错不过夜
+                    store.editorDirty = true
+                }))
+                .textFieldStyle(.roundedBorder).font(.system(size: 12))
+            if let err = store.editorFieldErrors[title] {
+                Text(err).font(.system(size: 10)).foregroundColor(.warnC)
+            }
         }
     }
 }
@@ -2791,10 +3051,14 @@ struct CloudAddCard: View {
                                 text: Binding(get: { store.cloudFormKey }, set: { store.cloudFormKey = $0 }))
                         .textFieldStyle(.roundedBorder).font(.system(size: 12))
                     SmallBtn("添加", primary: true) {
-                        store.addCloudProvider()
-                        store.cloudFormName = ""; store.cloudFormBase = ""
-                        store.cloudFormKey = ""; store.cloudFormAnth = ""
+                        // Task 9：成功才更新（清空表单）；失败保留草稿可改后重试
+                        store.addCloudProvider { ok in
+                            guard ok else { return }
+                            store.cloudFormName = ""; store.cloudFormBase = ""
+                            store.cloudFormKey = ""; store.cloudFormAnth = ""
+                        }
                     }
+                    .disabled(store.cloudBusy)
                 }
             }.padding(12)
         }
@@ -2812,23 +3076,33 @@ struct SettingsView: View {
     }()
 
     @ViewBuilder private func keyRow(_ k: SecurityKeyInfo) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: k.revoked ? "key.slash" : "key")
-                .font(.system(size: 10)).foregroundColor(k.revoked ? .faint : .okC)
-            Text(k.name).font(.system(size: 12)).foregroundColor(.ink)
-            if k.revoked { Chip("已撤销", color: Color.faint) }
-            if let ts = k.createdAt {
-                Text(Self.keyDate.string(from: Date(timeIntervalSince1970: ts)))
-                    .font(.system(size: 10.5)).foregroundColor(.faint)
-            }
-            Spacer()
-            if !k.revoked {
-                if store.securityKeyRevokeConfirm == k.id {
-                    SmallBtn("确认撤销", primary: true) { store.revokeSecurityKey(k.id) }
-                    SmallBtn("取消") { store.securityKeyRevokeConfirm = nil }
-                } else {
-                    SmallBtn("撤销") { store.securityKeyRevokeConfirm = k.id }
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 8) {
+                Image(systemName: k.revoked ? "key.slash" : "key")
+                    .font(.system(size: 10)).foregroundColor(k.revoked ? .faint : .okC)
+                Text(k.name).font(.system(size: 12)).foregroundColor(.ink)
+                if k.revoked { Chip("已撤销", color: Color.faint) }
+                if let ts = k.createdAt {
+                    Text(Self.keyDate.string(from: Date(timeIntervalSince1970: ts)))
+                        .font(.system(size: 10.5)).foregroundColor(.faint)
                 }
+                Spacer()
+                if !k.revoked {
+                    if store.securityKeyRevokeConfirm == k.id {
+                        SmallBtn("确认撤销", primary: true) { store.revokeSecurityKey(k.id) }
+                        SmallBtn("取消") { store.securityKeyRevokeConfirm = nil }
+                    } else {
+                        SmallBtn("撤销") { store.securityKeyRevokeConfirm = k.id }
+                    }
+                }
+            }
+            // 最后一把有效密钥撤销 = 明确风险提示（Task 9 — 鉴权仍开启，全部客户端将 401）
+            if store.securityKeyRevokeConfirm == k.id, !k.revoked,
+               store.securityEnforced,
+               store.securityKeys.filter({ !$0.revoked }).count == 1 {
+                Text("⚠️ 这是最后一把有效密钥 — 撤销后所有客户端将无法调用（鉴权仍开启，需在终端重建密钥）。确认撤销？")
+                    .font(.system(size: 10.5)).foregroundColor(.warnC)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.vertical, 2)
@@ -2848,6 +3122,12 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                // 操作反馈在当前设置卡可见（Task 9 — 不只挂在别的页签）
+                if !store.actionMessage.isEmpty {
+                    Text(store.actionMessage).font(.system(size: 12))
+                        .padding(8).frame(maxWidth: .infinity)
+                        .background(Color.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+                }
                 // 系统信息（App 直查，无网关依赖）
                 Card {
                     VStack(alignment: .leading, spacing: 6) {
@@ -2917,8 +3197,18 @@ struct SettingsView: View {
                             .padding(.vertical, 4)
                         }
                         HStack {
-                            SmallBtn("＋ 新建密钥", primary: true) { store.createSecurityKey() }
-                                .disabled(store.securityBusy)
+                            SmallBtn("＋ 新建密钥", primary: true) {
+                                // Task 9：未保存明文不被第二次新建覆盖 — 有未保存
+                                // 明文时先确认（密钥本身仍有效，只是不再显示）
+                                if store.oneTimeKey != nil {
+                                    store.confirm("上一把新密钥的明文可能尚未保存，继续新建将不再显示它（该密钥仍有效）。继续新建？") {
+                                        store.createSecurityKey()
+                                    }
+                                } else {
+                                    store.createSecurityKey()
+                                }
+                            }
+                            .disabled(store.securityBusy)
                             Text("客户端调用示例：Authorization: Bearer sk-iff-…")
                                 .font(.system(size: 10.5)).foregroundColor(.faint)
                             Spacer()
