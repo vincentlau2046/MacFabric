@@ -78,6 +78,45 @@ class PackManager:
             write_model_config=self._write_model_config,
             reload_gateway=self._reload_gateway)
         reconcile_on_boot(self.store, self.root)
+        self._uninstaller = None    # 惰性：attach_uninstaller 注入网关侧回调
+        self._disabled_models: set[str] = set()
+
+    def attach_uninstaller(self, registry, disable_route_fn, stop_pack_fn,
+                           is_alive_fn, pgid_fn=None, reload_fn=None) -> None:
+        """网关侧回调注入（Task 12 集成时由 pm 侧装配）。
+
+        registry 需 iter_candidates/purge_candidates（PoolRegistry 现有契约）。
+        """
+        from inferfabric.packs.uninstaller import PackUninstaller
+        self._uninstaller = PackUninstaller(
+            root=self.root, store=self.store, models_d=self.models_d,
+            manifest_for=self._manifest_for, registry=registry,
+            disable_route_fn=lambda name: (self._disabled_models.add(name),
+                                           disable_route_fn(name))[-1],
+            stop_pack_fn=stop_pack_fn, is_alive_fn=is_alive_fn,
+            pgid_fn=pgid_fn, reload_fn=reload_fn or self._reload)
+
+    def _manifest_for(self, pack_id: str):
+        entry = self.catalog.find(pack_id)
+        return entry.manifest if entry else None
+
+    def preview_uninstall(self, pack_id: str) -> tuple[int, dict]:
+        if self._uninstaller is None or self._manifest_for(pack_id) is None:
+            return 404, {"error": f"unknown pack {pack_id!r}"}
+        return 200, self._uninstaller.preview_uninstall(pack_id)
+
+    def uninstall(self, pack_id: str, confirmed: bool = False) -> tuple[int, dict]:
+        if self._uninstaller is None or self._manifest_for(pack_id) is None:
+            return 404, {"error": f"unknown pack {pack_id!r}"}
+        code, payload = self._uninstaller.uninstall(pack_id, confirmed=confirmed)
+        if code == 200:
+            self._disabled_models.discard(
+                self._manifest_for(pack_id).model_id)
+        return code, payload
+
+    def is_model_disabled(self, model_name: str) -> bool:
+        """包卸载中/已完成的路由禁用查询 — 新请求 503 的判定依据。"""
+        return model_name in self._disabled_models
 
     # ── 钩子 ──
 

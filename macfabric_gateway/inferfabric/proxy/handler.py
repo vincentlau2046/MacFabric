@@ -283,6 +283,7 @@ _GET_ROUTES = {
     "/admin/packs/catalog":    _admin(lambda h, pm: h._handle_pack_catalog(pm)),
     "/admin/packs/status":     _admin(lambda h, pm: h._handle_pack_status(pm)),
     "/admin/packs/policy":     _admin(lambda h, pm: h._handle_pack_policy_get(pm)),
+    "/admin/packs/uninstall-preview": _admin(lambda h, pm: h._handle_pack_uninstall_preview(pm)),
     "/ocr":                     _admin(lambda h, pm: h._handle_ocr(pm)),
     "/v1/models":               lambda h, pm: h._handle_v1_models(pm),
     "/system":                  lambda h, pm: h._send_json(h._system_info()),
@@ -1685,8 +1686,27 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         code, payload = pack_handlers.get_pack_manager().policy_put(data or {})
         self._send_json(payload, code)
 
+    # ─── MACFABRIC: 能力包卸载（Task 10） ─────────────────────────────
+    def _handle_pack_uninstall_preview(self, pm):
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        pack_id = (qs.get("pack_id") or [""])[0]
+        code, payload = pack_handlers.get_pack_manager().preview_uninstall(pack_id)
+        self._send_json(payload, code)
+
     # ─── MACFABRIC F2: 能力包卸载 ─────────────────────────────────
     def _handle_pack_uninstall(self, pm):
+        """卸载入口分流：body 含 ``pack_id`` → 能力包状态机（Task 10）；
+        否则旧流程（用户模型/发现产物清理，原样保留）。"""
+        data = self._read_body()
+        if data and data.get("pack_id"):
+            code, payload = pack_handlers.get_pack_manager().uninstall(
+                str(data["pack_id"]), bool(data.get("confirmed")))
+            self._send_json(payload, code)
+            return
+        self._handle_pack_uninstall_legacy(pm)
+
+    def _handle_pack_uninstall_legacy(self, pm):
         """卸载能力包 — 端到端「容器化」清理（MacFabric 与上游的差异点）：
 
         停服务 → 删 models.d/<name>.yaml → 热重载
