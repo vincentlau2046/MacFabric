@@ -329,8 +329,14 @@ final class GatewayStore: ObservableObject {
 
     /// F1: 候选操作统一入口 — 每次现取 raw（旧版缓存导致网关重启后 ↑↓ 静默失效）。
     /// mutate(raw) 在后台线程改 priorities/candidates，POST CAS 回写。
+    /// 409（连点/竞态）自动以新 revision 重放一次同一语义操作，不丢点击。
     func mutatePools(_ mutate: @escaping (inout [String: Any]) -> Void,
                      okMsg: String, failPrefix: String) {
+        postPoolsMutation(mutate, okMsg: okMsg, failPrefix: failPrefix, allowRetry: true)
+    }
+
+    private func postPoolsMutation(_ mutate: @escaping (inout [String: Any]) -> Void,
+                                   okMsg: String, failPrefix: String, allowRetry: Bool) {
         guard let url = URL(string: "\(GW_BASE)/admin/model-pools") else { return }
         URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
             guard let self, let data,
@@ -350,6 +356,11 @@ final class GatewayStore: ObservableObject {
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 let body = data2.flatMap { String(data: $0, encoding: .utf8) } ?? ""
                 DispatchQueue.main.async {
+                    if code == 409 && allowRetry {
+                        // revision 过期（连点/与轮询竞态）— 取新基点重放同一语义，不报错不丢点击
+                        self?.postPoolsMutation(mutate, okMsg: okMsg, failPrefix: failPrefix, allowRetry: false)
+                        return
+                    }
                     self?.actionMessage = (200..<300).contains(code)
                         ? okMsg : "❌ \(failPrefix)(\(code)): \(body.prefix(100))"
                     self?.fetchPools()
@@ -358,11 +369,30 @@ final class GatewayStore: ObservableObject {
         }.resume()
     }
 
+    /// 乐观排序：本地 pools 立即重排（UI 零延迟），CAS 回写在后台；
+    /// 失败时 fetchPools 以服务端真相自动回滚显示。
+    private func applyLocalPoolOrder(_ pool: String, reorder: (inout [PoolCandidate]) -> Void) {
+        guard var pl = pools, var cfg = pl.pools, var cands = cfg[pool]?.candidates, !cands.isEmpty else { return }
+        cands.sort { $0.priority < $1.priority }
+        reorder(&cands)
+        for i in cands.indices { cands[i].priority = i * 10 }
+        cfg[pool]?.candidates = cands
+        pl.pools = cfg
+        pools = pl
+    }
+
     /// F1: 候选优先级上移/下移 — 交换位置后**全量重建 priority = index*10**。
     /// （旧实现交换相邻 priority 值：两候选同 priority 时交换后数值不变，
     /// 是 UI 零反馈的静默 no-op — 用户实测报障；重复 priority 本身也是服务端
     /// 校验拒绝项，重建顺带治好存量脏数据）
     func reorderCandidate(pool: String, candidateId: String, up: Bool) {
+        // 乐观：本地立即换位
+        applyLocalPoolOrder(pool) { cands in
+            guard let idx = cands.firstIndex(where: { $0.id == candidateId }) else { return }
+            let swap = up ? idx - 1 : idx + 1
+            guard cands.indices.contains(swap) else { return }
+            cands.swapAt(idx, swap)
+        }
         mutatePools({ raw in
             guard var poolsCfg = raw["pools"] as? [String: Any],
                   var poolCfg = poolsCfg[pool] as? [String: Any],
@@ -385,6 +415,13 @@ final class GatewayStore: ObservableObject {
     /// 拖拽落点：dragged 移动到 target 位置，全量重建 priority = index*10（CAS 回写）
     func moveCandidate(pool: String, dragged: String, target: String) {
         guard dragged != target else { return }
+        // 乐观：本地立即移位
+        applyLocalPoolOrder(pool) { cands in
+            guard let from = cands.firstIndex(where: { $0.id == dragged }),
+                  let to = cands.firstIndex(where: { $0.id == target }) else { return }
+            let item = cands.remove(at: from)
+            cands.insert(item, at: to)
+        }
         mutatePools({ raw in
             guard var poolsCfg = raw["pools"] as? [String: Any],
                   var poolCfg = poolsCfg[pool] as? [String: Any],
@@ -1044,7 +1081,7 @@ struct SideItem: View {
 // ─── 总览页（织物条 + 统计瓦片 + 能力卡格）──────────────────────
 
 struct OverviewView: View {
-    var store: GatewayStore
+    @ObservedObject var store: GatewayStore
 
     var body: some View {
         ScrollView {
@@ -1155,7 +1192,7 @@ struct CapabilityCard: View {
 // ─── 模型服务页（Hub：接入地址条 + 每模型接入卡）────────────────
 
 struct HubView: View {
-    var store: GatewayStore
+    @ObservedObject var store: GatewayStore
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
@@ -1295,7 +1332,7 @@ struct InferenceView: View {
 
 /// 设计稿 .mrow：一行一模型 — 状态、装载模式、内存账、三个动作
 struct ModelRowView: View {
-    var store: GatewayStore
+    @ObservedObject var store: GatewayStore
     let m: ModelItem
     var sleeping: Bool
 
@@ -1410,7 +1447,7 @@ let poolUseLabels: [String: String] = [
 ]
 
 struct PoolsView: View {
-    var store: GatewayStore
+    @ObservedObject var store: GatewayStore
 
     var body: some View {
         ScrollView {
@@ -1446,7 +1483,7 @@ struct PoolsView: View {
 }
 
 struct PoolCard: View {
-    var store: GatewayStore
+    @ObservedObject var store: GatewayStore
     let name: String
     let def: PoolDef
 
@@ -1662,7 +1699,7 @@ struct PoolRowDropDelegate: DropDelegate {
 }
 
 struct MonitorView: View {
-    var store: GatewayStore
+    @ObservedObject var store: GatewayStore
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -1817,7 +1854,7 @@ struct MainWindowView: View {
 
 /// 能力包：产品主入口 —— 装的是能力不是模型文件（v1 静态目录 + 安装态对齐 models.d）
 struct PacksView: View {
-    var store: GatewayStore
+    @ObservedObject var store: GatewayStore
 
     // (线色 model_type, 能力名, 描述, 大小GB nil=内置, 对应模型名)
     let packs: [(String, String, String, String?, String?)] = [
@@ -1854,7 +1891,7 @@ struct PacksView: View {
 
 /// F4: 本机模型发现 — 扫描 ~/models 与 MacFabric/models（含根级散置 GGUF）
 struct LocalDiscoverCard: View {
-    var store: GatewayStore
+    @ObservedObject var store: GatewayStore
 
     var body: some View {
         Card {
@@ -1893,7 +1930,7 @@ struct LocalDiscoverCard: View {
 }
 
 struct PackCard: View {
-    var store: GatewayStore
+    @ObservedObject var store: GatewayStore
     let pack: (String, String, String, String?, String?)
 
     // (下载URL, 文件名, model_type 线色标签, engine?) — engine 非空 = 先项目内建引擎再下模型
@@ -1989,7 +2026,7 @@ struct PackCard: View {
 
 /// 云端接入：真数据 CRUD（GET/POST/DELETE /admin/cloud/providers + provider-models 五动作）
 struct CloudView: View {
-    var store: GatewayStore
+    @ObservedObject var store: GatewayStore
 
     var body: some View {
         ScrollView {
@@ -2020,7 +2057,7 @@ struct CloudView: View {
 }
 
 struct CloudProviderCard: View {
-    var store: GatewayStore
+    @ObservedObject var store: GatewayStore
     let pv: CloudProvider
     var expanded: Bool { store.cloudExpanded == pv.name }
 
@@ -2237,7 +2274,7 @@ struct CloudModelEditorSheet: View {
 }
 
 struct CloudAddCard: View {
-    var store: GatewayStore
+    @ObservedObject var store: GatewayStore
 
     var body: some View {
         Card {
@@ -2274,7 +2311,7 @@ struct CloudAddCard: View {
 
 /// 设置：真实系统数据（RAM/账本预算/版本/目录）；开关项标注接入批次，不假装可用
 struct SettingsView: View {
-    var store: GatewayStore
+    @ObservedObject var store: GatewayStore
 
     private var ramGB: Int {
         Int(ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024))
