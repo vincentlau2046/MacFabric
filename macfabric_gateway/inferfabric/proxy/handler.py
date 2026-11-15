@@ -12,6 +12,7 @@ import errno
 import re
 import sys
 import os
+import sqlite3
 import signal
 import socket
 import logging
@@ -30,7 +31,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import dataclasses
 
 from inferfabric.state import GPUMode
-from inferfabric.config import DEFAULT_LOG_DIR
+from inferfabric.config import DEFAULT_LOG_DIR, IFF_DATA_DIR
+from inferfabric.security.auth_facade import SecurityAuth, build_auth
 from inferfabric.agent_registry import request_protocol
 from inferfabric.agent_stats import AGENT_GRAN, aggregate_agent_stats
 from inferfabric.metrics_aggregator import cost_of_row
@@ -280,6 +282,7 @@ _GET_ROUTES = {
     "/admin/model-pools/events":    _admin(lambda h, pm: mp_admin.handle_get_model_pools_events(h, pm)),
     "/api/openapi.json":        _serve_api_spec,
     "/admin/keys":              _admin(lambda h, pm: key_admin.handle(h, pm, "list")),
+    "/admin/security/status":   _admin(lambda h, pm: h._handle_security_status(pm)),
 }
 
 _POST_ROUTES = {
@@ -288,6 +291,8 @@ _POST_ROUTES = {
     "/admin/keys":              _admin(lambda h, pm: key_admin.handle(h, pm, "create")),
     "/admin/keys/revoke":       _admin(lambda h, pm: key_admin.handle(h, pm, "revoke")),
     "/admin/keys/policy":       _admin(lambda h, pm: key_admin.handle(h, pm, "policy")),
+    "/admin/security/status":   _admin(lambda h, pm: h._handle_security_status(pm)),
+    "/admin/security/enable":   _admin(lambda h, pm: h._handle_security_enable(pm)),
     "/v1/chat/completions":     lambda h, pm: h._handle_chat(pm),
     "/v1/completions":          lambda h, pm: h._handle_chat(pm),
     "/v1/messages":             lambda h, pm: h._handle_messages(pm),
@@ -2528,6 +2533,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         {"id": mid, "manual": not bool(spec),
                          "supports_vision": (spec or {}).get("supports_vision"),
                          "supports_tools": (spec or {}).get("supports_tools"),
+                         # 属性编辑浮窗回填（update_model_spec 扩展键）
+                         "context_window": (spec or {}).get("context_window"),
+                         "max_output_tokens": (spec or {}).get("max_output_tokens"),
+                         "price_input": (spec or {}).get("price_input"),
+                         "price_output": (spec or {}).get("price_output"),
                          # 与注册表 anthropic_available 同源（_rebuild_provider_registry
                          # 即以 bool(cfg.anthropic_base) 逐模型置位）— 供前端 ANT 原生 chip
                          "anthropic": bool(cfg.anthropic_base)}
@@ -2539,7 +2549,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     # 未入注册表的候选不在 map（不给未路由候选渲染打标入口）
                     "routable_caps": {
                         k: {"supports_vision": m.supports_vision,
-                            "supports_tools": m.supports_tools}
+                            "supports_tools": m.supports_tools,
+                            "context_window": m.context_window,
+                            "max_output_tokens": m.max_output_tokens,
+                            "price_input": m.price_input or 0,
+                            "price_output": m.price_output or 0}
                         for k, m in all_models.items()
                         if "/" not in k and m.provider == name
                     },
@@ -2726,8 +2740,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({"error": f"Invalid action '{action}' — expected "
                                       f"{'/'.join(sorted(valid_actions))}"}, 400)
             return
-        # 能力标签：只收 bool；tag 必须至少带一个（否则为空操作）
-        caps = {}
+        # 能力标签：bool；属性编辑：context_window/max_output_tokens 取 int、
+        # price_input/price_output 取数值（None/空 = 清除属性，update_model_spec 语义）。
+        # tag 必须至少带一个可接受键（否则为空操作）。
+        caps: dict = {}
         for key in ("supports_vision", "supports_tools"):
             if key in data:
                 val = data[key]
@@ -2735,6 +2751,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json({"error": f"'{key}' must be a boolean"}, 400)
                     return
                 caps[key] = val
+        for key in ("context_window", "max_output_tokens"):
+            if key in data:
+                val = data[key]
+                if val is None or val == "":
+                    caps[key] = None
+                elif isinstance(val, bool) or not isinstance(val, int):
+                    self._send_json({"error": f"'{key}' must be an integer"}, 400)
+                    return
+                else:
+                    caps[key] = val
+        for key in ("price_input", "price_output"):
+            if key in data:
+                val = data[key]
+                if val is None or val == "":
+                    caps[key] = None
+                elif isinstance(val, bool) or not isinstance(val, (int, float)):
+                    self._send_json({"error": f"'{key}' must be a number"}, 400)
+                    return
+                else:
+                    caps[key] = float(val)
         if action == "tag" and not caps:
             self._send_json({"error": "tag requires supports_vision and/or "
                                       "supports_tools"}, 400)
@@ -2788,6 +2824,78 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         self._send_json({"status": "ok", "provider": provider, "model": model,
                          "action": action, "routable_count": count})
+
+    def _handle_security_status(self, pm):
+        """GET /admin/security/status — App 设置页鉴权开关状态。"""
+        auth = pm.auth
+        if isinstance(auth, SecurityAuth):
+            policy = auth.store.get_policy()
+            enforced = policy == "all" or auth.legacy.enabled
+            self._send_json({"active": True, "policy": policy, "enforced": enforced,
+                             "key_count": len(auth.store.list_keys())})
+        else:
+            self._send_json({"active": False, "policy": None, "enforced": auth.enabled,
+                             "key_count": 0})
+
+    def _handle_security_enable(self, pm):
+        """POST /admin/security/enable {enforce: bool, key_name?: str}
+
+        App 设置页一键鉴权：
+        - enforce=true：security.db/marker 缺失时按启动同源路径初始化并热替换
+          pm.auth / pm.security_admin（与 proxy_manager 构造一致）；policy → 'all'
+          （全部客户端请求需带 key）；无任何 key 时自动生成首个（明文 token
+          仅本次响应返回一次，库内只存摘要）。
+        - enforce=false：policy → 'off'（迁移宽限语义，不删除已建 key）。
+        """
+        data = self._read_body()
+        if data is None:
+            return
+        enforce = bool(data.get("enforce"))
+        key_name = (data.get("key_name") or "macfabric-app").strip()[:64]
+        try:
+            if enforce:
+                if not isinstance(pm.auth, SecurityAuth):
+                    marker = IFF_DATA_DIR / "security.enabled"
+                    if not marker.exists():
+                        fd = os.open(marker, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+                        os.close(fd)
+                    # build_auth 内部 KeyStore(path) 不带 provision — 首次启用时
+                    # DB 尚不存在会直接 [Errno 2]（2026-11-15 实测）；与启动同源：
+                    # DB 缺失先按 provision=True 建库（iff keys init 语义）。
+                    db_path = IFF_DATA_DIR / "security.db"
+                    if not (db_path.exists() or db_path.is_symlink()):
+                        from inferfabric.security.key_store import KeyStore
+                        KeyStore(db_path, provision=True)
+                    pm.auth = build_auth(IFF_DATA_DIR)
+                    if not isinstance(pm.auth, SecurityAuth):
+                        self._send_json({"error": "security init failed"}, 500)
+                        return
+                    from inferfabric.security.admin import SecurityAdmin
+                    configured = os.environ.get("IFF_CONSOLE_ORIGINS", "")
+                    origins = ([o.strip() for o in configured.split(",") if o.strip()]
+                               if configured else
+                               [f"http://127.0.0.1:{PROXY_PORT}",
+                                f"http://localhost:{PROXY_PORT}"])
+                    pm.security_admin = SecurityAdmin(pm.auth.store, origins=origins)
+                    log.info("Security store initialized from app settings toggle")
+                pm.auth.store.set_policy("all")
+                token = None
+                if not pm.auth.store.list_keys():
+                    entry, token = pm.auth.store.create_key(key_name, None, None)
+                    log.info("API key created from app settings: name=%s", key_name)
+                self._send_json({"status": "ok", "policy": "all", "enforced": True,
+                                 "key": token,
+                                 "note": None if token else "已有密钥 — 在 /admin/keys 列表管理（明文不再回显）"})
+            else:
+                if isinstance(pm.auth, SecurityAuth):
+                    pm.auth.store.set_policy("off")
+                    self._send_json({"status": "ok", "policy": "off", "enforced": False})
+                else:
+                    self._send_json({"status": "ok", "policy": None, "enforced": False,
+                                     "note": "鉴权从未启用"})
+        except (OSError, ValueError, sqlite3.Error) as e:
+            log.error("security enable failed: %s", e)
+            self._send_json({"error": f"security toggle failed: {e}"}, 500)
 
     def _handle_cloud_presets(self, pm):
         """GET /admin/cloud/presets — 返回预设厂商列表。"""

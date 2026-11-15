@@ -136,6 +136,10 @@ struct CloudModelSpec: Codable {
     var manual: Bool?
     var supports_vision: Bool?
     var supports_tools: Bool?
+    var context_window: Int?      // 理论最大上下文（属性浮窗编辑）
+    var max_output_tokens: Int?   // 理论最大输出
+    var price_input: Double?      // ¥/1M tokens
+    var price_output: Double?
     var anthropic: Bool?          // 注册表 anthropic_available（非 spec 原生字段，运行时合成）
 }
 struct CloudProvider: Codable {
@@ -267,6 +271,11 @@ final class GatewayStore: ObservableObject {
     @Published var metrics: MetricsPayload?
     // 能力包下载进度（键 = 模型名）
     @Published var packDownloads: [String: PackDownloadState] = [:]
+    // ── API Key 鉴权（设置页接线 — /admin/security/*）──
+    @Published var securityEnforced = false
+    @Published var securityKeyCount = 0
+    @Published var securityBusy = false
+    @Published var oneTimeKey: String? = nil   // 首次启用返回的明文 key（仅此一次，库内只存摘要）
     var onMemoryInsufficient: ((_ name: String, _ reason: String) -> Void)?
 
     private var base: URL { URL(string: GW_BASE)! }
@@ -277,10 +286,10 @@ final class GatewayStore: ObservableObject {
     var windowVisible = true
 
     init() {
-        refresh(); fetchModels(); fetchCurve(); fetchPools(); fetchCloud(); scanLocalModels(); fetchMetrics()
+        refresh(); fetchModels(); fetchCurve(); fetchPools(); fetchCloud(); scanLocalModels(); fetchMetrics(); fetchSecurityStatus()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             guard let self, self.windowVisible else { return }
-            self.refresh(); self.fetchModels(); self.fetchDownloadStatus()
+            self.refresh(); self.fetchModels(); self.fetchDownloadStatus(); self.fetchSecurityStatus()
             self.fetchPools()   // 池可能被其它页面/服务端联动改变（如卸载触发的候选清除）
         }
         curveTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -349,25 +358,47 @@ final class GatewayStore: ObservableObject {
         }.resume()
     }
 
-    /// F1: 候选优先级上移/下移（换相邻 priority）
+    /// F1: 候选优先级上移/下移 — 交换位置后**全量重建 priority = index*10**。
+    /// （旧实现交换相邻 priority 值：两候选同 priority 时交换后数值不变，
+    /// 是 UI 零反馈的静默 no-op — 用户实测报障；重复 priority 本身也是服务端
+    /// 校验拒绝项，重建顺带治好存量脏数据）
     func reorderCandidate(pool: String, candidateId: String, up: Bool) {
         mutatePools({ raw in
             guard var poolsCfg = raw["pools"] as? [String: Any],
-                  var cands = (poolsCfg[pool] as? [String: Any])?["candidates"] as? [[String: Any]] else { return }
+                  var poolCfg = poolsCfg[pool] as? [String: Any],
+                  var cands = poolCfg["candidates"] as? [[String: Any]] else { return }
             cands.sort { ($0["priority"] as? Int ?? 0) < ($1["priority"] as? Int ?? 0) }
             guard let idx = cands.firstIndex(where: { $0["id"] as? String == candidateId }) else { return }
             let swap = up ? idx - 1 : idx + 1
             guard cands.indices.contains(swap) else { return }
-            let a = cands[idx]["priority"] as? Int ?? 0
-            let b = cands[swap]["priority"] as? Int ?? 0
-            cands[idx]["priority"] = b
-            cands[swap]["priority"] = a
-            if var poolCfg = poolsCfg[pool] as? [String: Any] {
-                poolCfg["candidates"] = cands
-                poolsCfg[pool] = poolCfg
-            }
+            cands.swapAt(idx, swap)
+            for (i, _) in cands.enumerated() { cands[i]["priority"] = i * 10 }
+            poolCfg["candidates"] = cands
+            poolsCfg[pool] = poolCfg
             raw["pools"] = poolsCfg
         }, okMsg: "✅ 优先级已更新", failPrefix: "排序失败")
+    }
+
+    // ── 池候选拖拽排序（onDrag/onDrop；拖拽中候选 id）──
+    @Published var poolDragging: String? = nil
+
+    /// 拖拽落点：dragged 移动到 target 位置，全量重建 priority = index*10（CAS 回写）
+    func moveCandidate(pool: String, dragged: String, target: String) {
+        guard dragged != target else { return }
+        mutatePools({ raw in
+            guard var poolsCfg = raw["pools"] as? [String: Any],
+                  var poolCfg = poolsCfg[pool] as? [String: Any],
+                  var cands = poolCfg["candidates"] as? [[String: Any]] else { return }
+            cands.sort { ($0["priority"] as? Int ?? 0) < ($1["priority"] as? Int ?? 0) }
+            guard let from = cands.firstIndex(where: { $0["id"] as? String == dragged }),
+                  let to = cands.firstIndex(where: { $0["id"] as? String == target }) else { return }
+            let item = cands.remove(at: from)
+            cands.insert(item, at: to)
+            for (i, _) in cands.enumerated() { cands[i]["priority"] = i * 10 }
+            poolCfg["candidates"] = cands
+            poolsCfg[pool] = poolCfg
+            raw["pools"] = poolsCfg
+        }, okMsg: "✅ 顺序已更新", failPrefix: "拖拽排序失败")
     }
 
     /// 池候选换模型（target 替换；local → model_name，cloud → provider+model_id。
@@ -491,6 +522,49 @@ final class GatewayStore: ObservableObject {
         }.resume()
     }
 
+    /// 设置页：鉴权开关状态（30s 轮询 + 操作后即时刷新）
+    func fetchSecurityStatus() {
+        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/security/status")) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            DispatchQueue.main.async {
+                self.securityEnforced = obj["enforced"] as? Bool ?? false
+                self.securityKeyCount = obj["key_count"] as? Int ?? 0
+            }
+        }.resume()
+    }
+
+    /// 设置页：一键启用/关闭鉴权。启用时网关返回的首把明文 key 存 oneTimeKey
+    /// （库内只存摘要 — 不弹这次就再也拿不到明文）。
+    func toggleSecurity(_ enable: Bool) {
+        guard !securityBusy else { actionMessage = "⚠️ 上一操作进行中，请稍候"; return }
+        securityBusy = true
+        var req = URLRequest(url: base.appendingPathComponent("/admin/security/enable"), timeoutInterval: 30)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["enforce": enable])
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let raw = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.securityBusy = false
+                if (200..<300).contains(code) {
+                    self.actionMessage = enable ? "✅ 鉴权已启用 — 客户端请求需携带 API Key"
+                                                : "✅ 鉴权已关闭（迁移宽限，密钥保留）"
+                    if enable,
+                       let obj = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
+                       let key = obj["key"] as? String, !key.isEmpty {
+                        self.oneTimeKey = key
+                    }
+                } else {
+                    self.actionMessage = "❌ 鉴权设置失败(\(code)): \(raw.prefix(100))"
+                }
+                self.fetchSecurityStatus()
+            }
+        }.resume()
+    }
+
     /// F3: 添加服务商（name + openai_base + api_key；key 写 secrets.env，YAML 只存 ${REF}）
     func addCloudProvider() {
         let name = cloudFormName.trimmingCharacters(in: .whitespaces)
@@ -521,13 +595,67 @@ final class GatewayStore: ObservableObject {
     }
 
     /// F3: 模型策展 — enable/disable（勾选）/add（手填）/remove/tag（VL 打标）
+    /// extra: 属性浮窗扩展键（context_window/max_output_tokens/price_input/price_output；
+    /// NSNull = 清除属性 — JSON null 直通网关清除语义）
     func cloudModelAction(_ provider: String, action: String, model: String,
-                          vision: Bool? = nil, tools: Bool? = nil) {
+                          vision: Bool? = nil, tools: Bool? = nil,
+                          extra: [String: Any]? = nil) {
         var body: [String: Any] = ["provider": provider, "action": action, "model": model]
         if let v = vision { body["supports_vision"] = v }
         if let t = tools { body["supports_tools"] = t }
+        if let e = extra { for (k, val) in e { body[k] = val } }
         cloudRequest(path: "/admin/cloud/provider-models", method: "POST", body: body,
                      okMsg: "✅ \(model) · \(action) 成功", failPrefix: "\(model) \(action) 失败")
+    }
+
+    // ── 云端模型属性浮窗（点击模型行 → 配置属性/单独删除）──
+    @Published var cloudEditorProvider: String? = nil
+    @Published var cloudEditorSpec: CloudModelSpec? = nil
+    @Published var cloudEditorEnabled: Bool = false
+    // 浮窗草稿 — 表单绑定走 store（CLT 无 SwiftUI 宏插件，视图内 @State 不可用）
+    @Published var editorVision = false
+    @Published var editorTools = false
+    @Published var editorCtx = ""
+    @Published var editorOut = ""
+    @Published var editorPriceIn = ""
+    @Published var editorPriceOut = ""
+    @Published var editorConfirmDelete = false
+
+    func openCloudModelEditor(provider: String, spec: CloudModelSpec, enabled: Bool) {
+        cloudEditorProvider = provider
+        cloudEditorSpec = spec
+        cloudEditorEnabled = enabled
+        editorVision = spec.supports_vision == true
+        editorTools = spec.supports_tools == true
+        editorCtx = spec.context_window.map { String($0) } ?? ""
+        editorOut = spec.max_output_tokens.map { String($0) } ?? ""
+        editorPriceIn = (spec.price_input ?? 0) > 0 ? String(format: "%g", spec.price_input!) : ""
+        editorPriceOut = (spec.price_output ?? 0) > 0 ? String(format: "%g", spec.price_output!) : ""
+        editorConfirmDelete = false
+    }
+
+    func closeCloudModelEditor() {
+        cloudEditorProvider = nil
+        cloudEditorSpec = nil
+        editorConfirmDelete = false
+    }
+
+    /// 浮窗保存 = 一次 tag 请求落全部字段（能力 + 属性；NSNull = 清除）。
+    /// 启用/停用不在此混发 — 云请求防抖下第二个请求会被拒，勾选仍在行内按钮。
+    func saveCloudModelEditor() {
+        guard let provider = cloudEditorProvider, let spec = cloudEditorSpec else { return }
+        var extra: [String: Any] = [:]
+        let ctx = editorCtx.trimmingCharacters(in: .whitespaces)
+        let out = editorOut.trimmingCharacters(in: .whitespaces)
+        let pin = editorPriceIn.trimmingCharacters(in: .whitespaces)
+        let pout = editorPriceOut.trimmingCharacters(in: .whitespaces)
+        if let n = Int(ctx), n > 0 { extra["context_window"] = n } else { extra["context_window"] = NSNull() }
+        if let n = Int(out), n > 0 { extra["max_output_tokens"] = n } else { extra["max_output_tokens"] = NSNull() }
+        if let d = Double(pin), d >= 0 { extra["price_input"] = d } else { extra["price_input"] = NSNull() }
+        if let d = Double(pout), d >= 0 { extra["price_output"] = d } else { extra["price_output"] = NSNull() }
+        cloudModelAction(provider, action: "tag", model: spec.id,
+                         vision: editorVision, tools: editorTools, extra: extra)
+        closeCloudModelEditor()
     }
 
     /// F3: 连通性测试（用已存 key 探测全部 base）
@@ -1303,7 +1431,7 @@ struct PoolsView: View {
                     ForEach(names, id: \.self) { name in
                         PoolCard(store: store, name: name, def: cfg[name]!)
                     }
-                    Text("候选按优先级竖排（数字小者优先）— 路由自上而下逐个尝试；↑↓ 调整优先级即时生效（revision CAS）")
+                    Text("候选按优先级竖排（数字小者优先）— 路由自上而下逐个尝试；拖拽或 ↑↓ 调整顺序即时生效（revision CAS）")
                         .font(.system(size: 11)).foregroundColor(.faint)
                 } else {
                     Card {
@@ -1449,7 +1577,7 @@ struct PoolCard: View {
                                 store.removePoolCandidate(pool: name, candidateId: c.id)
                             }
                         }
-                        // F1: 优先级可调 — ↑↓ 换相邻优先级，PUT CAS 回写
+                        // F1: 优先级可调 — ↑↓/拖拽移动位置，priority 全量重建（CAS 回写）
                         HStack(spacing: 3) {
                             SmallBtn("↑", disabled: idx == 0) {
                                 store.reorderCandidate(pool: name, candidateId: c.id, up: true)
@@ -1460,6 +1588,13 @@ struct PoolCard: View {
                         }
                     }
                     .padding(.vertical, 3)
+                    .opacity(store.poolDragging == c.id ? 0.4 : 1)
+                    .onDrag {
+                        store.poolDragging = c.id
+                        return NSItemProvider(object: c.id as NSString)
+                    }
+                    .onDrop(of: ["public.utf8-plain-text"],
+                            delegate: PoolRowDropDelegate(store: store, pool: name, targetId: c.id))
                 }
                 if candidates.isEmpty {
                     Text("暂无候选 — 点下方「＋ 添加候选」选本机或云端模型")
@@ -1503,6 +1638,26 @@ struct PoolCard: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
         store.actionMessage = "✅ 池配置已复制到剪贴板"
+    }
+}
+
+// 池候选行拖拽落点 — 命中即把拖拽候选移到本行位置（priority 全量重建，CAS 回写）
+struct PoolRowDropDelegate: DropDelegate {
+    var store: GatewayStore
+    let pool: String
+    let targetId: String
+
+    func validateDrop(info: DropInfo) -> Bool {
+        guard let dragging = store.poolDragging else { return false }
+        return dragging != targetId
+    }
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+    func performDrop(info: DropInfo) -> Bool {
+        guard let dragged = store.poolDragging else { return false }
+        store.poolDragging = nil
+        guard dragged != targetId else { return true }
+        store.moveCandidate(pool: pool, dragged: dragged, target: targetId)
+        return true
     }
 }
 
@@ -1925,6 +2080,15 @@ struct CloudProviderCard: View {
             }
             .padding(12)
         }
+        // 云端模型属性浮窗（行点开 → 配置/删除）
+        .sheet(isPresented: Binding(
+            get: { store.cloudEditorProvider == pv.name && store.cloudEditorSpec != nil },
+            set: { if !$0 { store.closeCloudModelEditor() } })) {
+            if let provider = store.cloudEditorProvider, let spec = store.cloudEditorSpec {
+                CloudModelEditorSheet(store: store, provider: provider,
+                                      spec: spec, enabled: store.cloudEditorEnabled)
+            }
+        }
     }
 
     // 模型策展：spec 列表 + 勾选启停 + 手填添加 + 移除 + VL 打标
@@ -1937,12 +2101,14 @@ struct CloudProviderCard: View {
         let specIds = Set(specs.map { $0.id })
         let synthesized: [CloudModelSpec] = enabled.subtracting(specIds).sorted().map {
             CloudModelSpec(id: $0, manual: false, supports_vision: nil,
-                           supports_tools: nil,
+                           supports_tools: nil, context_window: nil,
+                           max_output_tokens: nil, price_input: nil,
+                           price_output: nil,
                            anthropic: (pv.anthropic_base ?? "").isEmpty == false)
         }
         let rows = specs + synthesized
         VStack(alignment: .leading, spacing: 4) {
-            Text("模型策展 — 勾选入白名单（enabled_models）后可入池路由").font(.system(size: 11)).foregroundColor(.faint)
+            Text("模型策展 — 勾选入白名单（enabled_models）后可入池路由；点行进属性浮窗").font(.system(size: 11)).foregroundColor(.faint)
             ForEach(rows, id: \.id) { spec in
                 HStack(spacing: 8) {
                     // 勾选 = enable/disable（可路由白名单）
@@ -1956,26 +2122,23 @@ struct CloudProviderCard: View {
                     Chip("openai", color: Color.thLlm)
                     if spec.anthropic == true { Chip("anthropic", color: Color.thJudge) }
                     if spec.manual == true { Chip("手填") }
-                    // F5: VL 标签（supports_vision 三态；tag 动作切换）
-                    if spec.supports_vision == true {
-                        Chip("VL", color: Color.thVl)
-                    }
-                    SmallBtn(spec.supports_vision == true ? "去 VL" : "标 VL") {
-                        store.cloudModelAction(pv.name, action: "tag", model: spec.id,
-                                               vision: spec.supports_vision != true,
-                                               tools: spec.supports_tools)
-                    }
+                    // 能力/属性状态 chips（编辑入口 = 点行 → 浮窗）
+                    if spec.supports_vision == true { Chip("VL", color: Color.thVl) }
                     if spec.supports_tools == true { Chip("工具", color: Color.thLlm) }
-                    SmallBtn(spec.supports_tools == true ? "去工具" : "标工具") {
-                        store.cloudModelAction(pv.name, action: "tag", model: spec.id,
-                                               vision: spec.supports_vision,
-                                               tools: spec.supports_tools != true)
+                    if let cw = spec.context_window { Chip("ctx \(cw >= 1000 ? "\(cw/1000)k" : "\(cw)")") }
+                    if let pi = spec.price_input, pi > 0, let po = spec.price_output, po > 0 {
+                        Chip("¥\(String(format: "%g", pi))/\(String(format: "%g", po))")
                     }
                     Spacer()
-                    // 移除：所有模型可删（手填=删 spec；发现的=出白名单+不再重新发现）
-                    SmallBtn("移除") { store.cloudModelAction(pv.name, action: "remove", model: spec.id) }
+                    SmallBtn("属性") {
+                        store.openCloudModelEditor(provider: pv.name, spec: spec, enabled: enabled.contains(spec.id))
+                    }
                 }
                 .padding(.vertical, 2)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    store.openCloudModelEditor(provider: pv.name, spec: spec, enabled: enabled.contains(spec.id))
+                }
             }
             if rows.isEmpty {
                 Text("暂无模型 — 点「测试」确认连通后，用下方输入框手填，或等待自动发现")
@@ -1995,6 +2158,81 @@ struct CloudProviderCard: View {
             }
         }
         .padding(.top, 4)
+    }
+}
+
+// 云端模型属性浮窗 — 点行打开：能力打标（VL/工具）+ 上下文/输出/价格属性 + 单独删除。
+// 草稿状态在 GatewayStore（CLT 无 SwiftUI 宏，视图内 @State 不可用）。
+struct CloudModelEditorSheet: View {
+    var store: GatewayStore
+    let provider: String
+    let spec: CloudModelSpec
+    let enabled: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("模型属性 — \(spec.id)").font(.system(size: 14, weight: .semibold)).foregroundColor(.ink)
+                Spacer()
+                SmallBtn("关闭") { store.closeCloudModelEditor() }
+            }
+            HStack(spacing: 6) {
+                Chip("openai", color: Color.thLlm)
+                if spec.anthropic == true { Chip("anthropic", color: Color.thJudge) }
+                if spec.manual == true { Chip("手填") }
+                Chip(enabled ? "白名单内" : "白名单外", color: enabled ? Color.okC : Color.warnC)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                editorToggle("视觉（VL）— VL 请求调度排最前",
+                             Binding(get: { store.editorVision }, set: { store.editorVision = $0 }))
+                editorToggle("工具调用 — agent/函数调用基础能力",
+                             Binding(get: { store.editorTools }, set: { store.editorTools = $0 }))
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                editorField("上下文窗口（tokens）",
+                            Binding(get: { store.editorCtx }, set: { store.editorCtx = $0 }))
+                editorField("最大输出（tokens）",
+                            Binding(get: { store.editorOut }, set: { store.editorOut = $0 }))
+                HStack(spacing: 10) {
+                    editorField("输入价 ¥/1M",
+                                Binding(get: { store.editorPriceIn }, set: { store.editorPriceIn = $0 }))
+                        .frame(maxWidth: 150)
+                    editorField("输出价 ¥/1M",
+                                Binding(get: { store.editorPriceOut }, set: { store.editorPriceOut = $0 }))
+                        .frame(maxWidth: 150)
+                }
+                Text("留空 = 清除该属性；价格单位 ¥/百万 tokens").font(.system(size: 10.5)).foregroundColor(.faint)
+            }
+            Divider()
+            HStack {
+                if store.editorConfirmDelete {
+                    SmallBtn("确认移除", primary: true) {
+                        store.cloudModelAction(provider, action: "remove", model: spec.id)
+                        store.closeCloudModelEditor()
+                    }
+                    SmallBtn("取消") { store.editorConfirmDelete = false }
+                    Text("发现模型移除后不再重新出现").font(.system(size: 10.5)).foregroundColor(.faint)
+                } else {
+                    SmallBtn("移除此模型") { store.editorConfirmDelete = true }
+                }
+                Spacer()
+                SmallBtn("保存", primary: true) { store.saveCloudModelEditor() }
+            }
+        }
+        .padding(18)
+        .frame(width: 440)
+    }
+
+    private func editorToggle(_ title: String, _ isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) { Text(title).font(.system(size: 12)).foregroundColor(.ink) }
+            .toggleStyle(.switch).controlSize(.small)
+    }
+    private func editorField(_ title: String, _ text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.system(size: 10.5)).foregroundColor(.dim)
+            TextField("", text: text).textFieldStyle(.roundedBorder).font(.system(size: 12))
+        }
     }
 }
 
@@ -2073,7 +2311,7 @@ struct SettingsView: View {
                         infoRow("当前已用", usedMB.map { "\($0) MB" } ?? "—")
                     }.padding(12)
                 }
-                // 开关项（诚实标注）
+                // 开关项（诚实标注：已接线的可交互，未接线的保持禁用并说明）
                 Card {
                     VStack(alignment: .leading, spacing: 0) {
                         SettingRow(title: "开机时启动网关",
@@ -2082,9 +2320,44 @@ struct SettingsView: View {
                         SettingRow(title: "仅本机监听",
                                    desc: "关闭后局域网设备可访问 :\(GW_PORT)（设计稿 v1.5 项，网关端点后接）",
                                    on: true, disabled: true)
-                        SettingRow(title: "API Key 鉴权",
-                                   desc: "客户端需携带密钥调用（设计稿 v1.5 项，网关端点后接）",
-                                   on: false, disabled: true)
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("API Key 鉴权").font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
+                                Text(store.securityEnforced
+                                     ? "客户端需携带密钥调用 · 已登记 \(store.securityKeyCount) 把密钥"
+                                     : "关闭中 — 本机任意客户端可直接调用 · 已登记 \(store.securityKeyCount) 把密钥")
+                                    .font(.system(size: 11.5)).foregroundColor(.faint)
+                            }
+                            Spacer()
+                            Toggle("", isOn: Binding(
+                                get: { store.securityEnforced },
+                                set: { store.toggleSecurity($0) }))
+                                .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                                .disabled(store.securityBusy)
+                        }
+                        .padding(.vertical, 8)
+                        if let key = store.oneTimeKey {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("首次启用已生成密钥 — 明文仅显示这一次，请立即复制保存")
+                                    .font(.system(size: 11.5, weight: .semibold)).foregroundColor(.warnC)
+                                HStack(spacing: 8) {
+                                    Text(key)
+                                        .font(.system(size: 11, design: .monospaced)).foregroundColor(.ink)
+                                        .lineLimit(1).truncationMode(.middle)
+                                    Spacer()
+                                    SmallBtn("复制") {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(key, forType: .string)
+                                        store.actionMessage = "✅ 密钥已复制到剪贴板"
+                                    }
+                                    SmallBtn("已保存") { store.oneTimeKey = nil }
+                                }
+                            }
+                            .padding(10)
+                            .background(Color.warnC.opacity(0.08))
+                            .cornerRadius(8)
+                            .padding(.vertical, 6)
+                        }
                     }
                 }
                 // 目录与版本
