@@ -26,6 +26,9 @@ INSTALL_STAGES = ("preflight", "staging", "downloading", "verifying",
                   "preparing_runtime", "writing_config",
                   "isolated_healthcheck", "gateway_reload", "installed")
 
+# 升级回退窗口：新版本切换成功后保留的旧版本数（spec §7.4 裁决）
+UPGRADE_KEEP_PREVIOUS = 1
+
 
 @dataclass
 class InstallResult:
@@ -127,6 +130,27 @@ class PackInstaller:
         manifest = entry.manifest
         with self._lock_for(manifest.pack_id):
             return self._install_locked(entry)
+
+    def upgrade(self, entry) -> InstallResult:
+        """升级 = 新版本目录走完整事务（含健康检查），全部成功才切换。
+
+        spec §7.4 裁决：不做原地替换；失败时已装旧版不动、staging 清理；
+        成功后仅保留 UPGRADE_KEEP_PREVIOUS 个旧版本作回退窗口。
+        """
+        manifest = entry.manifest
+        with self._lock_for(manifest.pack_id):
+            res = self._install_locked(entry)
+            if not res.ok:
+                return res
+            pack_root = self._root / manifest.pack_id
+            old_versions = sorted(
+                d.name for d in pack_root.glob("*")
+                if d.is_dir() and d.name != manifest.pack_version)
+            excess = old_versions[:-UPGRADE_KEEP_PREVIOUS] if \
+                len(old_versions) > UPGRADE_KEEP_PREVIOUS else []
+            for old in excess:
+                shutil.rmtree(pack_root / old, ignore_errors=True)
+            return res
 
     def _install_locked(self, entry) -> InstallResult:
         manifest = entry.manifest
