@@ -45,10 +45,13 @@ class _FakeUpstream(BaseHTTPRequestHandler):
         if sc.get("abort_read"):
             self.close_connection = True
             return
+        extra = sc.get("extra_headers", {})
         if sc.get("stream"):
             self.send_response(status)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Transfer-Encoding", "chunked")
+            for k, v in extra.items():
+                self.send_header(k, v)
             self.end_headers()
             for chunk in sc.get("chunks", []):
                 self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
@@ -67,6 +70,8 @@ class _FakeUpstream(BaseHTTPRequestHandler):
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            for k, v in extra.items():
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(body)
 
@@ -160,10 +165,12 @@ def attempt_local(pm, data, cand=None):
 class TestNon2xxIsNotSuccess:
 
     def test_local_upstream_502_is_committed_error(self, fake_upstream):
+        # 终审 I6 起：502 属动作表状态，suppress 未提交 → 池层决定重试/切换；
+        # 直发 committed 语义仅保留于非回退类（见 TestLocalSuppressActionableStatuses）
         set_scenario(status=502)
         pm = make_pm(fake_upstream)
         res = attempt_local(pm, {"messages": [{"role": "user", "content": "hi"}]})
-        assert res.committed is True
+        assert res.committed is False
         assert res.ok is False
         assert res.status == 502
 
@@ -371,3 +378,90 @@ class TestObservationParity:
         assert a["usage_known"] is False
         assert a["tokens_in"] is None and a["tokens_out"] is None
         assert outcome.usage == {} or not any(outcome.usage.values())
+
+
+# ── 终审修复轮（I6）：本地 OpenAI 池候选动作表状态不直发 ──
+
+class TestLocalSuppressActionableStatuses:
+    """动作表状态（401/403/429/5xx，501 除外）未提交返回 → 池层冷却/
+    等待/重试/回退照常动作；非回退类（400/404/413/422/501）保留 PR-14
+    直发语义。suppress 时客户端一个字节都不写。"""
+
+    def test_local_401_not_committed(self, fake_upstream):
+        set_scenario(status=401)
+        pm = make_pm(fake_upstream)
+        res = attempt_local(pm, {"messages": [{"role": "user", "content": "hi"}]})
+        assert res.committed is False
+        assert res.ok is False
+        assert res.status == 401
+
+    def test_local_502_not_committed(self, fake_upstream):
+        set_scenario(status=502)
+        pm = make_pm(fake_upstream)
+        res = attempt_local(pm, {"messages": [{"role": "user", "content": "hi"}]})
+        assert res.committed is False
+        assert res.status == 502
+
+    def test_local_429_carries_retry_after(self, fake_upstream):
+        set_scenario(status=429, extra_headers={"Retry-After": "3"})
+        pm = make_pm(fake_upstream)
+        res = attempt_local(pm, {"messages": [{"role": "user", "content": "hi"}]})
+        assert res.committed is False
+        assert res.status == 429
+        assert res.retry_after == pytest.approx(3.0)
+
+    def test_local_400_still_committed_pr14(self, fake_upstream):
+        set_scenario(status=400)
+        pm = make_pm(fake_upstream)
+        res = attempt_local(pm, {"messages": [{"role": "user", "content": "hi"}]})
+        assert res.committed is True   # PR-14 冻结保留：非回退类直发
+        assert res.status == 400
+
+    def test_local_401_stream_not_committed(self, fake_upstream):
+        set_scenario(status=401, stream=True)
+        pm = make_pm(fake_upstream)
+        res = attempt_local(pm, {"messages": [], "stream": True})
+        assert res.committed is False
+        assert res.status == 401
+
+    def test_suppressed_error_never_written_to_client(self, fake_upstream):
+        set_scenario(status=401)
+        pm = make_pm(fake_upstream)
+        h = FakeHandler()
+        dispatch._attempt_local_openai(
+            h, pm, {"messages": [{"role": "user", "content": "hi"}]},
+            model="iff/fast", pool="fast", cand=local_rc(), remaining=10.0)
+        assert h.status_line is None   # 未 send_response
+        assert h.written == b""        # 未写任何字节
+
+
+# ── 终审修复轮（C1）：attempt 错误固定码化，原文不入摘要/进程日志 ──
+
+class TestAttemptErrorSanitized:
+    SECRET = "sk-secret-abc123"
+
+    def _outcome(self):
+        from inferfabric.model_pool.pool_forward import AttemptOutcome, AttemptRecord
+        rec = AttemptRecord(
+            ordinal=1, candidate_id="c1", status=502,
+            error=f"Cloud provider error (502): key {self.SECRET} echoed",
+            committed=True, admitted=True)
+        return AttemptOutcome(ok=False, committed=True, status=502,
+                              candidate_id="c1", attempts=[rec])
+
+    def test_summary_attempts_error_fixed_code(self):
+        s = build_pool_summary(self._outcome(), pool_name="fast",
+                               protocol="openai", config_revision=1,
+                               requested_model="iff/fast", candidates=(local_rc(),))
+        import json as _json
+        assert self.SECRET not in _json.dumps(s)
+        assert s["attempts"][0]["error"] == "upstream_http_502"
+
+    def test_failed_attempt_process_log_sanitized(self, caplog):
+        import logging
+        from inferfabric.model_pool.dispatch import _log_failed_attempts
+        with caplog.at_level(logging.WARNING):
+            _log_failed_attempts(None, None, self._outcome(), req_id="r1",
+                                 key_name="k", model="iff/fast")
+        assert self.SECRET not in caplog.text
+        assert "upstream_http_502" in caplog.text

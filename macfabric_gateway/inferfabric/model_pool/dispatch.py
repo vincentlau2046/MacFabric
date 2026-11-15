@@ -19,6 +19,7 @@ from inferfabric.model_pool.pool_forward import (
     AttemptResult,
     build_pool_summary,
     run_attempts,
+    safe_attempt_error,
 )
 from inferfabric.model_pool.selector import (
     RequestRequirements,
@@ -517,12 +518,13 @@ def _log_failed_attempts(pm, handler, outcome, *, req_id, key_name, model):
     for rec in getattr(outcome, "attempts", None) or ():
         if rec.ok:
             continue
+        # 终审 C1：固定码 — 上游错误体原文不入进程日志（同 pool_summary）
         log.warning("pool attempt failed: req=%s pool_model=%s ordinal=%d "
                     "target=%s status=%s committed=%s admitted=%s "
                     "retry_after=%s error=%s route=%s",
                     req_id, model, rec.ordinal, rec.candidate_id,
                     rec.status, rec.committed, rec.admitted,
-                    rec.retry_after, rec.error, rec.route)
+                    rec.retry_after, safe_attempt_error(rec), rec.route)
 
 
 def _gate_timeout(remaining: float | None) -> float:
@@ -539,16 +541,16 @@ def _attempt_local_openai(handler, pm, data, *, model, pool, cand,
                           remaining=None) -> AttemptResult:
     """本地候选（OpenAI 入站）：ready_only，绝不调用 ensure_service。
 
-    _forward_request 单次语义：True=响应已完整交付（committed）；False=连接
-    失败、headers 未发送（未提交 → 池层切下一候选）。上游错误响应会被直发
-    （committed → 终止不回退）— 这是 PR-14 冻结核心路径的既有语义。
-    ollama 引擎走同一 OpenAI 兼容端点（/v1/chat/completions，终审 #13）—
-    不再调 handle_ollama_native（该路径无返回信号，无法区分已交付/未提交）。
+    suppress 模式（终审 I6）：动作表状态（401/403/429/5xx，501 除外）不
+    直发客户端，未提交携带真实状态返回 → run_attempts 冷却/等待/回退；
+    非回退类（400/404/413/422/501）保留 PR-14 直发 committed 语义（终止
+    不回退）。ollama 引擎走同一 OpenAI 兼容端点（/v1/chat/completions，
+    终审 #13）— 不再调 handle_ollama_native（该路径无返回信号）。
 
     已知不对称（cross-review 2026-11-04，文档化不改码）：OpenAI 本地候选
-    没有 parallel_tool_use_not_supported 故障转移 — _forward_request 把引擎
-    400 直发客户端并记为成功提交（PR-14 冻结）；不兼容信号机制仅存在于
-    Anthropic 本地路径（forward_anthropic_local suppress 契约）。
+    没有 parallel_tool_use_not_supported 故障转移 — 引擎 400 直发客户端并
+    记为成功提交（PR-14 冻结）；不兼容信号机制仅存在于 Anthropic 本地路径
+    （forward_anthropic_local suppress 契约）。
     """
     route = f"pool:{pool}/local:{cand.candidate.model_name}"
     c = cand.candidate
@@ -584,11 +586,21 @@ def _attempt_local_openai(handler, pm, data, *, model, pool, cand,
         # model_name 必须是真实模型名 — _forward_request 以它释放副本配额。
         # Task 3：结构化结果 — 布尔"已交付"不再等同 ok（非 2xx 直发/流中断
         # 如实分类），真实状态/流分类保留给动作表与 pool_summary。
+        # 终审 I6：suppress 模式 — 动作表状态（401/403/429/5xx-except-501）
+        # 不直发客户端，未提交返回交动作表冷却/等待/回退；与云候选及
+        # Anthropic 本地路径契约对齐。PR-14 非回退类直发语义不变。
         fx = _forward_request_ex(handler, pm, target_port, body, stream,
                                  model_name=model_obj.name,
                                  upstream_path=upstream_path,
-                                 cache_body=None, timeout=remaining)
+                                 cache_body=None, timeout=remaining,
+                                 suppress_client_errors=True)
         if not fx["committed"]:
+            if fx["status"] is not None:
+                # 动作表状态被抑制：携带真实状态/Retry-After 供回退决策
+                return AttemptResult(ok=False, committed=False,
+                                     status=fx["status"], route=route,
+                                     error=fx["error"],
+                                     retry_after=fx.get("retry_after"))
             return AttemptResult(status=None, route=route, error=fx["error"])
         if fx["ok"]:
             return AttemptResult(ok=True, status=fx["status"], committed=True,

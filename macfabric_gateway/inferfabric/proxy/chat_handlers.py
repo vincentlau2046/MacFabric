@@ -453,7 +453,17 @@ def handle_chat(handler, pm, data):
         gate.release()
 
 
-def _forward_request_ex(handler, pm, target_port, body, stream, model_name="", upstream_path=None, cache_body=None, timeout=None):
+def _is_pool_actionable_status(status: int) -> bool:
+    """动作表管辖的上游状态（终审 I6）：401/403 冷却、429 等待、5xx 一次
+    重试（501 属能力不匹配的非回退类除外）。这些状态在池路径不直发客户端
+    — 未提交返回，交给 run_attempts 动作表决定冷却/等待/切换。"""
+    if status in (401, 403, 429):
+        return True
+    return 500 <= status <= 599 and status != 501
+
+
+def _forward_request_ex(handler, pm, target_port, body, stream, model_name="", upstream_path=None, cache_body=None, timeout=None,
+                        suppress_client_errors=False):
     """结构化转发（PLAN-2026-11-15 v2 Task 3）：_forward_request 的可观测版。
 
     返回 dict：
@@ -490,6 +500,30 @@ def _forward_request_ex(handler, pm, target_port, body, stream, model_name="", u
         result["status"] = resp_status
         resp_headers = {k.lower(): v for k, v in resp.getheaders()}
         resp_ct = resp_headers.get("content-type", "application/json")
+
+        # 终审 I6：池路径动作表状态不直发客户端（suppress 模式）——
+        # 此前 401/403/429/5xx 一律 committed 直发，冷却/等待/回退永不生效，
+        # 与云候选及 Anthropic 本地路径的 suppress 契约不一致。非回退类
+        # （400/404/413/422/501）保留 PR-14 直发语义（冻结不变）。
+        if suppress_client_errors and _is_pool_actionable_status(resp_status):
+            # resp_headers 键已小写；forwarder 助手按 "Retry-After" 取值
+            retry_after = (forwarder._retry_after_seconds(
+                               {"Retry-After": resp_headers.get("retry-after")})
+                           if resp_status == 429 else None)
+            try:
+                resp.read()
+                resp.close()
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+            result["committed"] = False
+            result["ok"] = False
+            result["error"] = f"upstream_http_{resp_status}"
+            result["retry_after"] = retry_after
+            return result
 
         if stream:
             headers_sent = True

@@ -86,10 +86,14 @@ class RequestLogDB:
         self._iffdb.insert_request_log(entries)
 
     def query_request_log(self, since: float, until: float | None = None,
-                          model: str | None = None, limit: int = 100000) -> list[dict]:
+                          model: str | None = None, limit: int = 100000,
+                          before_ts: float | None = None,
+                          before_id: int | None = None) -> list[dict]:
         """查询 request_log，返回 dict 列表。线程安全。"""
         return self._iffdb.query_request_log(since=since, until=until,
-                                             model=model, limit=limit)
+                                             model=model, limit=limit,
+                                             before_ts=before_ts,
+                                             before_id=before_id)
 
     def prune_request_log(self, before: float) -> int:
         """删除 timestamp < before 的记录，返回删除行数。"""

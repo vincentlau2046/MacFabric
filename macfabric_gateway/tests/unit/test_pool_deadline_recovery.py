@@ -235,3 +235,23 @@ class TestHalfOpenReleaseAllExits:
         entries = store.entries(now=base)
         assert entries["fp-c1"]["remaining_s"] > 0  # 重新冷却
         assert entries["fp-c1"]["probing"] is False
+
+    def test_transport_exception_consumes_attempt(self):
+        """终审 I7：异常 = 可能已发出的真实尝试 → admitted=True 并消耗
+        max_attempts（attempt_count 不再少报，物理调用数受预算约束）。"""
+        calls = []
+
+        def transport(c, remaining):
+            calls.append(c.candidate.id)
+            if c.candidate.id in ("c1", "c2"):
+                raise RuntimeError("read timeout after send")
+            return AttemptResult(ok=True, committed=True, status=200)
+
+        outcome = run_attempts(pool(max_attempts=2),
+                               [rc("c1"), rc("c2"), rc("c3")], transport,
+                               monotonic=lambda: 1000.0)
+        assert calls == ["c1", "c2"]          # 预算耗尽，c3 不再尝试
+        assert outcome.ok is False
+        admitted = [r for r in outcome.attempts if r.admitted]
+        assert len(admitted) == 2             # 计入尝试，不少报
+        assert all(r.status is None for r in admitted)

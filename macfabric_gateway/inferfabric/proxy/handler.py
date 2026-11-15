@@ -1038,7 +1038,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         try:
             report = _MONITOR_REPORT_CACHE.get_or_build(
-                pm.telemetry, window=window, until=time.time(), scope=scope)
+                pm.telemetry, window=window, until=time.time(), scope=scope,
+                prices=getattr(pm.metrics, "price_config", None))
             self._send_json(report, 200)
         except Exception as e:
             log.error("/api/monitor-report failed: %s", e)

@@ -378,10 +378,20 @@ class IFFDB:
                 conn.commit()
 
     def query_request_log(self, since: float, until: float | None = None,
-                          model: str | None = None, limit: int = 10000) -> list[dict]:
+                          model: str | None = None, limit: int = 10000,
+                          before_ts: float | None = None,
+                          before_id: int | None = None) -> list[dict]:
+        """键集查询 [since, until) 的请求日志行（timestamp,id 降序）。
+
+        - 下界含 since（[since, until) 契约，终审 I1）；既有调用方语义
+          影响仅为边界行（时间戳恰等于 since）从排除改为纳入。
+        - before_ts+before_id：monitor 报告的 (timestamp, id) 真键集分页
+          游标 —— 返回 timestamp < 游标，或 timestamp 相等而 id 更小的行
+          （id 单调唯一 → 页间无重叠，海量同秒行不漏不计重）。
+        """
         with self.connect(REQUEST_LOG_DB) as conn:
             cols = [d[0] for d in conn.execute("SELECT * FROM request_log LIMIT 0").description]
-            sql = "SELECT * FROM request_log WHERE timestamp > ?"
+            sql = "SELECT * FROM request_log WHERE timestamp >= ?"
             params: list[Any] = [since]
             if until is not None:
                 sql += " AND timestamp < ?"
@@ -389,7 +399,10 @@ class IFFDB:
             if model is not None:
                 sql += " AND model = ?"
                 params.append(model)
-            sql += " ORDER BY timestamp DESC LIMIT ?"
+            if before_ts is not None and before_id is not None:
+                sql += " AND (timestamp < ? OR (timestamp = ? AND id < ?))"
+                params.extend([before_ts, before_ts, before_id])
+            sql += " ORDER BY timestamp DESC, id DESC LIMIT ?"
             params.append(limit)
             rows = conn.execute(sql, params).fetchall()
             import json as _json

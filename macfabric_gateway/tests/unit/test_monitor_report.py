@@ -134,7 +134,7 @@ class TestScopeIdentityAndPercentiles:
         assert unknown["p50_ttft_ms"] is None   # 零样本 = unknown，非 0ms
         assert report["totals"]["usage_unknown_rows"] == 1  # 缺 usage 行计数
         # 未配价格：cost 为 null 而非 0
-        assert report["totals"]["cost_estimate_usd"] is None
+        assert report["totals"]["cost_estimate"] is None
         assert report["totals"]["cost_coverage"] == "unpriced"
 
 
@@ -216,3 +216,91 @@ class TestRouteAndCache:
         assert r1 is r2  # TTL 内同查询复用同一报告对象
         r3 = cache.get_or_build(db, window="24h", until=T0, scope="cloud")
         assert r3 is not r1
+
+    def test_cache_prices_change_within_ttl(self, tmp_path):
+        """价格经 get_or_build 传入（终审 I5）：接线不换缓存键，TTL 内生效。"""
+        from inferfabric.metrics_aggregator import CloudModelPrice
+        from inferfabric.monitor_report import MonitorReportCache
+        db = make_db(tmp_path)
+        insert_all(db, [row("px", SINCE_24H + 10, route="cloud:prov_a/gpt-x",
+                            provider="prov_a", tin=1_000_000, tout=0)])
+        cache = MonitorReportCache(ttl_s=60)
+        r1 = cache.get_or_build(db, window="24h", until=T0, scope="all",
+                                prices={"gpt-x": CloudModelPrice(2.0, 1.0)})
+        assert r1["totals"]["cost_estimate"] == pytest.approx(2.0)
+
+
+class TestReviewFixPass:
+    """最终评审修复轮（0f07cf8..2b64d54 整分支评审）：每项先 RED 后 GREEN。"""
+
+    def test_same_timestamp_flood_full_count(self, tmp_path):
+        """I1：10 万行同秒洪流必须全量计数（(timestamp,id) 键集分页）。"""
+        db = make_db(tmp_path)
+        n = 100_001
+        ts = SINCE_24H + 100.0
+        rows = [row(f"flood-{i}", ts, tin=1, tout=1) for i in range(n)]
+        insert_all(db, rows)
+        report = build_monitor_report(db, window="24h", until=T0)
+        assert report["totals"]["requests"] == n
+        assert sum(b["requests"] for b in report["series"]) == n
+        assert report["coverage"]["truncated"] is False
+
+    def test_since_boundary_inclusive(self, tmp_path):
+        """I1：[since, until) 下界含 since —— 恰在 since 的行必须入报告。"""
+        db = make_db(tmp_path)
+        insert_all(db, [row("edge-at-since", SINCE_24H, tin=2, tout=1)])
+        report = build_monitor_report(db, window="24h", until=T0)
+        assert report["totals"]["requests"] == 1
+
+    def test_3xx_not_success(self, tmp_path):
+        """I2：3xx 不是成功（传输契约 = 2xx）。"""
+        db = make_db(tmp_path)
+        insert_all(db, [row("r302", SINCE_24H + 10, status=302, tin=3, tout=2)])
+        report = build_monitor_report(db, window="24h", until=T0)
+        t = report["totals"]
+        assert t["requests"] == 1 and t["success"] == 0
+        # 3xx 无 error 文本且 <400 → 不计错误类别（既非成功也非错误）
+        assert report["errors"] == []
+
+    def test_direct_row_missing_usage_counts_unknown(self, tmp_path):
+        """I3：直连成功行缺 usage（0/0、无摘要证据）计 unknown，不冒认 0。"""
+        db = make_db(tmp_path)
+        insert_all(db, [row("du", SINCE_24H + 10, status=200, tin=0, tout=0)])
+        report = build_monitor_report(db, window="24h", until=T0)
+        assert report["totals"]["usage_unknown_rows"] == 1
+
+    def test_alias_grouped_by_actual_model(self, tmp_path):
+        """I4：池行按 final_target.actual_model_id 聚合（行级 model 保留请求名）。"""
+        import sys
+        from pathlib import Path as _P
+        sys.path.insert(0, str(_P(__file__).parent))
+        import fixtures_monitor as fx
+        db = make_db(tmp_path)
+        insert_all(db, fx.synthetic_rows())
+        report = build_monitor_report(db, window="24h", until=T0)
+        local_models = {m["model"] for m in report["models"]
+                        if m["location"] == "local"}
+        assert "qwen3-4b" in local_models
+        assert "iff/fast" not in local_models
+
+    def test_cost_uses_price_table_yuan_per_1m(self, tmp_path):
+        """I5：复用 cost_of_row 唯一计价入口（¥/1M tokens），字段名 cost_estimate。"""
+        from inferfabric.metrics_aggregator import CloudModelPrice
+        db = make_db(tmp_path)
+        insert_all(db, [row("cp", SINCE_24H + 10, model="gpt-x", status=200,
+                            route="cloud:prov_a/gpt-x", provider="prov_a",
+                            tin=1_000_000, tout=2_000_000)])
+        report = build_monitor_report(db, window="24h", until=T0,
+                                      prices={"gpt-x": CloudModelPrice(3.0, 4.0)})
+        t = report["totals"]
+        assert t["cost_estimate"] == pytest.approx(3.0 * 1 + 4.0 * 2)
+        assert t["cost_coverage"] == "priced"
+        assert "cost_estimate_usd" not in t
+
+    def test_unpriced_reports_none(self, tmp_path):
+        """I5：无价格配置 → cost_estimate null + unpriced（显式，非缺省）。"""
+        db = make_db(tmp_path)
+        insert_all(db, [row("up", SINCE_24H + 10)])
+        report = build_monitor_report(db, window="24h", until=T0)
+        assert report["totals"]["cost_estimate"] is None
+        assert report["totals"]["cost_coverage"] == "unpriced"

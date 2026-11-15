@@ -310,6 +310,33 @@ def _physical_identity(cand) -> tuple[str | None, str | None]:
     return c.model_name, None
 
 
+# 内部固定错误前缀（非上游错误体）：这些文本由本层构造，不含上游回包内容
+_INTERNAL_ERROR_PREFIXES = (
+    "cooldown_admission", "transport error", "physical target",
+    "cloud target", "local target", "stream read error",
+)
+
+
+def safe_attempt_error(rec: "AttemptRecord") -> str | None:
+    """attempt 错误固定码化（终审 C1）。
+
+    上游错误体可能回显凭证/请求片段（部分 provider 对 401 回显 API key），
+    原文绝不入 pool_summary（→ RequestLog metadata）与进程日志 — 与
+    终审 #16（RequestLog error 列固定码）同一纪律延伸到 attempt 级。
+    status/stream 分类足够定位；原文调试需求由 status + candidate_id +
+    时间戳在上游侧自查满足。"""
+    if not rec.error:
+        return None
+    if rec.status is not None:
+        return f"upstream_http_{rec.status}"
+    if rec.stream_state:
+        return f"stream_{rec.stream_state}"
+    if rec.error.startswith(_INTERNAL_ERROR_PREFIXES):
+        # 内部文本：截掉冒号后的细节（异常串/gate 原因），保留类别
+        return rec.error.split(":", 1)[0]
+    return "attempt_error"
+
+
 def _usage_observations(usage: dict | None, ok: bool) -> tuple:
     """AttemptResult.usage → (tokens_in, tokens_out, usage_known)。
 
@@ -394,7 +421,9 @@ def build_pool_summary(outcome: "AttemptOutcome", *, pool_name: str,
         "outcome": outcome_name,
         "attempts": [{
             "ordinal": r.ordinal, "candidate_id": r.candidate_id,
-            "route": r.route, "status": r.status, "error": r.error,
+            "route": r.route, "status": r.status,
+            # 终审 C1：固定码 — 上游错误体原文不入摘要（→ RequestLog metadata）
+            "error": safe_attempt_error(r),
             "committed": r.committed, "ok": r.ok, "admitted": r.admitted,
             "duration_ms": r.duration_ms,
             # 流结束分类与 attempt 级观测（Task 3；无观测时明确 null）
@@ -475,14 +504,19 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
             res = transport(cand, remaining)
         except Exception as e:
             # 传输层异常（Task 4）：探测权释放但不回写失败（端点未被证实），
-            # 按连接失败动作表切下一候选 — 异常不得把半开探测权困死到重启
+            # 按连接失败动作表切下一候选 — 异常不得把半开探测权困死到重启。
+            # 终审 I7：异常 = 可能已发出的真实尝试（连接失败与发送后超时在
+            # 此层不可区分，保守计入）→ admitted=True + 消耗 max_attempts，
+            # attempt_count 不再少报、物理调用数受预算约束。准入失败
+            # （下方 res.admitted=False，发送前边界）仍不计。
             log.warning("pool transport raised for candidate '%s': %s",
                         cand.candidate.id, e)
             if cooldowns is not None:
                 cooldowns.release_probe(cand.endpoint_fingerprint, now=mono())
+            attempts += 1
             records.append(AttemptRecord(
                 ordinal=len(records) + 1, candidate_id=cand.candidate.id,
-                error=f"transport error: {e}", admitted=False,
+                error=f"transport error: {e}", admitted=True,
                 duration_ms=(mono() - t0) * 1000.0))
             queue.pop(0)
             continue
