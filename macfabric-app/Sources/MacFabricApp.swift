@@ -208,6 +208,92 @@ struct MetricsPayload: Codable {
     var models: [String: ModelMetrics]?
 }
 
+// ── 监控台 v2（GET /api/monitor-report，PLAN v2 Task 7 契约）──
+struct MonitorCoverage: Codable {
+    var rows_scanned: Int?
+    var pool_summary_rows: Int?
+    var truncated: Bool?
+}
+struct MonitorTotals: Codable {
+    var requests: Int?
+    var success: Int?
+    var success_rate: Double?
+    var tokens_in: Int?
+    var tokens_out: Int?
+    var usage_unknown_rows: Int?
+    var cost_estimate_usd: Double?
+    var cost_coverage: String?
+}
+struct MonitorModelRow: Codable, Identifiable {
+    var location: String?
+    var provider: String?
+    var model: String?
+    var requests: Int?
+    var success: Int?
+    var success_rate: Double?
+    var tokens_in: Int?
+    var tokens_out: Int?
+    var p50_ttft_ms: Double?
+    var p95_ttft_ms: Double?
+    var ttft_samples: Int?
+    var p50_duration_ms: Double?
+    var p95_duration_ms: Double?
+    var duration_samples: Int?
+    // 身份契约 (location, provider, model) — 跨 provider 同名不混合
+    var id: String { "\(location ?? "-")|\(provider ?? "-")|\(model ?? "-")" }
+}
+struct MonitorBucket: Codable {
+    var bucket_start: Double?
+    var bucket_end: Double?
+    var requests: Int?
+    var success: Int?
+    var tokens_in: Int?
+    var tokens_out: Int?
+}
+struct MonitorPoolRow: Codable {
+    var pool: String?
+    var requests: Int?
+    var success: Int?
+    var final_targets: [String: Int]?
+    var attempt_count: Int?
+    var retry_count: Int?
+    var fallback_count: Int?
+    var summary_coverage: Double?
+}
+struct MonitorErrorRow: Codable {
+    var `class`: String?
+    var count: Int?
+    var id: String { `class` ?? "other" }
+}
+struct MonitorReportPayload: Codable {
+    var contract: String?
+    var window: String?
+    var scope: String?
+    var since: Double?
+    var until: Double?
+    var collected_at: Double?
+    var coverage: MonitorCoverage?
+    var totals: MonitorTotals?
+    var models: [MonitorModelRow]?
+    var series: [MonitorBucket]?
+    var pools: [MonitorPoolRow]?
+    var errors: [MonitorErrorRow]?
+}
+// Task 6 运行态（GET /admin/model-pools/runtime）— 池候选健康的数据源：
+// 请求是否真的在调用（last_attempt）与冷却/半开（cooling），不是"注册表存在"
+struct PoolCooling: Codable { var remaining_s: Double?; var reason: String?; var probing: Bool? }
+struct PoolLastAttempt: Codable { var ok: Bool?; var status: Int?; var age_s: Double? }
+struct PoolRuntimeCand: Codable {
+    var id: String?
+    var kind: String?
+    var target: String?
+    var active: Bool?
+    var cooling: PoolCooling?
+    var last_attempt: PoolLastAttempt?
+}
+struct PoolRuntimeCands: Codable { var candidates: [PoolRuntimeCand]? }
+struct PoolRuntimePayload: Codable { var revision: Int?; var pools: [String: PoolRuntimeCands]? }
+
 final class GatewayStore: ObservableObject {
     @Published var snapshot: Snapshot?
     @Published var gatewayUp = false
@@ -275,6 +361,20 @@ final class GatewayStore: ObservableObject {
     @Published var localScanned = false
     // G4: 监控台 per-model 指标
     @Published var metrics: MetricsPayload?
+    // ── 监控台 v2（Task 8）：/api/monitor-report 消费 ──
+    @Published var monitorWindow = "24h"       // 用户当前选择
+    @Published var monitorScope = "all"
+    @Published var monitorReport: MonitorReportPayload?
+    /// 展示中报告自己的区间/来源 — 筛选切换后旧数据保留展示但用旧区间标注，
+    /// 不套新标签（QA 场景 3）
+    @Published var monitorReportWindow = "24h"
+    @Published var monitorReportScope = "all"
+    @Published var monitorLoading = false
+    @Published var monitorSelectedModel: String?   // 模型表选中行（身份 id）
+    @Published var monitorPoolExpanded: String? = nil  // 池卡详情展开
+    @Published var monitorRuntime: PoolRuntimePayload? // Task 6 运行态（冷却/最近尝试）
+    private var monitorGeneration = 0          // 请求代数：旧响应不得覆盖新选择
+    private var monitorTimer: Timer?
     // 能力包下载进度（键 = 模型名）
     @Published var packDownloads: [String: PackDownloadState] = [:]
     // ── API Key 鉴权（设置页接线 — /admin/security/*）──
@@ -312,6 +412,13 @@ final class GatewayStore: ObservableObject {
         curveTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             guard let self, self.windowVisible else { return }
             self.fetchCurve(); self.fetchCloud()   // 云端发现/注册表周期性变化
+        }
+        // 监控台 15s 刷新（建议值）— 仅监控页可见时；离页/关窗由 windowVisible
+        // 与 tab==4 双闸暂停，不空转查询。同查询短 TTL 网关单飞兜底。
+        monitorTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            guard let self, self.windowVisible, self.tab == 4 else { return }
+            self.fetchMonitorReport()
+            self.fetchPoolRuntime()
         }
     }
 
@@ -864,6 +971,49 @@ final class GatewayStore: ObservableObject {
             guard let self, let data,
                   let mp = try? JSONDecoder().decode(MetricsPayload.self, from: data) else { return }
             DispatchQueue.main.async { self.metrics = mp }
+        }.resume()
+    }
+
+    // ── 监控台 v2（Task 8）──
+
+    /// 拉取同快照报告。generation 防旧响应覆盖：网络取消不代替校验 —
+    /// 响应到达时代数不匹配即丢弃；筛选切换后旧报告保留展示（带旧区间标识）。
+    func fetchMonitorReport() {
+        monitorGeneration += 1
+        let gen = monitorGeneration
+        monitorLoading = true
+        var comps = URLComponents(string: "\(GW_BASE)/api/monitor-report")!
+        comps.queryItems = [URLQueryItem(name: "window", value: monitorWindow),
+                            URLQueryItem(name: "scope", value: monitorScope)]
+        var req = URLRequest(url: comps.url!, timeoutInterval: 10)
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.monitorLoading = false
+                guard gen == self.monitorGeneration else { return }   // 旧响应丢弃
+                guard let data,
+                      let rp = try? JSONDecoder().decode(MonitorReportPayload.self, from: data) else { return }
+                self.monitorReport = rp
+                self.monitorReportWindow = rp.window ?? self.monitorWindow
+                self.monitorReportScope = rp.scope ?? self.monitorScope
+            }
+        }.resume()
+    }
+
+    /// 筛选切换入口（UI Picker onChange 调用）— 立即重拉，旧数据带旧区间标识
+    func selectMonitor(window: String? = nil, scope: String? = nil) {
+        if let w = window, w != monitorWindow { monitorWindow = w }
+        if let s = scope, s != monitorScope { monitorScope = s }
+        fetchMonitorReport()
+    }
+
+    /// Task 6 运行态：冷却原因/半开探测/最近真实尝试（池卡健康的数据源）
+    func fetchPoolRuntime() {
+        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/model-pools/runtime")) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let rp = try? JSONDecoder().decode(PoolRuntimePayload.self, from: data) else { return }
+            DispatchQueue.main.async { self.monitorRuntime = rp }
         }.resume()
     }
 
@@ -1805,109 +1955,346 @@ struct PoolRowDropDelegate: DropDelegate {
 
 struct MonitorView: View {
     @ObservedObject var store: GatewayStore
+
+    static let windowChoices = [("1h", "近1小时"), ("24h", "近24小时"), ("7d", "近7天"), ("30d", "近30天")]
+    static let scopeChoices = [("all", "全部"), ("local", "本机"), ("cloud", "云端")]
+    static let windowLabels = ["1h": "近1小时", "24h": "近24小时", "7d": "近7天", "30d": "近30天"]
+    static let errorLabels = ["upstream_5xx": "上游 5xx", "rate_limited": "限流 429",
+                              "auth": "鉴权失败", "upstream_4xx": "上游 4xx",
+                              "no_upstream": "无可用上游", "other": "其他"]
+
+    /// 展示中报告落后于当前选择（旧数据保留展示，不套新标签 — QA 场景 3）
+    var showingStale: Bool {
+        store.monitorLoading &&
+        (store.monitorReportWindow != store.monitorWindow ||
+         store.monitorReportScope != store.monitorScope)
+    }
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 12) {
-                    StatCard(v: "\(store.totalRequests)", k: "24h 请求")
-                    StatCard(v: "\(store.totalTokens)", k: "24h tokens")
-                    StatCard(v: store.gatewayUp ? "在线" : "离线", k: "网关状态")
-                    if let m = store.metrics {
-                        let ok = m.success ?? 0, all = (m.success ?? 0) + (m.fail ?? 0)
-                        StatCard(v: all > 0 ? "\(Int(Double(ok) / Double(all) * 100))%" : "—", k: "成功率")
+        VStack(spacing: 0) {
+            filterHeader
+            Rectangle().fill(Color.lineC).frame(height: 1)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let rp = store.monitorReport { reportBody(rp) }
+                    else if store.monitorLoading {
+                        Card {
+                            Text("加载报告…").font(.system(size: 12)).foregroundColor(.faint)
+                                .frame(maxWidth: .infinity, minHeight: 120)
+                        }
+                    } else {
+                        Card {
+                            Text(store.gatewayUp ? "暂无数据 — 发起一次对话后这里会出现统计"
+                                                 : "网关离线 — 启动后此处显示监控统计")
+                                .font(.system(size: 12)).foregroundColor(.faint)
+                                .frame(maxWidth: .infinity, minHeight: 120)
+                        }
+                    }
+                }.padding(18)
+            }
+        }
+        // 显示时立即拉取；同查询单飞在网关侧短 TTL 缓存兜底，子视图不重复发请求
+        .onAppear {
+            if store.monitorReport == nil { store.fetchMonitorReport() }
+            store.fetchPoolRuntime()
+        }
+    }
+
+    private var filterHeader: some View {
+        HStack(spacing: 10) {
+            Picker("范围", selection: Binding(
+                get: { store.monitorWindow },
+                set: { store.selectMonitor(window: $0) })) {
+                ForEach(Self.windowChoices, id: \.0) { w in Text(w.1).tag(w.0) }
+            }.pickerStyle(.segmented).frame(width: 330).fixedSize()
+            Picker("来源", selection: Binding(
+                get: { store.monitorScope },
+                set: { store.selectMonitor(scope: $0) })) {
+                ForEach(Self.scopeChoices, id: \.0) { s in Text(s.1).tag(s.0) }
+            }.pickerStyle(.segmented).fixedSize()
+            if showingStale {
+                Text("切换中 · 显示\(Self.windowLabels[store.monitorReportWindow] ?? store.monitorReportWindow)旧数据")
+                    .font(.system(size: 11)).foregroundColor(.dim)
+            } else if store.monitorLoading {
+                Text("更新中…").font(.system(size: 11)).foregroundColor(.faint)
+            }
+            Spacer()
+            SmallBtn("刷新") { store.fetchMonitorReport(); store.fetchPoolRuntime() }
+        }.padding(.horizontal, 18).padding(.vertical, 10)
+    }
+
+    @ViewBuilder private func reportBody(_ rp: MonitorReportPayload) -> some View {
+        if let t = rp.totals {
+            HStack(spacing: 12) {
+                StatCard(v: fmtInt(t.requests), k: "请求")
+                StatCard(v: rateText(t.success_rate), k: "成功率")
+                StatCard(v: fmtInt(t.tokens_in), k: "输入 tokens")
+                StatCard(v: fmtInt(t.tokens_out), k: "输出 tokens")
+                StatCard(v: costText(t), k: "费用估算")
+            }
+        }
+        // 用量趋势：仅总量柱状 — 不默认展示全部模型折线（模型详情看表+详情卡）
+        Card {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("请求趋势（\(Self.windowLabels[rp.window ?? ""] ?? rp.window ?? "")）")
+                        .font(.system(size: 12.5)).foregroundColor(.dim)
+                    Spacer()
+                    if rp.coverage?.truncated == true {
+                        Text("数据截断").font(.system(size: 10.5)).foregroundColor(.dim)
                     }
                 }
-                Card {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("每小时请求数（近 24h）").font(.system(size: 12.5)).foregroundColor(.dim)
-                        if store.curve.isEmpty {
-                            Text("暂无数据 — 发起一次对话后这里会出现柱状图")
-                                .foregroundColor(.faint).frame(maxWidth: .infinity, minHeight: 120)
-                        } else {
-                            Chart(store.curve, id: \.t) { p in
-                                BarMark(
-                                    x: .value("时间", Date(timeIntervalSince1970: p.t)),
-                                    y: .value("请求", p.requests)
-                                )
-                                .foregroundStyle(Color.accent.opacity(0.75))
-                            }
-                            .chartYAxis(.hidden)
-                            .frame(height: 140)
-                        }
-                    }.padding(14)
+                let buckets = (rp.series ?? []).sorted { ($0.bucket_start ?? 0) < ($1.bucket_start ?? 0) }
+                if buckets.isEmpty || buckets.allSatisfy({ ($0.requests ?? 0) == 0 }) {
+                    Text("暂无调用 — 发起一次对话后出现柱状图")
+                        .foregroundColor(.faint).frame(maxWidth: .infinity, minHeight: 120)
+                } else {
+                    Chart(buckets, id: \.bucket_start) { b in
+                        BarMark(
+                            x: .value("时间", Date(timeIntervalSince1970: b.bucket_start ?? 0)),
+                            y: .value("请求", b.requests ?? 0)
+                        )
+                        .foregroundStyle(Color.accent.opacity(0.75))
+                    }
+                    .chartYAxis(.hidden)
+                    .frame(height: 140)
                 }
-                // G4: per-model 指标表（TTFT/TPS/tokens/成本）
-                Card {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("模型指标（24h）").font(.system(size: 12.5)).foregroundColor(.dim)
-                        // 列宽合计 610pt+ — 窄窗口横向滚动，不裁切
-                        ScrollView(.horizontal, showsIndicators: false) {
+            }.padding(14)
+        }
+        modelTableCard(rp)
+        poolStatsCard(rp)
+        errorCard(rp)
+    }
+
+    // ── 模型表 + 选中模型详情 ──
+    @ViewBuilder private func modelTableCard(_ rp: MonitorReportPayload) -> some View {
+        Card {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("模型").font(.system(size: 12.5)).foregroundColor(.dim)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 0) {
                         HStack(spacing: 0) {
-                            metricHead("模型").frame(width: 130, alignment: .leading)
-                            metricHead("来源").frame(width: 50)
-                            metricHead("请求").frame(width: 50)
-                            metricHead("tokens").frame(width: 90)
-                            metricHead("TTFT p50").frame(width: 80)
-                            metricHead("TTFT p95").frame(width: 80)
-                            metricHead("TPS").frame(width: 60)
-                            metricHead("成本").frame(width: 70)
+                            tableHead("模型").frame(width: 200, alignment: .leading)
+                            tableHead("来源").frame(width: 70)
+                            tableHead("请求").frame(width: 55)
+                            tableHead("成功率").frame(width: 60)
+                            tableHead("tokens").frame(width: 100)
+                            tableHead("TTFT p50").frame(width: 80)
+                            tableHead("TTFT p95").frame(width: 80)
                             Spacer()
                         }
-                        ForEach(metricRows, id: \.name) { r in
-                            HStack(spacing: 0) {
-                                HStack(spacing: 6) {
-                                    Circle().fill(r.color).frame(width: 7, height: 7)
-                                    Text(r.name).font(.system(size: 12)).foregroundColor(.ink).lineLimit(1)
-                                }.frame(width: 130, alignment: .leading)
-                                Text(r.source).font(.system(size: 11)).foregroundColor(.dim).frame(width: 50)
-                                Text("\(r.requests)").font(.system(size: 11.5, design: .monospaced)).foregroundColor(.ink).frame(width: 50)
-                                Text("\(r.tokensIn)/\(r.tokensOut)").font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim).frame(width: 90)
-                                Text(r.ttft50).font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim).frame(width: 80)
-                                Text(r.ttft95).font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim).frame(width: 80)
-                                Text(r.tps).font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim).frame(width: 60)
-                                Text(r.cost).font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim).frame(width: 70)
-                                Spacer()
-                            }
-                            .padding(.vertical, 3)
+                        ForEach(rp.models ?? []) { m in
+                            Button {
+                                store.monitorSelectedModel =
+                                    store.monitorSelectedModel == m.id ? nil : m.id
+                            } label: {
+                                HStack(spacing: 0) {
+                                    HStack(spacing: 6) {
+                                        Circle().fill(m.location == "cloud" ? Color.thLlm : Color.okC)
+                                            .frame(width: 7, height: 7)
+                                        Text(modelDisplay(m)).font(.system(size: 12)).foregroundColor(.ink).lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }.frame(width: 200, alignment: .leading)
+                                    Text(scopeText(m)).font(.system(size: 11)).foregroundColor(.dim).frame(width: 70)
+                                    Text(fmtInt(m.requests)).font(.system(size: 11.5, design: .monospaced)).foregroundColor(.ink).frame(width: 55)
+                                    Text(rateText(m.success_rate)).font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim).frame(width: 60)
+                                    Text("\(fmtInt(m.tokens_in))/\(fmtInt(m.tokens_out))").font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim).frame(width: 100)
+                                    Text(ttftText(m.p50_ttft_ms, m.ttft_samples)).font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim).frame(width: 80)
+                                    Text(ttftText(m.p95_ttft_ms, m.ttft_samples)).font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim).frame(width: 80)
+                                    Spacer()
+                                }
+                                .padding(.vertical, 3)
+                                .contentShape(Rectangle())
+                            }.buttonStyle(.plain)
+                            .background(store.monitorSelectedModel == m.id ? Color.accent.opacity(0.08) : Color.clear)
                             Rectangle().fill(Color.lineC).frame(height: 1)
                         }
-                        if metricRows.isEmpty {
+                        if (rp.models ?? []).isEmpty {
                             Text("暂无调用数据").font(.system(size: 11.5)).foregroundColor(.faint)
                         }
-                        }
-                    }.padding(14)
+                    }
                 }
-            }.padding(18)
+                if let sel = selectedRow(rp) { modelDetail(sel) }
+            }.padding(14)
         }
     }
 
-    struct MetricRow {
-        let name: String; let color: Color; let source: String
-        let requests: Int; let tokensIn: Int; let tokensOut: Int
-        let ttft50: String; let ttft95: String; let tps: String; let cost: String
+    /// 模型名完整可查看：详情卡原文展示（可选中复制），表格行只做省略
+    private func selectedRow(_ rp: MonitorReportPayload) -> MonitorModelRow? {
+        guard let id = store.monitorSelectedModel else { return nil }
+        return (rp.models ?? []).first { $0.id == id }
     }
 
-    var metricRows: [MetricRow] {
-        guard let models = store.metrics?.models else { return [] }
-        return models.keys.sorted().compactMap { name in
-            guard let mm = models[name] else { return nil }
-            let isCloud = mm.source == "cloud"
-            let hasTraffic = (mm.requests ?? 0) > 0
-            return MetricRow(
-                name: name,
-                color: isCloud ? Color.thLlm : (hasTraffic ? Color.okC : Color.faint.opacity(0.6)),
-                source: isCloud ? "云端" : "本机",
-                requests: mm.requests ?? 0,
-                tokensIn: mm.tokens_in ?? 0, tokensOut: mm.tokens_out ?? 0,
-                ttft50: mm.ttft_p50.map { String(format: "%.0fms", $0) } ?? "—",
-                ttft95: mm.ttft_p95.map { String(format: "%.0fms", $0) } ?? "—",
-                tps: mm.e2e_tps_p50.map { String(format: "%.1f", $0) } ?? "—",
-                cost: String(format: "¥%.2f", mm.cost_yuan ?? 0))
+    private func modelDetail(_ m: MonitorModelRow) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("模型详情").font(.system(size: 11)).foregroundColor(.faint)
+                Spacer()
+            }
+            Text(modelDisplay(m))
+                .font(.system(size: 12.5, design: .monospaced)).foregroundColor(.ink)
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 16) {
+                perfCell("TTFT p50", ttftText(m.p50_ttft_ms, m.ttft_samples))
+                perfCell("TTFT p95", ttftText(m.p95_ttft_ms, m.ttft_samples))
+                perfCell("端到端 p50", durText(m.p50_duration_ms, m.duration_samples))
+                perfCell("端到端 p95", durText(m.p95_duration_ms, m.duration_samples))
+            }
+            Text("TTFT 样本 \(m.ttft_samples ?? 0) · 时长样本 \(m.duration_samples ?? 0) · 成功 \(fmtInt(m.success))/\(fmtInt(m.requests))")
+                .font(.system(size: 10.5)).foregroundColor(.faint)
+        }
+        .padding(10)
+        .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func perfCell(_ k: String, _ v: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(k).font(.system(size: 10)).foregroundColor(.faint)
+            Text(v).font(.system(size: 12, design: .monospaced)).foregroundColor(.ink)
         }
     }
 
-    func metricHead(_ t: String) -> some View {
+    // ── 池统计（轻量摘要；详情展开回退/冷却 — 健康来自 Task 6 runtime）──
+    @ViewBuilder private func poolStatsCard(_ rp: MonitorReportPayload) -> some View {
+        let pools = (rp.pools ?? []).sorted { ($0.requests ?? 0) > ($1.requests ?? 0) }
+        if !pools.isEmpty {
+            Card {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("模型池（\(Self.windowLabels[rp.window ?? ""] ?? "")）")
+                        .font(.system(size: 12.5)).foregroundColor(.dim)
+                    ForEach(pools, id: \.pool) { p in poolRow(p) }
+                }.padding(14)
+            }
+        }
+    }
+
+    @ViewBuilder private func poolRow(_ p: MonitorPoolRow) -> some View {
+        let name = p.pool ?? "—"
+        let reqs = p.requests ?? 0
+        let rate: Double? = reqs > 0 ? Double(p.success ?? 0) / Double(reqs) : nil
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                store.monitorPoolExpanded = store.monitorPoolExpanded == name ? nil : name
+            } label: {
+                HStack(spacing: 12) {
+                    Text("iff/\(name)").font(.system(size: 12, weight: .semibold)).foregroundColor(.ink)
+                    Text("\(fmtInt(reqs)) 请求").font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim)
+                    Text("成功率 \(rateText(rate))")
+                        .font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim)
+                    if let top = topTarget(p) {
+                        Text("最终承接 \(top)").font(.system(size: 11)).foregroundColor(.dim).lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer()
+                    Image(systemName: store.monitorPoolExpanded == name ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9)).foregroundColor(.faint)
+                }.contentShape(Rectangle())
+            }.buttonStyle(.plain)
+            if store.monitorPoolExpanded == name {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("尝试 \(p.attempt_count ?? 0) · 重试(同目标) \(p.retry_count ?? 0) · 回退(换目标) \(p.fallback_count ?? 0) · 摘要覆盖 \(Int((p.summary_coverage ?? 0) * 100))%")
+                        .font(.system(size: 11)).foregroundColor(.dim)
+                    // 候选健康：Task 6 runtime — 冷却原因/半开探测/最近真实尝试
+                    let cands = store.monitorRuntime?.pools?[name]?.candidates ?? []
+                    if cands.isEmpty {
+                        Text("候选运行态不可用（池未配置或网关离线）")
+                            .font(.system(size: 11)).foregroundColor(.faint)
+                    } else {
+                        ForEach(cands, id: \.id) { c in
+                            HStack(spacing: 8) {
+                                Circle().fill(c.active == true ? Color.okC : Color.faint.opacity(0.5))
+                                    .frame(width: 7, height: 7)
+                                Text(c.target ?? c.id ?? "—").font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(.ink).lineLimit(1).truncationMode(.middle)
+                                if let cool = c.cooling {
+                                    Text(cool.probing == true
+                                         ? "半开探测中"
+                                         : "冷却 \(Int(cool.remaining_s ?? 0))s · \(cool.reason ?? "")")
+                                        .font(.system(size: 10.5)).foregroundColor(.dim)
+                                }
+                                if let last = c.last_attempt {
+                                    Text("最近尝试 \(last.ok == true ? "✓" : "✗")\(last.status.map { " \($0)" } ?? "") · \(Int(last.age_s ?? 0))s 前")
+                                        .font(.system(size: 10.5)).foregroundColor(.faint)
+                                }
+                                Spacer()
+                            }
+                        }
+                    }
+                }
+                .padding(10)
+                .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func topTarget(_ p: MonitorPoolRow) -> String? {
+        let ft = p.final_targets ?? [:]
+        return ft.max { $0.value < $1.value }?.key
+    }
+
+    // ── 错误分类（脱敏：仅类别 + 计数）──
+    @ViewBuilder private func errorCard(_ rp: MonitorReportPayload) -> some View {
+        let errs = (rp.errors ?? []).filter { ($0.count ?? 0) > 0 }
+        if !errs.isEmpty {
+            Card {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("错误分类").font(.system(size: 12.5)).foregroundColor(.dim)
+                    HStack(spacing: 10) {
+                        ForEach(errs, id: \.id) { e in
+                            let cls = e.class ?? "other"
+                            HStack(spacing: 4) {
+                                Text(Self.errorLabels[cls] ?? cls)
+                                    .font(.system(size: 11)).foregroundColor(.dim)
+                                Text("\(fmtInt(e.count))")
+                                    .font(.system(size: 11.5, design: .monospaced)).foregroundColor(.ink)
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(Color.lineC.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                        }
+                    }
+                }.padding(14)
+            }
+        }
+    }
+
+    // ── 格式化 ──
+    private func tableHead(_ t: String) -> some View {
         Text(t).font(.system(size: 10.5)).foregroundColor(.faint)
+    }
+    private func modelDisplay(_ m: MonitorModelRow) -> String {
+        let name = m.model ?? "unknown"
+        if m.location == "cloud", let p = m.provider, !p.isEmpty { return "\(p)/\(name)" }
+        return name
+    }
+    private func scopeText(_ m: MonitorModelRow) -> String {
+        switch m.location {
+        case "local": return "本机"
+        case "cloud": return "云端"
+        default: return "未归属"
+        }
+    }
+    private func fmtInt(_ v: Int?) -> String {
+        guard let v else { return "—" }
+        let f = NumberFormatter(); f.numberStyle = .decimal
+        return f.string(from: NSNumber(value: v)) ?? "\(v)"
+    }
+    private func rateText(_ r: Double?) -> String {
+        guard let r else { return "—" }
+        return "\(Int((r * 100).rounded()))%"
+    }
+    /// 缺 TTFT（样本 0）= unknown 显示 "—"，不是 0ms
+    private func ttftText(_ v: Double?, _ samples: Int?) -> String {
+        guard let v, (samples ?? 0) > 0 else { return "—" }
+        return String(format: "%.0fms", v)
+    }
+    private func durText(_ v: Double?, _ samples: Int?) -> String {
+        guard let v, (samples ?? 0) > 0 else { return "—" }
+        return v >= 1000 ? String(format: "%.1fs", v / 1000) : String(format: "%.0fms", v)
+    }
+    private func costText(_ t: MonitorTotals) -> String {
+        // 缺价格配置 = unknown（"未配价"），不冒充 $0.00
+        guard let usd = t.cost_estimate_usd else { return "未配价" }
+        return String(format: "$%.2f", usd)
     }
 }
 
