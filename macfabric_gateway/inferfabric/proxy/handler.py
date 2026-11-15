@@ -293,6 +293,8 @@ _POST_ROUTES = {
     "/admin/keys/policy":       _admin(lambda h, pm: key_admin.handle(h, pm, "policy")),
     "/admin/security/status":   _admin(lambda h, pm: h._handle_security_status(pm)),
     "/admin/security/enable":   _admin(lambda h, pm: h._handle_security_enable(pm)),
+    "/admin/security/keys":         _admin(lambda h, pm: h._handle_security_create_key(pm)),
+    "/admin/security/keys/revoke":  _admin(lambda h, pm: h._handle_security_revoke_key(pm)),
     "/v1/chat/completions":     lambda h, pm: h._handle_chat(pm),
     "/v1/completions":          lambda h, pm: h._handle_chat(pm),
     "/v1/messages":             lambda h, pm: h._handle_messages(pm),
@@ -2826,16 +2828,57 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                          "action": action, "routable_count": count})
 
     def _handle_security_status(self, pm):
-        """GET /admin/security/status — App 设置页鉴权开关状态。"""
+        """GET /admin/security/status — App 设置页鉴权开关状态 + 密钥清单（无明文）。"""
         auth = pm.auth
         if isinstance(auth, SecurityAuth):
             policy = auth.store.get_policy()
             enforced = policy == "all" or auth.legacy.enabled
+            keys = [{"id": k.get("id"), "name": k.get("name"),
+                     "created_at": k.get("created_at"),
+                     "revoked": k.get("revoked_at") is not None}
+                    for k in auth.store.list_keys()]
             self._send_json({"active": True, "policy": policy, "enforced": enforced,
-                             "key_count": len(auth.store.list_keys())})
+                             "key_count": sum(1 for k in keys if not k["revoked"]),
+                             "keys": keys})
         else:
             self._send_json({"active": False, "policy": None, "enforced": auth.enabled,
-                             "key_count": 0})
+                             "key_count": 0, "keys": []})
+
+    def _handle_security_create_key(self, pm):
+        """POST /admin/security/keys {name?} — 新建 API key（明文仅本次回显一次）。"""
+        data = self._read_body() or {}
+        name = (data.get("name") or "macfabric-app").strip()[:64] or "macfabric-app"
+        auth = pm.auth
+        if not isinstance(auth, SecurityAuth):
+            self._send_json({"error": "鉴权未启用 — 先开启 API Key 鉴权"}, 400)
+            return
+        try:
+            entry, token = auth.store.create_key(name, None, None)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+            return
+        log.info("API key created via app settings: name=%s id=%s", name, entry.get("id"))
+        self._send_json({"status": "ok", "key": token, "name": name,
+                         "note": "明文仅本次返回 — 请立即复制保存"})
+
+    def _handle_security_revoke_key(self, pm):
+        """POST /admin/security/keys/revoke {id} — 撤销指定 key。"""
+        data = self._read_body() or {}
+        kid = data.get("id")
+        auth = pm.auth
+        if not isinstance(auth, SecurityAuth):
+            self._send_json({"error": "鉴权未启用"}, 400)
+            return
+        if not isinstance(kid, str) or not kid:
+            self._send_json({"error": "id (string) required"}, 400)
+            return
+        try:
+            auth.store.revoke_key(kid)
+        except KeyError:
+            self._send_json({"error": f"key {kid} 不存在"}, 404)
+            return
+        log.info("API key revoked via app settings: id=%s", kid)
+        self._send_json({"status": "ok"})
 
     def _handle_security_enable(self, pm):
         """POST /admin/security/enable {enforce: bool, key_name?: str}

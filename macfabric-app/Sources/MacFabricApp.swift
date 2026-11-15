@@ -181,6 +181,12 @@ struct PackDownloadState: Codable {
     var error: String?
     var detail: String?      // 引擎构建阶段文案（"cmake 配置…"/"编译中…"）
 }
+struct SecurityKeyInfo: Identifiable {
+    let id: String
+    let name: String
+    let createdAt: Double?
+    let revoked: Bool
+}
 struct ModelMetrics: Codable {
     var requests: Int?
     var success: Int?
@@ -275,7 +281,18 @@ final class GatewayStore: ObservableObject {
     @Published var securityEnforced = false
     @Published var securityKeyCount = 0
     @Published var securityBusy = false
-    @Published var oneTimeKey: String? = nil   // 首次启用返回的明文 key（仅此一次，库内只存摘要）
+    @Published var oneTimeKey: String? = nil   // 首次启用/新建返回的明文 key（仅此一次，库内只存摘要）
+    @Published var securityKeys: [SecurityKeyInfo] = []
+    @Published var securityKeyRevokeConfirm: String? = nil {
+        didSet {
+            confirmResetSecKey?.cancel()
+            guard securityKeyRevokeConfirm != nil else { return }
+            let work = DispatchWorkItem { [weak self] in self?.securityKeyRevokeConfirm = nil }
+            confirmResetSecKey = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
+        }
+    }
+    private var confirmResetSecKey: DispatchWorkItem?
     var onMemoryInsufficient: ((_ name: String, _ reason: String) -> Void)?
 
     private var base: URL { URL(string: GW_BASE)! }
@@ -566,7 +583,62 @@ final class GatewayStore: ObservableObject {
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             DispatchQueue.main.async {
                 self.securityEnforced = obj["enforced"] as? Bool ?? false
-                self.securityKeyCount = obj["key_count"] as? Int ?? 0
+                let keys = (obj["keys"] as? [[String: Any]] ?? []).compactMap {
+                    SecurityKeyInfo(id: $0["id"] as? String ?? "",
+                                    name: $0["name"] as? String ?? "?",
+                                    createdAt: $0["created_at"] as? Double,
+                                    revoked: $0["revoked"] as? Bool ?? false)
+                }
+                self.securityKeys = keys
+                self.securityKeyCount = obj["key_count"] as? Int ?? keys.filter { !$0.revoked }.count
+            }
+        }.resume()
+    }
+
+    /// 设置页：新建 API key（明文仅本次回显 — 立即弹一次性复制面板）
+    func createSecurityKey() {
+        guard !securityBusy else { actionMessage = "⚠️ 上一操作进行中，请稍候"; return }
+        securityBusy = true
+        var req = URLRequest(url: base.appendingPathComponent("/admin/security/keys"), timeoutInterval: 30)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": "macfabric-app"])
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let raw = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.securityBusy = false
+                if (200..<300).contains(code),
+                   let obj = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
+                   let key = obj["key"] as? String, !key.isEmpty {
+                    self.oneTimeKey = key
+                    self.actionMessage = "✅ 新密钥已生成 — 明文仅显示这一次，请立即复制"
+                } else {
+                    self.actionMessage = "❌ 新建密钥失败(\(code)): \(raw.prefix(100))"
+                }
+                self.fetchSecurityStatus()
+            }
+        }.resume()
+    }
+
+    /// 设置页：撤销指定 key（两击确认）
+    func revokeSecurityKey(_ id: String) {
+        guard !securityBusy else { actionMessage = "⚠️ 上一操作进行中，请稍候"; return }
+        securityBusy = true
+        var req = URLRequest(url: base.appendingPathComponent("/admin/security/keys/revoke"), timeoutInterval: 30)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["id": id])
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.securityBusy = false
+                self.actionMessage = (200..<300).contains(code)
+                    ? "✅ 密钥已撤销" : "❌ 撤销失败(\(code))"
+                self.securityKeyRevokeConfirm = nil
+                self.fetchSecurityStatus()
             }
         }.resume()
     }
@@ -2313,6 +2385,12 @@ struct CloudAddCard: View {
 struct SettingsView: View {
     @ObservedObject var store: GatewayStore
 
+    static let keyDate: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm"
+        return f
+    }()
+
     private var ramGB: Int {
         Int(ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024))
     }
@@ -2373,9 +2451,45 @@ struct SettingsView: View {
                                 .disabled(store.securityBusy)
                         }
                         .padding(.vertical, 8)
+                        // 密钥管理（明文永不回显 — 新建时一次性展示）
+                        if !store.securityKeys.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(store.securityKeys) { k in
+                                    HStack(spacing: 8) {
+                                        Image(systemName: k.revoked ? "key.slash" : "key")
+                                            .font(.system(size: 10)).foregroundColor(k.revoked ? .faint : .okC)
+                                        Text(k.name).font(.system(size: 12)).foregroundColor(.ink)
+                                        if k.revoked { Chip("已撤销", color: Color.faint) }
+                                        if let ts = k.createdAt {
+                                            Text(Self.keyDate.string(from: Date(timeIntervalSince1970: ts)))
+                                                .font(.system(size: 10.5)).foregroundColor(.faint)
+                                        }
+                                        Spacer()
+                                        if !k.revoked {
+                                            if store.securityKeyRevokeConfirm == k.id {
+                                                SmallBtn("确认撤销", primary: true) { store.revokeSecurityKey(k.id) }
+                                                SmallBtn("取消") { store.securityKeyRevokeConfirm = nil }
+                                            } else {
+                                                SmallBtn("撤销") { store.securityKeyRevokeConfirm = k.id }
+                                            }
+                                        }
+                                    }
+                                    .padding(.vertical, 2)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                        HStack {
+                            SmallBtn("＋ 新建密钥", primary: true) { store.createSecurityKey() }
+                                .disabled(store.securityBusy)
+                            Text("客户端调用示例：Authorization: Bearer sk-iff-…")
+                                .font(.system(size: 10.5)).foregroundColor(.faint)
+                            Spacer()
+                        }
+                        .padding(.vertical, 4)
                         if let key = store.oneTimeKey {
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("首次启用已生成密钥 — 明文仅显示这一次，请立即复制保存")
+                                Text("新密钥明文 — 仅显示这一次，请立即复制保存")
                                     .font(.system(size: 11.5, weight: .semibold)).foregroundColor(.warnC)
                                 HStack(spacing: 8) {
                                     Text(key)
