@@ -36,6 +36,7 @@ class PackStore:
             return {}
 
     def _write(self, data: dict) -> None:
+        os.makedirs(os.path.dirname(str(self._path)) or ".", exist_ok=True)
         part = f"{self._path}.part"
         with open(part, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)

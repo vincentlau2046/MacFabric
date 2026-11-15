@@ -37,6 +37,7 @@ from inferfabric.agent_registry import request_protocol
 from inferfabric.agent_stats import AGENT_GRAN, aggregate_agent_stats
 from inferfabric.metrics_aggregator import cost_of_row
 from inferfabric.proxy.request_logger import RequestLog
+from inferfabric.proxy import pack_handlers
 from inferfabric.monitor_report import (
     DEFAULT_WINDOW,
     VALID_SCOPES,
@@ -278,6 +279,10 @@ _GET_ROUTES = {
     "/profiles":                lambda h, pm: (log.warning("/profiles is deprecated"), h._send_json(pm.mgr.list_models()))[1],
     "/local-models":            lambda h, pm: h._send_json(pm.mgr.discover_local_models()),
     "/admin/packs/download-status": _admin(lambda h, pm: h._send_json(_pack_downloads_snapshot())),
+    # MACFABRIC: 能力包 Catalog/事务（Task 8）— 安装只接受 Catalog pack_id
+    "/admin/packs/catalog":    _admin(lambda h, pm: h._handle_pack_catalog(pm)),
+    "/admin/packs/status":     _admin(lambda h, pm: h._handle_pack_status(pm)),
+    "/admin/packs/policy":     _admin(lambda h, pm: h._handle_pack_policy_get(pm)),
     "/ocr":                     _admin(lambda h, pm: h._handle_ocr(pm)),
     "/v1/models":               lambda h, pm: h._handle_v1_models(pm),
     "/system":                  lambda h, pm: h._send_json(h._system_info()),
@@ -350,6 +355,7 @@ _POST_ROUTES = {
     "/admin/packs/install":    _admin(lambda h, pm: h._handle_pack_install(pm)),
     "/admin/models/set-autostart": _admin(lambda h, pm: h._handle_set_autostart(pm)),
     "/admin/packs/download":        _admin(lambda h, pm: h._handle_pack_download(pm)),
+    "/admin/packs/policy":          _admin(lambda h, pm: h._handle_pack_policy_post(pm)),
 
     # ─── Admin: Cloud Provider Management (PR-D) ─────────────────
     "/admin/cloud/reload":      _admin(lambda h, pm: h._handle_cloud_reload(pm)),
@@ -1663,6 +1669,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._send_json({"error": "Unauthorized", "status": "unauthorized"}, 401)
         return False
 
+    # ─── MACFABRIC: 能力包 Catalog/事务（Task 8） ─────────────────────
+    def _handle_pack_catalog(self, pm):
+        self._send_json(pack_handlers.get_pack_manager().catalog_payload())
+
+    def _handle_pack_status(self, pm):
+        self._send_json(pack_handlers.get_pack_manager().status_payload())
+
+    def _handle_pack_policy_get(self, pm):
+        code, payload = pack_handlers.get_pack_manager().policy_get()
+        self._send_json(payload, code)
+
+    def _handle_pack_policy_post(self, pm):
+        data = self._read_body()
+        code, payload = pack_handlers.get_pack_manager().policy_put(data or {})
+        self._send_json(payload, code)
+
     # ─── MACFABRIC F2: 能力包卸载 ─────────────────────────────────
     def _handle_pack_uninstall(self, pm):
         """卸载能力包 — 端到端「容器化」清理（MacFabric 与上游的差异点）：
@@ -2013,8 +2035,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return str(Path.home() / "models")
 
     def _handle_pack_install(self, pm):
-        """安装能力包 = 发现产物写 models.d YAML + 热重载，不启动（Mac 语义）。"""
+        """安装入口分流（spec §6.1 裁决）：
+
+        - body 含 ``pack_id`` → 能力包事务（Catalog-only，URL/hash 后端提供）
+        - 否则旧流程：本地发现产物写 models.d YAML（用户导入模型路径，原样保留）
+        """
         data = self._read_body()
+        if data and data.get("pack_id"):
+            code, payload = pack_handlers.get_pack_manager().start_install(
+                str(data["pack_id"]))
+            self._send_json(payload, code)
+            return
         name = ((data or {}).get("name") or "").strip()
         model_type = ((data or {}).get("type") or "llama_cpp").strip()
         if not name:
