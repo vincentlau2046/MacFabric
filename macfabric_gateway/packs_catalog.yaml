@@ -1,0 +1,107 @@
+# MacFabric 捆绑能力目录（Catalog）— spec §6.1/§11
+# 首批冻结 5 项（2026-11-15 裁决）：Qwen3-4B-Instruct-2507（首个完整试点）、
+# BGE-M3、Whisper large-v3-turbo、Kokoro ONNX、macOS Vision。
+# Gemma 许可证复核前不得进入本目录。
+# sha256 占位 000...0（TBD-HASH）— Task 12 冻结真实下载源与 hash 后替换。
+# 本目录随应用发布；能力包安装只接受此处 pack_id，URL/hash 由后端提供。
+packs:
+  - pack_id: llm.qwen3-4b-instruct-2507
+    display_name: Qwen3-4B Instruct (2507)
+    summary: 通用基线端侧 LLM，中英多语，支持工具调用；本批首个完整试点包
+    tags: [chat, tools, multilingual]
+    risk_level: verified
+    builtin: false
+    manifest:
+      pack_id: llm.qwen3-4b-instruct-2507
+      pack_version: 1.0.0
+      capability: llm
+      model: {id: qwen3-4b-instruct-2507, parameter_count_b: 4, quantization: q4_k_m, license: apache-2.0}
+      runtime: {engine: llama_cpp, runtime_template: llama-cpp-macos-arm64-v1}
+      resources: {download_mb: 3200, disk_mb: 3400, peak_memory_mb: 4800, gpu_role: shared}
+      lifecycle: {mode: on_demand}
+      network: {listen: loopback, allowed_upstream: []}
+      artifacts:
+        - {id: model, kind: model, source: "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf", sha256: "0000000000000000000000000000000000000000000000000000000000000000"}  # TBD-HASH
+        - {id: engine, kind: runtime, source: "https://github.com/ggml-org/llama.cpp/releases/download/b12361/llama-b12361-bin-macos-arm64.zip", sha256: "0000000000000000000000000000000000000000000000000000000000000000"}  # TBD-HASH
+      execution: {model_config_template: llama_cpp_chat_v1, healthcheck: openai_chat_ready_v1}
+      sandbox: {policy: verified-local-pack-v1, degraded_install_allowed: true}
+
+  - pack_id: embedding.bge-m3
+    display_name: BGE-M3 Embedding
+    summary: 多语 dense + 混合检索嵌入模型
+    tags: [embedding, retrieval, multilingual]
+    risk_level: verified
+    builtin: false
+    manifest:
+      pack_id: embedding.bge-m3
+      pack_version: 1.0.0
+      capability: embedding
+      model: {id: bge-m3, parameter_count_b: 1, quantization: f16, license: mit}
+      runtime: {engine: llama_cpp, runtime_template: llama-cpp-macos-arm64-v1}
+      resources: {download_mb: 2400, disk_mb: 2600, peak_memory_mb: 2200, gpu_role: shared}
+      lifecycle: {mode: on_demand}
+      network: {listen: loopback, allowed_upstream: []}
+      artifacts:
+        - {id: model, kind: model, source: "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf", sha256: "0000000000000000000000000000000000000000000000000000000000000000"}  # TBD-HASH
+        - {id: engine, kind: runtime, source: "https://github.com/ggml-org/llama.cpp/releases/download/b12361/llama-b12361-bin-macos-arm64.zip", sha256: "0000000000000000000000000000000000000000000000000000000000000000"}  # TBD-HASH
+      execution: {model_config_template: llama_cpp_chat_v1, healthcheck: openai_chat_ready_v1}
+      sandbox: {policy: verified-local-pack-v1, degraded_install_allowed: true}
+
+  - pack_id: asr.whisper-large-v3-turbo
+    display_name: Whisper large-v3-turbo
+    summary: 多语语音识别（whisper.cpp，Metal 加速）
+    tags: [asr, multilingual, streaming-off]
+    risk_level: verified
+    builtin: false
+    manifest:
+      pack_id: asr.whisper-large-v3-turbo
+      pack_version: 1.0.0
+      capability: asr
+      model: {id: whisper-large-v3-turbo, parameter_count_b: 1, quantization: q5_0, license: mit}
+      runtime: {engine: asr_server, runtime_template: whisper-cpp-macos-arm64-v1}
+      resources: {download_mb: 1700, disk_mb: 1900, peak_memory_mb: 2200, gpu_role: shared}
+      lifecycle: {mode: on_demand}
+      network: {listen: loopback, allowed_upstream: []}
+      artifacts:
+        - {id: model, kind: model, source: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin", sha256: "0000000000000000000000000000000000000000000000000000000000000000"}  # TBD-HASH
+      execution: {model_config_template: asr_server_v1, healthcheck: asr_ready_v1}
+      sandbox: {policy: verified-local-pack-v1, degraded_install_allowed: true}
+
+  - pack_id: tts.kokoro-82m-onnx
+    display_name: Kokoro-82M (ONNX)
+    summary: 英语低延迟语音合成（ONNX Runtime）
+    tags: [tts, english, low-latency]
+    risk_level: verified
+    builtin: false
+    manifest:
+      pack_id: tts.kokoro-82m-onnx
+      pack_version: 1.0.0
+      capability: tts
+      model: {id: kokoro-82m, parameter_count_b: 1, quantization: fp32-onnx, license: apache-2.0}
+      runtime: {engine: tts_server, runtime_template: kokoro-onnx-macos-arm64-v1}
+      resources: {download_mb: 400, disk_mb: 600, peak_memory_mb: 800, gpu_role: none}
+      lifecycle: {mode: on_demand}
+      network: {listen: loopback, allowed_upstream: []}
+      artifacts:
+        - {id: model, kind: model, source: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model.fp32.onnx", sha256: "0000000000000000000000000000000000000000000000000000000000000000"}  # TBD-HASH
+      execution: {model_config_template: tts_server_v1, healthcheck: tts_ready_v1}
+      sandbox: {policy: verified-local-pack-v1, degraded_install_allowed: true}
+
+  - pack_id: ocr.macos-vision
+    display_name: macOS Vision OCR
+    summary: 系统内置 OCR（Apple Vision 框架，只读调用，无需下载）
+    tags: [ocr, builtin, zero-download]
+    risk_level: verified
+    builtin: true
+    manifest:
+      pack_id: ocr.macos-vision
+      pack_version: 1.0.0
+      capability: ocr
+      model: {id: macos-vision, parameter_count_b: 1, quantization: builtin, license: apple-system-framework}
+      runtime: {engine: macos_vision_cli, runtime_template: macos-vision-v1}
+      resources: {download_mb: 1, disk_mb: 1, peak_memory_mb: 200, gpu_role: none}
+      lifecycle: {mode: on_demand}
+      network: {listen: loopback, allowed_upstream: []}
+      artifacts: []
+      execution: {model_config_template: macos_vision_builtin_v1, healthcheck: vision_available_v1}
+      sandbox: {policy: verified-local-pack-v1, degraded_install_allowed: true}

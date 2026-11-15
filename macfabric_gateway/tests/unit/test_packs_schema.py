@@ -126,3 +126,12 @@ def test_gpu_role_whitelist():
     bad = MINIMAL_YAML.replace("gpu_role: shared", "gpu_role: sometimes")
     with pytest.raises(ManifestError):
         parse_manifest(bad)
+
+
+def test_empty_artifacts_allowed_for_builtin_packs():
+    # 系统内置能力（spec §3.5）无下载 artifact；artifacts 仍必须是列表
+    import re
+    stripped = re.sub(r"^artifacts:\n(  - .*\n)+", "artifacts: []\n",
+                      MINIMAL_YAML, flags=re.M)
+    m = parse_manifest(stripped)
+    assert m.artifacts == ()

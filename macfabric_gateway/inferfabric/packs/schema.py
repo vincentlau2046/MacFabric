@@ -188,8 +188,9 @@ def parse_manifest(text: str | dict) -> PackManifest:
         raise ManifestError("network.allowed_upstream", "expected list of str")
 
     arts_raw = d["artifacts"]
-    if not isinstance(arts_raw, list) or not arts_raw:
-        raise ManifestError("artifacts", "expected non-empty list")
+    if not isinstance(arts_raw, list):
+        raise ManifestError("artifacts", "expected list")
+    # 空列表合法：系统内置能力（spec §3.5，如 macOS Vision）无下载 artifact
     artifacts = []
     for i, a in enumerate(arts_raw):
         path = f"artifacts[{i}]"
