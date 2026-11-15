@@ -338,22 +338,41 @@ class IFFDB:
     def insert_request_log(self, entries: list[dict]):
         if not entries:
             return
+        import json as _json
         # 旧调用方（v6.5 前构造的 entry dict / 测试 fixture）可能缺
         # tokens_in_cached / agent / ua 键 → 缺省，保持后向兼容。
+        # metadata（PLAN-2026-11-15 v2 Task 2）：缺省 '{}'；dict 序列化为
+        # JSON 文本。route 防御性兜底：显式 None 曾撞 NOT NULL 约束被
+        # INSERT OR IGNORE 静默丢弃（失败日志丢失根因之一）— 兜底为
+        # 'local' 保证终态行必落库，route 语义修正仍在调用方负责。
         entries = [dict(e, tokens_in_cached=e.get("tokens_in_cached", 0),
                         agent=e.get("agent", ""), ua=e.get("ua", ""),
-                        x_app=e.get("x_app", "")) for e in entries]
+                        x_app=e.get("x_app", ""),
+                        key_name=e.get("key_name", ""),
+                        ttft_ms=e.get("ttft_ms"),
+                        tokens_in=e.get("tokens_in", 0),
+                        tokens_out=e.get("tokens_out", 0),
+                        duration_ms=e.get("duration_ms", 0.0),
+                        cloud_provider=e.get("cloud_provider"),
+                        error=e.get("error"), ts=e.get("ts", ""),
+                        route=e.get("route") or "local",
+                        metadata=_json.dumps(e.get("metadata") or {},
+                                             ensure_ascii=False)
+                        if not isinstance(e.get("metadata"), str)
+                        else e["metadata"])
+                   for e in entries]
         with self._write_lock:
             with self.connect(REQUEST_LOG_DB) as conn:
                 conn.executemany(
                     "INSERT OR IGNORE INTO request_log "
                     "(req_id, key_name, model, status, ttft_ms, tokens_in, "
                     " tokens_in_cached, tokens_out, agent, ua, x_app, "
-                    " duration_ms, route, cloud_provider, error, timestamp, ts) "
+                    " duration_ms, route, cloud_provider, error, timestamp, ts, "
+                    " metadata) "
                     "VALUES (:req_id, :key_name, :model, :status, :ttft_ms, :tokens_in, "
                     ":tokens_in_cached, :tokens_out, :agent, :ua, :x_app, "
                     ":duration_ms, :route, :cloud_provider, :error, "
-                    ":timestamp, :ts)",
+                    ":timestamp, :ts, :metadata)",
                     entries,
                 )
                 conn.commit()
@@ -373,7 +392,20 @@ class IFFDB:
             sql += " ORDER BY timestamp DESC LIMIT ?"
             params.append(limit)
             rows = conn.execute(sql, params).fetchall()
-            return [dict(zip(cols, r)) for r in rows]
+            import json as _json
+            out = []
+            for r in rows:
+                d = dict(zip(cols, r))
+                # metadata JSON 文本 → dict（回读契约：Task 2 摘要重启可读）；
+                # 损坏/非 JSON 保持原值由消费方按 unknown 处理，不抛异常
+                m = d.get("metadata")
+                if isinstance(m, str):
+                    try:
+                        d["metadata"] = _json.loads(m) if m else {}
+                    except Exception:
+                        pass
+                out.append(d)
+            return out
 
     def reclassify_request_log(self, classify_fn, known_ids: set | None = None) -> int:
         """对无真实 def 的行（unknown + observed 残留如 smoke-tmp）用 classify_fn

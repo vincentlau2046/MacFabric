@@ -286,6 +286,86 @@ def _physical_identity(cand) -> tuple[str | None, str | None]:
     return c.model_name, None
 
 
+def _target_identity(cand) -> dict:
+    """候选 → pool_summary 目标身份（v1 契约：candidate_id/provider/
+    requested_model_id/actual_model_id；本层未区分请求别名，二者同值，
+    Task 3 结构化传输接续细化）。local 无 provider → None。"""
+    c = cand.candidate
+    if c.kind == "cloud":
+        mid = c.model_id
+        prov = c.provider
+    else:
+        mid = c.model_name
+        prov = None
+    return {"candidate_id": c.id, "provider": prov,
+            "requested_model_id": mid, "actual_model_id": mid}
+
+
+def build_pool_summary(outcome: "AttemptOutcome", *, pool_name: str,
+                       protocol: str, config_revision: int,
+                       requested_model: str,
+                       candidates=()) -> dict:
+    """AttemptOutcome → metadata.pool_summary v1（PLAN-2026-11-15 v2 §3.2）。
+
+    - attempt_count 只数真实上游调用（admitted=True，终审 #11）；
+      retry_count=同目标连续再调用，fallback_count=切换目标后再调用。
+    - first_attempted/final_target 取首个/最后一个 admitted attempt 的
+      候选身份；无 admitted attempt 时为 None（明确 null，不冒认）。
+    - 逐 attempt 精简记录；stream/tokens/usage_known 结构化传输未贯通
+      前明确 null（Task 3 接续），不伪造 0。
+    """
+    cands = {r.candidate.id: r for r in candidates}
+    admitted = [r for r in outcome.attempts if r.admitted]
+    retry_count = fallback_count = 0
+    prev = None
+    for r in admitted:
+        if prev is not None:
+            if r.candidate_id == prev:
+                retry_count += 1
+            else:
+                fallback_count += 1
+        prev = r.candidate_id
+
+    def _target(cid):
+        rc = cands.get(cid)
+        return _target_identity(rc) if rc is not None else {"candidate_id": cid}
+
+    if not outcome.ok:
+        if outcome.committed:
+            outcome_name = "committed_error"
+        elif outcome.status is not None:
+            outcome_name = "upstream_error"
+        else:
+            outcome_name = "pool_unavailable"
+    else:
+        outcome_name = "ok"
+
+    return {
+        "v": 1,
+        "pool": pool_name,
+        "protocol": protocol,
+        "config_revision": config_revision,
+        "requested_model": requested_model,
+        "first_attempted": (_target(admitted[0].candidate_id)
+                            if admitted else None),
+        "final_target": (_target(admitted[-1].candidate_id)
+                         if admitted else None),
+        "attempt_count": len(admitted),
+        "retry_count": retry_count,
+        "fallback_count": fallback_count,
+        "outcome": outcome_name,
+        "attempts": [{
+            "ordinal": r.ordinal, "candidate_id": r.candidate_id,
+            "route": r.route, "status": r.status, "error": r.error,
+            "committed": r.committed, "ok": r.ok, "admitted": r.admitted,
+            "duration_ms": r.duration_ms,
+            # 结构化传输字段（Task 3 贯通前明确 null）
+            "stream": None, "ttft_ms": None,
+            "tokens_in": None, "tokens_out": None, "usage_known": None,
+        } for r in outcome.attempts],
+    }
+
+
 def _is_non_fallback(status: int | None) -> bool:
     """确定性错误：换候选无解 → 终止（spec §6.2 不回退类）。"""
     if status is None:
