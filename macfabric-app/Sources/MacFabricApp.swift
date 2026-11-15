@@ -26,6 +26,7 @@ extension Color {
     static let faint = Color(hex: 0x85858f)
     static let accent = Color(hex: 0x4a63e8)    // 织物蓝
     static let okC = Color(hex: 0x1fa843)
+    static let errC = Color(hex: 0xc23b3b)   // 失败反馈（Task 10 类型化状态色）
     static let warnC = Color(hex: 0xb06000)
     // 能力线色（九根线 = 九类能力）
     static let thJudge = Color(hex: 0x8e4fd8)
@@ -68,6 +69,12 @@ func humanName(_ modelType: String?) -> String {
 }
 
 // ─── 数据模型 ──────────────────────────────────────────────────
+
+/// 有类型的操作反馈（Task 10）：成功/进行中/警告/失败 — kind 在写入时确定，
+/// 运行时绝不解析消息文本里的 emoji 做逻辑判断（emoji 仅是消息内的展示糖）
+enum FeedbackKind: Equatable {
+    case success, info, progress, warning, error
+}
 
 struct Snapshot: Codable {
     struct Status: Codable {
@@ -306,6 +313,11 @@ final class GatewayStore: ObservableObject {
     @Published var models: [ModelItem] = []
     @Published var curve: [CurvePoint] = []
     /// 操作反馈横幅 — 5s 自动消退（陈旧的 ✅/❌ 长期挂在卡片上误导）
+    func notify(_ kind: FeedbackKind, _ text: String) {
+        actionKind = kind
+        actionMessage = text
+    }
+    @Published var actionKind: FeedbackKind = .info
     @Published var actionMessage = "" {
         didSet {
             guard !actionMessage.isEmpty else { return }
@@ -501,7 +513,7 @@ final class GatewayStore: ObservableObject {
                   var raw = obj["raw"] as? [String: Any],
                   let rev = obj["revision"] as? Int else {
                 DispatchQueue.main.async {
-                    self?.actionMessage = "❌ 池配置读取失败"
+                    self?.notify(.error, "❌ 池配置读取失败")
                     self?.poolMutationDone()
                 }
                 return
@@ -526,8 +538,8 @@ final class GatewayStore: ObservableObject {
                         }
                         return
                     }
-                    self?.actionMessage = (200..<300).contains(code)
-                        ? okMsg : "❌ \(failPrefix)(\(code)): \(body.prefix(100))"
+                    self?.notify((200..<300).contains(code) ? .success : .error,
+                        (200..<300).contains(code) ? okMsg : "❌ \(failPrefix)(\(code)): \(body.prefix(100))")
                     self?.fetchPools()
                     self?.poolMutationDone()
                 }
@@ -703,8 +715,8 @@ final class GatewayStore: ObservableObject {
                     }
                     return
                 }
-                self.actionMessage = (200..<300).contains(code)
-                    ? "✅ iff/\(name) 已\(enabled ? "启用" : "停用")" : "❌ 开关失败(\(code)): \(body.prefix(100))"
+                self.notify((200..<300).contains(code) ? .success : .error,
+                    (200..<300).contains(code) ? "✅ iff/\(name) 已\(enabled ? "启用" : "停用")" : "❌ 开关失败(\(code)): \(body.prefix(100))")
                 self.fetchPools()
             }
         }.resume()
@@ -772,7 +784,7 @@ final class GatewayStore: ObservableObject {
 
     /// F2: 能力包卸载 = 停服务 + 删 models.d YAML + 热重载
     func uninstallPack(_ name: String) {
-        actionMessage = "卸载 \(name) 中…"
+        notify(.progress, "卸载 \(name) 中…")
         var req = URLRequest(url: base.appendingPathComponent("/admin/packs/uninstall"), timeoutInterval: 60)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -781,8 +793,8 @@ final class GatewayStore: ObservableObject {
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             DispatchQueue.main.async {
-                self?.actionMessage = (200..<300).contains(code)
-                    ? "✅ \(name) 已卸载" : "❌ 卸载失败(\(code)): \(body.prefix(120))"
+                self?.notify((200..<300).contains(code) ? .success : .error,
+                    (200..<300).contains(code) ? "✅ \(name) 已卸载" : "❌ 卸载失败(\(code)): \(body.prefix(120))")
                 // 卸载是跨页面事件：模型列表、池（服务端已联动清除候选）、
                 // 本地扫描、下载状态全部即时刷新 — 不等轮询、不用切页面
                 self?.fetchModels(); self?.fetchPools()
@@ -820,7 +832,7 @@ final class GatewayStore: ObservableObject {
 
     /// 设置页：新建 API key（明文仅本次回显 — 立即弹一次性复制面板）
     func createSecurityKey() {
-        guard !securityBusy else { actionMessage = "⚠️ 上一操作进行中，请稍候"; return }
+        guard !securityBusy else { notify(.warning, "⚠️ 上一操作进行中，请稍候"); return }
         securityBusy = true
         var req = URLRequest(url: base.appendingPathComponent("/admin/security/keys"), timeoutInterval: 30)
         req.httpMethod = "POST"
@@ -836,9 +848,9 @@ final class GatewayStore: ObservableObject {
                    let obj = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
                    let key = obj["key"] as? String, !key.isEmpty {
                     self.oneTimeKey = key
-                    self.actionMessage = "✅ 新密钥已生成 — 明文仅显示这一次，请立即复制"
+                    self.notify(.success, "✅ 新密钥已生成 — 明文仅显示这一次，请立即复制")
                 } else {
-                    self.actionMessage = "❌ 新建密钥失败(\(code)): \(raw.prefix(100))"
+                    self.notify(.error, "❌ 新建密钥失败(\(code)): \(raw.prefix(100))")
                 }
                 self.fetchSecurityStatus()
             }
@@ -847,7 +859,7 @@ final class GatewayStore: ObservableObject {
 
     /// 设置页：撤销指定 key（两击确认）
     func revokeSecurityKey(_ id: String) {
-        guard !securityBusy else { actionMessage = "⚠️ 上一操作进行中，请稍候"; return }
+        guard !securityBusy else { notify(.warning, "⚠️ 上一操作进行中，请稍候"); return }
         securityBusy = true
         var req = URLRequest(url: base.appendingPathComponent("/admin/security/keys/revoke"), timeoutInterval: 30)
         req.httpMethod = "POST"
@@ -858,8 +870,8 @@ final class GatewayStore: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.securityBusy = false
-                self.actionMessage = (200..<300).contains(code)
-                    ? "✅ 密钥已撤销" : "❌ 撤销失败(\(code))"
+                self.notify((200..<300).contains(code) ? .success : .error,
+                    (200..<300).contains(code) ? "✅ 密钥已撤销" : "❌ 撤销失败(\(code))")
                 self.securityKeyRevokeConfirm = nil
                 self.fetchSecurityStatus()
             }
@@ -869,7 +881,7 @@ final class GatewayStore: ObservableObject {
     /// 设置页：一键启用/关闭鉴权。启用时网关返回的首把明文 key 存 oneTimeKey
     /// （库内只存摘要 — 不弹这次就再也拿不到明文）。
     func toggleSecurity(_ enable: Bool) {
-        guard !securityBusy else { actionMessage = "⚠️ 上一操作进行中，请稍候"; return }
+        guard !securityBusy else { notify(.warning, "⚠️ 上一操作进行中，请稍候"); return }
         securityBusy = true
         var req = URLRequest(url: base.appendingPathComponent("/admin/security/enable"), timeoutInterval: 30)
         req.httpMethod = "POST"
@@ -882,15 +894,15 @@ final class GatewayStore: ObservableObject {
                 guard let self else { return }
                 self.securityBusy = false
                 if (200..<300).contains(code) {
-                    self.actionMessage = enable ? "✅ 鉴权已启用 — 客户端请求需携带 API Key"
-                                                : "✅ 鉴权已关闭（迁移宽限，密钥保留）"
+                    self.notify(.success, enable ? "✅ 鉴权已启用 — 客户端请求需携带 API Key"
+                             : "✅ 鉴权已关闭（迁移宽限，密钥保留）")
                     if enable,
                        let obj = (data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }),
                        let key = obj["key"] as? String, !key.isEmpty {
                         self.oneTimeKey = key
                     }
                 } else {
-                    self.actionMessage = "❌ 鉴权设置失败(\(code)): \(raw.prefix(100))"
+                    self.notify(.error, "❌ 鉴权设置失败(\(code)): \(raw.prefix(100))")
                 }
                 self.fetchSecurityStatus()
             }
@@ -903,7 +915,7 @@ final class GatewayStore: ObservableObject {
         let name = cloudFormName.trimmingCharacters(in: .whitespaces)
         let burl = cloudFormBase.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty, !burl.isEmpty else {
-            actionMessage = "⚠️ 名称与 Base URL 必填"
+            notify(.warning, "⚠️ 名称与 Base URL 必填")
             completion?(false)
             return
         }
@@ -1028,7 +1040,7 @@ final class GatewayStore: ObservableObject {
 
     /// F3: 连通性测试（用已存 key 探测全部 base）
     func cloudTestProvider(_ name: String) {
-        actionMessage = "测试 \(name) 中…"
+        notify(.progress, "测试 \(name) 中…")
         var req = URLRequest(url: base.appendingPathComponent("/admin/cloud/provider-test"), timeoutInterval: 30)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1048,9 +1060,10 @@ final class GatewayStore: ObservableObject {
                 if let keySet = obj["key_set"] as? Bool, !keySet { detail += "（未设 API key）" }
             }
             DispatchQueue.main.async {
-                self?.actionMessage = (200..<300).contains(code)
-                    ? (ok ? "✅ \(name) 连通 \(detail)" : "❌ \(name) 不通：\(detail)")
-                    : "❌ 测试失败(\(code))"
+                self?.notify((200..<300).contains(code) ? .success : .error,
+                    (200..<300).contains(code)
+                        ? (ok ? "✅ \(name) 连通 \(detail)" : "❌ \(name) 不通：\(detail)")
+                        : "❌ 测试失败(\(code))")
                 self?.fetchCloud()
             }
         }.resume()
@@ -1060,7 +1073,7 @@ final class GatewayStore: ObservableObject {
 
     func cloudRequest(path: String, method: String, body: [String: Any], okMsg: String, failPrefix: String, timeout: Double = 30, completion: ((Bool) -> Void)? = nil) {
         guard !cloudBusy else {
-            actionMessage = "⚠️ 上一操作进行中，请稍候"
+            notify(.warning, "⚠️ 上一操作进行中，请稍候")
             completion?(false)
             return
         }
@@ -1075,7 +1088,7 @@ final class GatewayStore: ObservableObject {
             let ok = (200..<300).contains(code)
             DispatchQueue.main.async {
                 self?.cloudBusy = false
-                self?.actionMessage = ok ? okMsg : "❌ \(failPrefix)(\(code)): \(body.prefix(100))"
+                self?.notify(ok ? .success : .error, ok ? okMsg : "❌ \(failPrefix)(\(code)): \(body.prefix(100))")
                 self?.fetchCloud()
                 self?.fetchPools()
                 completion?(ok)
@@ -1098,7 +1111,7 @@ final class GatewayStore: ObservableObject {
 
     /// 能力包一键安装：网关负责"已在盘→直接装机 / 不在→下载后装机"
     func installPack(_ name: String, url: String, filename: String, label: String, engine: String = "") {
-        actionMessage = "\(name) 安装中…"
+        notify(.progress, "\(name) 安装中…")
         var req = URLRequest(url: base.appendingPathComponent("/admin/packs/download"), timeoutInterval: 30)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1110,10 +1123,10 @@ final class GatewayStore: ObservableObject {
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             DispatchQueue.main.async {
                 if (200..<300).contains(code) {
-                    self?.actionMessage = "\(name) 开始下载…进度看卡片"
+                    self?.notify(.info, "\(name) 开始下载…进度看卡片")
                     self?.fetchDownloadStatus()
                 } else {
-                    self?.actionMessage = "❌ 安装失败(\(code)): \(body.prefix(120))"
+                    self?.notify(.error, "❌ 安装失败(\(code)): \(body.prefix(120))")
                 }
             }
         }.resume()
@@ -1181,9 +1194,10 @@ final class GatewayStore: ObservableObject {
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             DispatchQueue.main.async {
-                self?.actionMessage = (200..<300).contains(code)
-                    ? (enabled ? "✅ \(name) 将随网关启动" : "✅ \(name) 不再随网关启动")
-                    : "❌ 设置失败(\(code)): \(body.prefix(100))"
+                self?.notify((200..<300).contains(code) ? .success : .error,
+                    (200..<300).contains(code)
+                        ? (enabled ? "✅ \(name) 将随网关启动" : "✅ \(name) 不再随网关启动")
+                        : "❌ 设置失败(\(code)): \(body.prefix(100))")
                 self?.fetchModels()
             }
         }.resume()
@@ -1203,7 +1217,7 @@ final class GatewayStore: ObservableObject {
 
     /// F4: 安装 = 写 models.d YAML + 热重载，不启动（首请求自动唤醒）
     func installLocalModel(_ m: LocalDiscovered) {
-        actionMessage = "安装 \(m.name) 中…"
+        notify(.progress, "安装 \(m.name) 中…")
         var req = URLRequest(url: base.appendingPathComponent("/admin/packs/install"), timeoutInterval: 30)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1212,8 +1226,8 @@ final class GatewayStore: ObservableObject {
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             DispatchQueue.main.async {
-                self?.actionMessage = (200..<300).contains(code)
-                    ? "✅ \(m.name) 已安装（未启动 — 首请求自动唤醒）" : "❌ 安装失败(\(code)): \(body.prefix(120))"
+                self?.notify((200..<300).contains(code) ? .success : .error,
+                    (200..<300).contains(code) ? "✅ \(m.name) 已安装（未启动 — 首请求自动唤醒）" : "❌ 安装失败(\(code)): \(body.prefix(120))")
                 self?.fetchModels(); self?.scanLocalModels()
             }
         }.resume()
@@ -1233,7 +1247,8 @@ final class GatewayStore: ObservableObject {
         }.resume()
     }
 
-    private func adminAction(_ path: String, model: String, done: @escaping (String) -> Void) {
+    private func adminAction(_ path: String, model: String,
+                             done: @escaping (FeedbackKind, String) -> Void) {
         var req = URLRequest(url: base.appendingPathComponent(path), timeoutInterval: 180)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1242,15 +1257,16 @@ final class GatewayStore: ObservableObject {
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             DispatchQueue.main.async {
-                done((200..<300).contains(code) ? "✅ \(model) 完成"
-                     : "❌ \(model) 失败(\(code)): \(body.prefix(120))")
+                let ok = (200..<300).contains(code)
+                done(ok ? .success : .error,
+                     ok ? "✅ \(model) 完成" : "❌ \(model) 失败(\(code)): \(body.prefix(120))")
                 self?.refresh(); self?.fetchModels()
             }
         }.resume()
     }
 
     func switchModel(_ name: String, force: Bool = false) {
-        actionMessage = force ? "已确认超卖，加载 \(name) 中…" : "切换 \(name) 中…（首次加载约 5~10s）"
+        notify(.progress, force ? "已确认超卖，加载 \(name) 中…" : "切换 \(name) 中…（首次加载约 5~10s）")
         var req = URLRequest(url: base.appendingPathComponent("/switch"), timeoutInterval: 180)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1262,27 +1278,27 @@ final class GatewayStore: ObservableObject {
                 guard let self else { return }
                 if code == 409, let obj = try? JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any],
                    obj["status"] as? String == "memory_insufficient" {
-                    self.actionMessage = ""
+                    self.notify(.info, "")
                     self.onMemoryInsufficient?(name, obj["message"] as? String ?? "内存不足")
                     return
                 }
-                self.actionMessage = (200..<300).contains(code)
-                    ? "✅ \(name) 完成" : "❌ \(name) 失败(\(code)): \(body.prefix(120))"
+                self.notify((200..<300).contains(code) ? .success : .error,
+                    (200..<300).contains(code) ? "✅ \(name) 完成" : "❌ \(name) 失败(\(code)): \(body.prefix(120))")
                 self.refresh(); self.fetchModels()
             }
         }.resume()
     }
     func stopService(_ name: String) {
-        actionMessage = "停止 \(name) 中…"
-        adminAction("/stop", model: name) { [weak self] msg in self?.actionMessage = msg }
+        notify(.progress, "停止 \(name) 中…")
+        adminAction("/stop", model: name) { [weak self] k, msg in self?.notify(k, msg) }
     }
     func sleepModel(_ name: String) {
-        actionMessage = "\(name) 睡眠中…（唤醒约 2s）"
-        adminAction("/sleep", model: name) { [weak self] msg in self?.actionMessage = msg }
+        notify(.progress, "\(name) 睡眠中…（唤醒约 2s）")
+        adminAction("/sleep", model: name) { [weak self] k, msg in self?.notify(k, msg) }
     }
     func wakeModel(_ name: String) {
-        actionMessage = "唤醒 \(name) 中…"
-        adminAction("/wake", model: name) { [weak self] msg in self?.actionMessage = msg }
+        notify(.progress, "唤醒 \(name) 中…")
+        adminAction("/wake", model: name) { [weak self] k, msg in self?.notify(k, msg) }
     }
 
     func sendPrompt() {
@@ -1332,6 +1348,43 @@ final class GatewayStore: ObservableObject {
 }
 
 // ─── 通用元件（照设计稿 .card/.pill/.stat/.ccard）───────────────
+
+/// 类型化操作反馈横幅（Task 10）：成功/进行中/警告/失败各有色与图标，
+/// kind 来自写入时的 notify()，不解析消息文本
+struct FeedbackBanner: View {
+    @ObservedObject var store: GatewayStore
+
+    private var color: Color {
+        switch store.actionKind {
+        case .success: return .okC
+        case .progress, .info: return .accent
+        case .warning: return .warnC
+        case .error: return .errC
+        }
+    }
+    private var icon: String {
+        switch store.actionKind {
+        case .success: return "checkmark.circle"
+        case .progress: return "hourglass"
+        case .info: return "info.circle"
+        case .warning: return "exclamationmark.triangle"
+        case .error: return "xmark.circle"
+        }
+    }
+
+    var body: some View {
+        if !store.actionMessage.isEmpty {
+            HStack(spacing: 6) {
+                Image(systemName: icon).font(.system(size: 11)).foregroundColor(color)
+                Text(store.actionMessage).font(.system(size: 12)).foregroundColor(.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+            }
+            .padding(8).frame(maxWidth: .infinity)
+            .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+}
 
 struct Card<Content: View>: View {
     let content: Content
@@ -1412,15 +1465,17 @@ struct Sidebar: View {
             Text("平台").font(.system(size: 11)).foregroundColor(.faint)
                 .padding(10).padding(.top, 6)
             ForEach(platform, id: \.1) { item in
-                SideItem(label: item.1, on: tab.wrappedValue == item.0) { tab.wrappedValue = item.0 }
+                SideItem(label: item.1, on: tab.wrappedValue == item.0,
+                         shortcut: "\(item.0 + 1)") { tab.wrappedValue = item.0 }
             }
             Text("获取").font(.system(size: 11)).foregroundColor(.faint)
                 .padding(10).padding(.top, 14)
             ForEach(acquire, id: \.1) { item in
-                SideItem(label: item.1, on: tab.wrappedValue == item.0) { tab.wrappedValue = item.0 }
+                SideItem(label: item.1, on: tab.wrappedValue == item.0,
+                         shortcut: "\(item.0 + 1)") { tab.wrappedValue = item.0 }
             }
             Spacer()
-            SideItem(label: "设置", on: tab.wrappedValue == 7) { tab.wrappedValue = 7 }
+            SideItem(label: "设置", on: tab.wrappedValue == 7, shortcut: "8") { tab.wrappedValue = 7 }
                 .padding(.bottom, 10)
         }
         .frame(width: 172)
@@ -1433,6 +1488,7 @@ struct SideItem: View {
     let label: String
     let on: Bool
     var placeholder = false
+    var shortcut: String? = nil   // ⌘1–8 页签直达（Task 10 键盘可达）
     let action: () -> Void
 
     var body: some View {
@@ -1450,6 +1506,9 @@ struct SideItem: View {
             .background(on ? Color.accent.opacity(0.16) : .clear, in: RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
+        .disabled(placeholder)
+        .keyboardShortcut(shortcut.map { KeyEquivalent(Character($0)) } ?? KeyEquivalent.delete,
+                          modifiers: shortcut == nil ? .command : .command)
         .disabled(placeholder)
     }
 }
@@ -1854,11 +1913,7 @@ struct PoolsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                if !store.actionMessage.isEmpty {
-                    Text(store.actionMessage).font(.system(size: 12))
-                        .padding(8).frame(maxWidth: .infinity)
-                        .background(Color.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-                }
+                FeedbackBanner(store: store)
                 if let pools = store.pools, let cfg = pools.pools, !cfg.isEmpty {
                     // 固定角色序：fast → small → premium，其余追加
                     let order = ["fast", "small", "premium"]
@@ -2035,11 +2090,19 @@ struct PoolCard: View {
                             }
                         }
                         .font(.system(size: 11))
-                        SmallBtn("移除") {
-                            store.confirm("从池 iff/\(name) 移除候选 \(c.target ?? c.id)？") {
-                                store.removePoolCandidate(pool: name, candidateId: c.id)
+                        // Task 10：次要操作收进 ⋯ 菜单（始终可发现，不 hover 隐藏）；
+                        // 排序入口（↑↓/拖拽）保留在行面
+                        Menu {
+                            Button("移除候选…") {
+                                store.confirm("从池 iff/\(name) 移除候选 \(c.target ?? c.id)？") {
+                                    store.removePoolCandidate(pool: name, candidateId: c.id)
+                                }
                             }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .font(.system(size: 12)).foregroundColor(.dim)
                         }
+                        .menuStyle(.borderlessButton).fixedSize()
                         // F1: 优先级可调 — ↑↓/拖拽移动位置，priority 全量重建（CAS 回写）
                         HStack(spacing: 3) {
                             SmallBtn("↑", disabled: idx == 0) {
@@ -2596,11 +2659,7 @@ struct PacksView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                if !store.actionMessage.isEmpty {
-                    Text(store.actionMessage).font(.system(size: 12))
-                        .padding(8).frame(maxWidth: .infinity)
-                        .background(Color.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-                }
+                FeedbackBanner(store: store)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
                     ForEach(packs, id: \.1) { pk in
                         PackCard(store: store, pack: pk)
@@ -2756,11 +2815,7 @@ struct CloudView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                if !store.actionMessage.isEmpty {
-                    Text(store.actionMessage).font(.system(size: 12))
-                        .padding(8).frame(maxWidth: .infinity)
-                        .background(Color.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-                }
+                FeedbackBanner(store: store)
                 // 服务商列表（可展开模型策展）
                 ForEach(store.cloud?.providers ?? [], id: \.name) { pv in
                     CloudProviderCard(store: store, pv: pv)
@@ -2798,7 +2853,7 @@ struct CloudProviderCard: View {
         ]
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
-        store.actionMessage = "✅ 统一入口配置已复制到剪贴板"
+        store.notify(.success, "✅ 统一入口配置已复制到剪贴板")
     }
 
     var body: some View {
@@ -3123,11 +3178,8 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 // 操作反馈在当前设置卡可见（Task 9 — 不只挂在别的页签）
-                if !store.actionMessage.isEmpty {
-                    Text(store.actionMessage).font(.system(size: 12))
-                        .padding(8).frame(maxWidth: .infinity)
-                        .background(Color.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-                }
+                FeedbackBanner(store: store)
+                Text("系统与账本").font(.system(size: 11)).foregroundColor(.faint)
                 // 系统信息（App 直查，无网关依赖）
                 Card {
                     VStack(alignment: .leading, spacing: 6) {
@@ -3149,6 +3201,8 @@ struct SettingsView: View {
                         infoRow("当前已用", usedMB.map { "\($0) MB" } ?? "—")
                     }.padding(12)
                 }
+                Text("安全").font(.system(size: 11)).foregroundColor(.faint)
+                    .padding(.top, 4)
                 // 开关项（诚实标注：已接线的可交互，未接线的保持禁用并说明）
                 Card {
                     VStack(alignment: .leading, spacing: 0) {
@@ -3226,7 +3280,7 @@ struct SettingsView: View {
                                     SmallBtn("复制") {
                                         NSPasteboard.general.clearContents()
                                         NSPasteboard.general.setString(key, forType: .string)
-                                        store.actionMessage = "✅ 密钥已复制到剪贴板"
+                                        store.notify(.success, "✅ 密钥已复制到剪贴板")
                                     }
                                     SmallBtn("已保存") { store.oneTimeKey = nil }
                                 }

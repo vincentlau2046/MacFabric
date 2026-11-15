@@ -103,3 +103,35 @@ PLAN-2026-11-15 v2（Task 7 报告契约 + Task 8 原生监控台 + Task 9/10 �
 - [ ] 浮窗非法数字报错保留输入；断网保存浮窗不关
 - [ ] Esc 丢弃确认对话框出现
 - [ ] 最后一把 key 撤销警示文案可见
+
+## 5. Task 10 验收清单（轻量视觉与可访问性）
+
+### 验收标准
+
+| 项 | 处置 |
+|---|---|
+| 反馈有类型 | FeedbackKind（success/progress/info/warning/error）写入时确定；FeedbackBanner 按 kind 上色配图标（✓/沙漏/ⓘ/⚠/✗）；运行时零 emoji 解析（37 处赋值全部迁移为 notify()，编译期固定） |
+| 操作结果与刷新状态分开 | monitorLoading/monitorReportWindow（数据刷新态）≠ actionMessage/FeedbackBanner（操作反馈态）；池刷新态经 fetchPools 回归服务端真相 |
+| 危险操作始终可发现 | 撤销 key / 移除候选（⋯菜单）/ 删除服务商均常驻按钮，非 hover 出现；均带两击确认 |
+| 池次要操作收菜单 | 候选行「移除候选…」收进 ⋯ 菜单；排序入口（↑↓ + 拖拽）保留行面 |
+| 窄窗口 | 监控台筛选行 ViewThatFits：宽=单行，窄=两行堆叠，无关键控件裁切；表格横向滚动不裁切（Task 8） |
+| 长 modelid 可查看/复制 | 表格省略号 + 详情卡完整 textSelection（Task 8） |
+| Tab 键可达 | 原生 SwiftUI 控件（segmented Picker/TextField/Button）默认全键盘可达 |
+| ⌘1–8 | 侧栏页签直达（总览⌘1 … 设置⌘8） |
+| Esc 安全关闭 | 云属性浮窗 onExitCommand：有未保存修改先确认丢弃（Task 9） |
+| 减弱动态效果 | 代码中无 withAnimation/transition/animation（grep 0 处）— 无差别转圈未采用，busy 仅用于具体动作（cloudBusy/securityBusy/monitorLoading），reduce-motion 无需守卫 |
+| 设置分区 | 重组为「系统与账本 / 安全」分区标题；未接线开关保持禁用 + 诚实说明（Task 9 原状） |
+| 菜单栏 | 已有 mini 织物条（网关/账本/模型状态）+ 打开总览（主窗口）+ 网关面板 + 退出 — 无缺口，不重复造 |
+
+### 已取证
+
+- 调试构建 0 warning / 0 error（含全部 Task 10 改动）。
+- `grep -c "actionMessage = \""` 残留仅声明与自动清空两处 — 全量类型化。
+- 菜单栏能力核对：MiniWeaveView（账本水位+活跃模型）+ showOverview + openDashboard ✓。
+
+### 待人工 GUI 取证
+
+- [ ] 窄窗口（最小宽）筛选行堆叠、无裁切
+- [ ] Tab 顺序走查 + ⌘1–8 切页
+- [ ] 减弱动态效果开启下操作反馈呈现
+- [ ] 无图表数据时监控台空态文案可读
