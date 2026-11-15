@@ -485,4 +485,19 @@ PaddleOCR-VL、流式 ASR、8B 特档和其他新运行时必须在单独验证�
 
 Manifest 最终字段/版本迁移策略、首批真实包的下载源/hash、SBPL API 注入可行性验证，分别在 PK0 任务内冻结与取证。
 
+### 取证记录（Task 12，2026-11-15）
+
+- **SBPL 探测实测**：本机（macOS 27.2, Darwin 27.2.0）`probe_sandbox()` →
+  `full | SBPL C API available (macOS 27.2)`（libc `sandbox_init` 符号存在）。
+  SBPL API 注入路径在本机可行；真实注入实现仍按计划于 PK3 后立项验证。
+- **首批 Catalog hash 冻结**：模型 sha256 取自 HuggingFace LFS
+  `x-linked-etag`（即 LFS oid，等价 sha256）：Qwen3-4B-Instruct-2507-Q4_K_M
+  （lmstudio-community 镜像，官方 Qwen GGUF 仓未同步镜像）、bge-m3-Q8_0
+  （gpustack）、ggml-large-v3-turbo（ggerganov/whisper.cpp）、Kokoro
+  model.onnx fp32（onnx-community）；llama.cpp b12361 macOS arm64 引擎包
+  sha256 由本机下载实测取得。下载源以 HTTPS 写入 Catalog artifact.source。
+- **网络事实**：huggingface.co 直连被网络阻断（connection reset），取证经
+  hf-mirror.com 元数据端点完成；产品下载路径（HttpArtifactFetcher）在用户
+  网络下执行，PK3 真包验收时以实测 hash 复核。
+
 本文不授权代码、依赖、安装版或发布操作；只有实施计划审阅通过后，才进入下一阶段。

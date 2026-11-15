@@ -21,7 +21,7 @@ class CatalogError(ValueError):
 
 
 _ENTRY_TOP = ("pack_id", "display_name", "summary", "tags", "risk_level",
-              "builtin", "manifest")
+              "builtin", "source_page", "manifest")
 _RISK_LEVELS = frozenset({"verified", "experimental"})
 
 
@@ -33,6 +33,7 @@ class CatalogEntry:
     tags: tuple[str, ...]
     risk_level: str
     builtin: bool
+    source_page: str = ""
 
 
 @dataclass(frozen=True)
@@ -64,7 +65,8 @@ def load_catalog(path) -> list[CatalogEntry]:
         unknown = set(item) - set(_ENTRY_TOP)
         if unknown:
             raise CatalogError(pack_id, f"unknown key(s) {sorted(unknown)}")
-        missing = [k for k in _ENTRY_TOP if k not in item]
+        missing = [k for k in _ENTRY_TOP if k not in item
+                   and k != "source_page"]   # source_page 可选（捆绑目录必带）
         if missing:
             raise CatalogError(pack_id, f"missing key(s) {missing}")
         if pack_id in seen:
@@ -87,5 +89,6 @@ def load_catalog(path) -> list[CatalogEntry]:
             summary=str(item["summary"]),
             tags=tuple(str(t) for t in item["tags"]),
             risk_level=item["risk_level"],
-            builtin=bool(item["builtin"])))
+            builtin=bool(item["builtin"]),
+            source_page=str(item.get("source_page", ""))))
     return entries
