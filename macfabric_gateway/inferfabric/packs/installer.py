@@ -9,14 +9,19 @@
 - sha256 在 staging 内逐 artifact 校验后才移入正式目录（TOCTOU 安全：
   下载→校验→启用之间无窗口）。
 - hash/运行时准备/健康检查/配置写入/reload 全部成功才 commit。
-- 任一阶段失败：删 staging（及未提交的 pack_dir），不动已安装包，
-  不写半成品 models.d；错误为阶段化固定码，原文不带上游内容。
+- 任一阶段失败：删 staging（及未提交的 pack_dir 与本次写入的受控 YAML），
+  不动已安装包，不写半成品 models.d；错误为阶段化固定码，原文不带上游内容。
+- 事务开始前已存在的正式目录在下载/校验失败阶段不得触碰；校验通过后才由
+  本次事务接管（终审 F1）。
+- 预检内存门禁（spec §9）：可用内存 - system_reserved_memory_mb <
+  peak_memory_mb → 拒绝（终审 F3）。
 - 上次崩溃残留的 staging 在下次安装开始时清理。
 - 沙箱准入（spec §8.3）：探测 ≠ full 且 degraded_install_allowed=False
   → 拒绝；允许降级 → 安装继续并显式标记 sandbox_degraded。
 """
 
 import hashlib
+import os
 import shutil
 import threading
 from dataclasses import dataclass
@@ -43,6 +48,16 @@ def _noop(*a, **k) -> None:
     return None
 
 
+def system_available_memory_mb() -> int | None:
+    """当前可用物理内存（MiB）；无法探测时返回 None（调用方跳过门禁）。"""
+    try:
+        page = os.sysconf("SC_PAGE_SIZE")
+        avail = os.sysconf("SC_AVPHYS_PAGES")
+        return page * avail // (1024 * 1024)
+    except (ValueError, OSError):
+        return None
+
+
 class PackInstaller:
     """安装事务执行器。root 由调用方注入（生产 ~/.inferfabric/packs，
     测试 tmp_path）；真实 fetcher/hook 在 Task 8/11/12 接线。"""
@@ -50,7 +65,7 @@ class PackInstaller:
     def __init__(self, root: Path, fetcher, policy, sandbox_provider,
                  catalog_probe=None, prepare_runtime=None,
                  write_model_config=None, run_healthcheck=None,
-                 reload_gateway=None):
+                 reload_gateway=None, memory_available_mb=None):
         self._root = Path(root)
         self._fetcher = fetcher
         self._policy = policy
@@ -60,6 +75,9 @@ class PackInstaller:
         self._write_model_config = write_model_config or _noop
         self._run_healthcheck = run_healthcheck or _noop
         self._reload_gateway = reload_gateway or _noop
+        # 可用内存探测（callable → MiB 或 None）；None=门禁关闭（仅测试）。
+        # 生产由 PackManager 注入 system_available_memory_mb（终审 F3）。
+        self._memory_available_mb = memory_available_mb
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
@@ -90,6 +108,16 @@ class PackInstaller:
                 manifest.parameter_count_b > policy.max_model_parameters_b:
             return False, (f"parameter_count_b {manifest.parameter_count_b} > "
                            f"max {policy.max_model_parameters_b}"), False
+        # 内存预算门禁（spec §7.1/§9）：可用内存 - 系统保留 < 峰值 → 拒绝
+        if self._memory_available_mb is not None:
+            avail = self._memory_available_mb()
+            if avail is not None:
+                budget = avail - policy.system_reserved_memory_mb
+                if budget < manifest.peak_memory_mb:
+                    return False, (f"peak_memory_mb {manifest.peak_memory_mb} "
+                                   f"exceeds memory budget {budget}MB "
+                                   f"(available {avail}MB - reserved "
+                                   f"{policy.system_reserved_memory_mb}MB)"), False
         if not entry.builtin:
             free = shutil.disk_usage(self._root).free
             if free < manifest.disk_mb * 1024 * 1024:
@@ -157,11 +185,26 @@ class PackInstaller:
         staging = self._staging_dir(manifest.pack_id)
         pack_dir = self.pack_dir_for(manifest)
         sandbox_degraded = False
+        written_configs: list[Path] = []   # 本次事务写入的受控 YAML（终审 F2）
+        # 事务开始前已存在的正式目录（已装/unknown_origin 恢复）：下载/校验
+        # 失败阶段不得触碰（终审 F1）；校验通过后由本次事务接管。
+        pre_existing = pack_dir.exists()
+
+        def remember_written(ret) -> None:
+            if ret is None:
+                return
+            written_configs.extend(
+                ret if isinstance(ret, (list, tuple)) else [ret])
 
         def fail(stage: str, error: str) -> InstallResult:
+            for p in written_configs:
+                try:
+                    Path(p).unlink()
+                except OSError:
+                    pass
             shutil.rmtree(staging, ignore_errors=True)
             if stage not in ("preflight",) and pack_dir.exists() and \
-                    stage != "installed":
+                    stage != "installed" and not pre_existing:
                 # hook 失败：未提交，回滚未成形的正式目录（零残留：连空父目录）
                 shutil.rmtree(pack_dir, ignore_errors=True)
                 try:
@@ -180,7 +223,7 @@ class PackInstaller:
             pack_dir.mkdir(parents=True, exist_ok=True)
             try:
                 self._prepare_runtime(pack_dir, manifest)
-                self._write_model_config(pack_dir, manifest)
+                remember_written(self._write_model_config(pack_dir, manifest))
                 self._run_healthcheck(pack_dir, manifest)
                 self._reload_gateway()
             except Exception as exc:
@@ -210,6 +253,11 @@ class PackInstaller:
             return fail("verifying", err)
 
         # 移入正式目录（未提交：失败仍整体回滚）
+        if pre_existing:
+            # 校验已通过，本次事务接管该目录：先清旧内容再重建。此后回滚
+            # 语义恢复"删未提交目录"；接管之前的失败不触碰旧目录。
+            shutil.rmtree(pack_dir, ignore_errors=True)
+            pre_existing = False
         pack_dir.mkdir(parents=True, exist_ok=True)
         self._move_into_place(manifest, staging, pack_dir)
         shutil.rmtree(staging, ignore_errors=True)
@@ -222,7 +270,7 @@ class PackInstaller:
 
         # writing_config
         try:
-            self._write_model_config(pack_dir, manifest)
+            remember_written(self._write_model_config(pack_dir, manifest))
         except Exception as exc:
             return fail("writing_config", f"config_error:{exc}")
 

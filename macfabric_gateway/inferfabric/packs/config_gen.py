@@ -8,8 +8,10 @@
 - YAML `mode: on_demand` 走现有 loader 消歧（config.py:902-916）→ ledger_mode。
 - autostart=False：安装不启动（spec §2.1），首次调用按需拉起。
 - port 由调用方分配传入（PackManager 负责空闲端口）。
+- 受控 YAML 只经 .part + os.replace 原子落盘，不留截断半成品（终审 F2）。
 """
 
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -113,6 +115,10 @@ def write_managed_yaml(cfg: ModelConfig, models_d, manifest) -> Path:
         },
     }
     import yaml
-    path.write_text(yaml.safe_dump(d, sort_keys=False, allow_unicode=True),
-                    encoding="utf-8")
+    part = path.with_name(path.name + ".part")
+    with open(part, "w", encoding="utf-8") as f:
+        f.write(yaml.safe_dump(d, sort_keys=False, allow_unicode=True))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(part, path)   # 原子落盘：目标文件要么完整要么不存在
     return path

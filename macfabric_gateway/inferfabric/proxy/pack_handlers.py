@@ -25,7 +25,7 @@ from inferfabric.packs.config_gen import (
     build_model_config,
     write_managed_yaml,
 )
-from inferfabric.packs.installer import PackInstaller
+from inferfabric.packs.installer import PackInstaller, system_available_memory_mb
 from inferfabric.packs.policy import PackPolicy, PolicyStore
 from inferfabric.packs.sandbox import NoopProvider, probe_sandbox
 from inferfabric.packs.store import PackRecord, PackStore
@@ -76,7 +76,8 @@ class PackManager:
             root=self.root, fetcher=self._fetcher, policy=self.policy,
             sandbox_provider=NoopProvider(), catalog_probe=probe_sandbox,
             write_model_config=self._write_model_config,
-            reload_gateway=self._reload_gateway)
+            reload_gateway=self._reload_gateway,
+            memory_available_mb=system_available_memory_mb)
         reconcile_on_boot(self.store, self.root)
         self._uninstaller = None    # 惰性：attach_uninstaller 注入网关侧回调
         self._disabled_models: set[str] = set()
@@ -173,6 +174,11 @@ class PackManager:
         entry = self.catalog.find(pack_id)
         if entry is None:
             return 404, {"error": f"unknown pack_id {pack_id!r}"}
+        rec = self.store.get(pack_id)
+        if rec is not None and rec.status == "installed":
+            # 终审 F1：失败的重装不得摧毁已装工作包 — 已装包重装一律拒绝
+            return 409, {"error": f"pack {pack_id!r} already installed; "
+                                  f"uninstall first to reinstall"}
         with self._progress_lock:
             if pack_id in self._in_progress:
                 return 409, {"error": f"install already in progress for "
@@ -194,18 +200,23 @@ class PackManager:
             res_ok, stage, err = res.ok, res.stage, res.error
         import time
         now = int(time.time())
-        if res_ok:
-            self.store.set(PackRecord(
-                pack_id=pack_id, pack_version=entry.manifest.pack_version,
-                status="installed", stage="installed", error=None,
-                sandbox_degraded=res.sandbox_degraded, installed_at=now))
-        else:
-            self.store.set(PackRecord(
-                pack_id=pack_id, pack_version=entry.manifest.pack_version,
-                status="failed", stage=stage, error=err,
-                sandbox_degraded=False, installed_at=None))
-        with self._progress_lock:
-            self._in_progress.pop(pack_id, None)
+        try:
+            if res_ok:
+                self.store.set(PackRecord(
+                    pack_id=pack_id, pack_version=entry.manifest.pack_version,
+                    status="installed", stage="installed", error=None,
+                    sandbox_degraded=res.sandbox_degraded, installed_at=now))
+            else:
+                self.store.set(PackRecord(
+                    pack_id=pack_id, pack_version=entry.manifest.pack_version,
+                    status="failed", stage=stage, error=err,
+                    sandbox_degraded=False, installed_at=None))
+        except Exception:
+            # 终审 F4：簿记崩溃不得让线程带异常消失、pack_id 永久 409
+            log.exception("pack install bookkeeping failed for %s", pack_id)
+        finally:
+            with self._progress_lock:
+                self._in_progress.pop(pack_id, None)
         self._reload()
 
     # ── 策略 ──

@@ -95,6 +95,42 @@ def test_install_happy_path_reaches_installed(mgr):
     assert y.exists()
 
 
+def test_reinstall_of_installed_pack_409(mgr):
+    # 终审 F1：已安装包再次 install → 409（失败的重装不得摧毁已装工作包）
+    code, _ = mgr.start_install("llm.qwen3-4b-instruct-2507")
+    assert code == 202
+    deadline = time.time() + 5
+    rec = None
+    while time.time() < deadline:
+        rec = mgr.store.get("llm.qwen3-4b-instruct-2507")
+        if rec and rec.status == "installed":
+            break
+        time.sleep(0.05)
+    assert rec and rec.status == "installed"
+    code2, _ = mgr.start_install("llm.qwen3-4b-instruct-2507")
+    assert code2 == 409
+    # 已装状态未被二次请求破坏
+    assert mgr.store.get("llm.qwen3-4b-instruct-2507").status == "installed"
+
+
+def test_bookkeeping_failure_releases_in_progress(mgr, monkeypatch):
+    # 终审 F4：store.set 崩溃不得让 pack_id 永久 409
+    def broken_set(rec):
+        raise OSError("disk io error")
+
+    monkeypatch.setattr(mgr.store, "set", broken_set)
+    code, _ = mgr.start_install("llm.qwen3-4b-instruct-2507")
+    assert code == 202
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if "llm.qwen3-4b-instruct-2507" not in mgr._in_progress:
+            break
+        time.sleep(0.05)
+    assert "llm.qwen3-4b-instruct-2507" not in mgr._in_progress
+    code2, _ = mgr.start_install("llm.qwen3-4b-instruct-2507")
+    assert code2 == 202
+
+
 def test_concurrent_install_same_pack_409(mgr):
     # Review Focus 4：同 pack_id 事务互斥，后到者 409
     results = []

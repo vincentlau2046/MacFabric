@@ -200,6 +200,57 @@ def test_stale_staging_cleaned_on_next_install(tmp_path):
     assert not (stale / "junk.part").exists()
 
 
+def test_failed_retry_leaves_existing_pack_dir_untouched(tmp_path):
+    # 终审 F1：已存在的 pack_dir（已装/unknown_origin）在下载失败时不得被删
+    inst, entry = make_installer(tmp_path)
+    res = inst.install(entry)
+    assert res.ok
+    sentinel = res.pack_dir / "models" / "model"
+
+    class ExplodingFetcher:
+        def fetch(self, artifact, dest):
+            raise OSError("network down")
+
+    inst._fetcher = ExplodingFetcher()
+    res2 = inst.install(entry)
+    assert not res2.ok and res2.stage == "downloading"
+    assert sentinel.exists()
+
+
+def test_config_write_rolled_back_on_healthcheck_failure(tmp_path):
+    # 终审 F2：writing_config 之后失败 → 本次写入的受控 YAML 一并回滚
+    written = []
+
+    def write_cfg(pack_dir, manifest):
+        p = tmp_path / "models.d" / "managed.yaml"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("managed_by_pack: x")
+        written.append(p)
+        return [p]
+
+    inst, entry = make_installer(
+        tmp_path, write_model_config=write_cfg,
+        run_healthcheck=BrokenStep("isolated_healthcheck"))
+    res = inst.install(entry)
+    assert not res.ok and res.stage == "isolated_healthcheck"
+    assert written and not written[0].exists()
+
+
+def test_preflight_memory_gate_rejects(tmp_path):
+    # 终审 F3：可用内存 - 系统保留 < peak_memory_mb → preflight 拒绝
+    # fixture：peak_memory_mb=4800，默认保留 8192；注入可用 5000 → 预算负
+    inst, entry = make_installer(tmp_path, memory_available_mb=lambda: 5000)
+    res = inst.install(entry)
+    assert not res.ok and res.stage == "preflight"
+    assert "peak_memory_mb" in res.error
+
+
+def test_preflight_memory_gate_passes_with_headroom(tmp_path):
+    inst, entry = make_installer(tmp_path, memory_available_mb=lambda: 20000)
+    res = inst.install(entry)
+    assert res.ok, res.error
+
+
 def test_builtin_entry_skips_download(tmp_path):
     # 系统内置（spec §3.5）：无 artifact，跳过下载/校验/prepare_runtime
     d = parse_manifest(MINIMAL_MANIFEST_YAML).to_dict()

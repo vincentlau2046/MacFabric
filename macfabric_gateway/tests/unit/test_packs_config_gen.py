@@ -85,6 +85,20 @@ def test_overwrite_rejected(tmp_path):
         write_managed_yaml(cfg, tmp_path, MANIFEST)
 
 
+def test_write_managed_yaml_atomic_no_partial_target(tmp_path, monkeypatch):
+    # 终审 F2：目标 YAML 只经 .part + os.replace 产生；replace 失败不留半成品
+    import inferfabric.packs.config_gen as cg
+    cfg = build_model_config(MANIFEST, PACK_DIR, port=8123)
+
+    def boom(a, b):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cg.os, "replace", boom)
+    with pytest.raises(OSError):
+        write_managed_yaml(cfg, tmp_path, MANIFEST)
+    assert not managed_yaml_path(tmp_path, MANIFEST).exists()
+
+
 def test_unknown_template_rejected():
     d = MANIFEST.to_dict()
     d["execution"]["model_config_template"] = "unknown_v9"
