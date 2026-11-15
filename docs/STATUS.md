@@ -276,3 +276,16 @@
   试聊动态选活跃 LLM + 思考模型空回复如实提示
 - R10 终版回归 18/18（池 CAS/跨池候选/云端策展/幂等删除/本地/监控/能力包/
   双协议入口含斜杠模型与 qianfan 前缀）
+
+## 2026-11-15 专项交付（Task #12）：云端模型属性浮窗 + 池拖拽排序 + 鉴权使能 — 2b5fb1d
+- **云端模型属性浮窗**：模型行点开 sheet — VL/工具 toggle + 上下文窗口/最大输出/输入输出价格编辑 + 单独删除（两击确认）。
+  网关 `update_model_spec` 扩展接受 context_window/max_output_tokens(int)、price_input/price_output(float)（None=清除）；
+  `model_specs`/`routable_caps` 序列化透传属性供浮窗回填。实测：tag 带属性 200 → 回读一致 → NSNull 清除生效。
+- **池排序根因修复**：↑↓ 旧实现交换相邻 priority 值，两候选同 priority 时 = 静默 no-op（用户实测报障）。
+  新实现交换位置后全量重建 priority=index*10；API 实测：move+rebuild 200、同 priority 脏写 400（服务端校验拒绝）、重建修复合法。
+  新增行拖拽排序：onDrag/onDrop + PoolRowDropDelegate，落点即移位 + CAS 回写。
+- **API Key 鉴权使能**：GET /admin/security/status 补挂 GET 路由表（此前只挂 POST 表 → 404）；
+  `build_auth` 修复 marker 存在但 security.db 缺失时启动即崩 crashloop（KeyStore provision 补建）；
+  enable 热替换 pm.auth/SecurityAdmin + 首把 key 明文仅回显一次；设置页静态 mock → 真开关 + 一次性密钥复制面板。
+  实测链路：status → enable（401 无 key / 200 带 key）→ disable（policy off，密钥保留）。
+- 测试遗留：~/.inferfabric/security.db 存一把名为 selftest 的测试密钥（policy=off 不拦截，可在 /admin/keys 撤销）。
