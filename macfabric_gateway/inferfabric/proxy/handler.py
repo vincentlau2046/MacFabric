@@ -37,6 +37,12 @@ from inferfabric.agent_registry import request_protocol
 from inferfabric.agent_stats import AGENT_GRAN, aggregate_agent_stats
 from inferfabric.metrics_aggregator import cost_of_row
 from inferfabric.proxy.request_logger import RequestLog
+from inferfabric.monitor_report import (
+    DEFAULT_WINDOW,
+    VALID_SCOPES,
+    VALID_WINDOWS,
+    MonitorReportCache,
+)
 from inferfabric.anomaly_collector import AnomalyEvent
 
 # Admin token for control-plane routes (/switch, /stop, /deploy, /pull, etc.)
@@ -240,6 +246,30 @@ def _collect_engine_refs(model) -> tuple[str | None, list]:
     return engine_unit, resolved
 
 
+def parse_monitor_params(query: str) -> tuple[str, str]:
+    """GET /api/monitor-report 查询串 → (window, scope)。
+
+    缺省 (24h, all)（旧 API 无参行为保留）；非法 window/scope 抛
+    ValueError（路由层转 400），不静默回退默认值掩盖调用方错误。
+    """
+    from urllib.parse import parse_qs
+    qs = parse_qs(query or "")
+    window = (qs.get("window", [DEFAULT_WINDOW])[0] or DEFAULT_WINDOW).strip()
+    scope = (qs.get("scope", ["all"])[0] or "all").strip()
+    if window not in VALID_WINDOWS:
+        raise ValueError(
+            f"unknown window {window!r} (expected one of {sorted(VALID_WINDOWS)})")
+    if scope not in VALID_SCOPES:
+        raise ValueError(
+            f"unknown scope {scope!r} (expected one of {sorted(VALID_SCOPES)})")
+    return window, scope
+
+
+# 报告短 TTL 单飞缓存（进程级）：TTL 内数字/表/图同源；大扫描只发生在
+# 该端点的 miss 构建，不接入 3s 全局轮询
+_MONITOR_REPORT_CACHE = MonitorReportCache(ttl_s=15.0)
+
+
 _GET_ROUTES = {
     "/":                        lambda h, pm: h._serve_dashboard(pm),
     "/health":                  lambda h, pm: h._send_json({"status": "ok", "gpu_mode": pm.mgr.gpu_mode}),
@@ -252,6 +282,7 @@ _GET_ROUTES = {
     "/v1/models":               lambda h, pm: h._handle_v1_models(pm),
     "/system":                  lambda h, pm: h._send_json(h._system_info()),
     "/api/metrics":             lambda h, pm: h._handle_api_metrics(pm),
+    "/api/monitor-report":      lambda h, pm: h._handle_monitor_report(pm),
     "/api/latency":           lambda h, pm: h._handle_api_latency(pm),
     "/api/power":             lambda h, pm: h._handle_api_power(pm),
     "/api/request_log":         lambda h, pm: h._handle_request_log(pm),
@@ -992,6 +1023,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             log.error("/api/metrics failed: %s", e)
             self._send_json({"error": "metrics unavailable"}, 500)
+
+    def _handle_monitor_report(self, pm):
+        """GET /api/monitor-report?window=1h|24h|7d|30d&scope=all|local|cloud
+
+        同快照报告（Task 7）：键分页全量扫描，短 TTL 单飞缓存；统计口径
+        在 monitor_report.py，此处只做参数解析与错误映射（不在 handler
+        堆 SQL）。"""
+        from urllib.parse import urlparse
+        try:
+            window, scope = parse_monitor_params(urlparse(self.path).query)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+            return
+        try:
+            report = _MONITOR_REPORT_CACHE.get_or_build(
+                pm.telemetry, window=window, until=time.time(), scope=scope)
+            self._send_json(report, 200)
+        except Exception as e:
+            log.error("/api/monitor-report failed: %s", e)
+            self._send_json({"error": "monitor report unavailable"}, 500)
 
     def _handle_api_latency(self, pm):
         """GET /api/latency?window=minute|hour|day — 模型延迟趋势（时间分桶 × 逐模型分位）。"""
