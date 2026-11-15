@@ -230,7 +230,7 @@ struct MonitorTotals: Codable {
     var tokens_in: Int?
     var tokens_out: Int?
     var usage_unknown_rows: Int?
-    var cost_estimate_usd: Double?
+    var cost_estimate: Double?      // ¥（价格配置 ¥/1M tokens，评审 I5 对齐）
     var cost_coverage: String?
 }
 struct MonitorModelRow: Codable, Identifiable {
@@ -457,7 +457,13 @@ final class GatewayStore: ObservableObject {
         }.resume()
     }
 
+    /// 池配置拉取代数（终审 I8）：旧 GET 响应不得覆盖新 CAS 后的状态 —
+    /// mutation 完成触发的拉取与 3s 轮询可能交错，仅应用最新代数响应。
+    private var poolsFetchGeneration = 0
+
     func fetchPools(completion: (() -> Void)? = nil) {
+        poolsFetchGeneration += 1
+        let gen = poolsFetchGeneration
         URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/model-pools")) { [weak self] data, _, _ in
             guard let self, let data,
                   let pl = try? JSONDecoder().decode(PoolsPayload.self, from: data) else {
@@ -465,7 +471,9 @@ final class GatewayStore: ObservableObject {
                 return
             }
             DispatchQueue.main.async {
-                self.pools = pl
+                if gen == self.poolsFetchGeneration {   // 旧响应丢弃
+                    self.pools = pl
+                }
                 completion?()
             }
         }.resume()
@@ -1157,8 +1165,9 @@ final class GatewayStore: ObservableObject {
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
+                // 终审 I9：加载态随代数 — 旧响应不得清掉新请求的“更新中”
+                guard gen == self.monitorGeneration else { return }
                 self.monitorLoading = false
-                guard gen == self.monitorGeneration else { return }   // 旧响应丢弃
                 guard let data,
                       let rp = try? JSONDecoder().decode(MonitorReportPayload.self, from: data) else { return }
                 self.monitorReport = rp
@@ -2286,33 +2295,49 @@ struct MonitorView: View {
                 }.padding(18)
             }
         }
-        // 显示时立即拉取；同查询单飞在网关侧短 TTL 缓存兜底，子视图不重复发请求
+        // 显示时立即拉取（终审 I9：重进页面无条件刷新，旧报告只在等待
+        // 期间展示）；同查询单飞在网关侧短 TTL 缓存兜底，子视图不重复发请求
         .onAppear {
-            if store.monitorReport == nil { store.fetchMonitorReport() }
+            store.fetchMonitorReport()
             store.fetchPoolRuntime()
         }
     }
 
+    /// 筛选控件组（终审 I10）：宽窄两种排布共用
+    @ViewBuilder private var monitorFilters: some View {
+        Picker("范围", selection: Binding(
+            get: { store.monitorWindow },
+            set: { store.selectMonitor(window: $0) })) {
+            ForEach(Self.windowChoices, id: \.0) { w in Text(w.1).tag(w.0) }
+        }.pickerStyle(.segmented).frame(width: 330).fixedSize()
+        Picker("来源", selection: Binding(
+            get: { store.monitorScope },
+            set: { store.selectMonitor(scope: $0) })) {
+            ForEach(Self.scopeChoices, id: \.0) { s in Text(s.1).tag(s.0) }
+        }.pickerStyle(.segmented).fixedSize()
+        if showingStale {
+            Text("切换中 · 显示\(Self.windowLabels[store.monitorReportWindow] ?? store.monitorReportWindow)旧数据")
+                .font(.system(size: 11)).foregroundColor(.dim)
+        } else if store.monitorLoading {
+            Text("更新中…").font(.system(size: 11)).foregroundColor(.faint)
+        }
+    }
+
+    /// 窄窗口不裁切（终审 I10 / QA M 项）：宽度足够单行排布，否则两行堆叠
     private var filterHeader: some View {
-        HStack(spacing: 10) {
-            Picker("范围", selection: Binding(
-                get: { store.monitorWindow },
-                set: { store.selectMonitor(window: $0) })) {
-                ForEach(Self.windowChoices, id: \.0) { w in Text(w.1).tag(w.0) }
-            }.pickerStyle(.segmented).frame(width: 330).fixedSize()
-            Picker("来源", selection: Binding(
-                get: { store.monitorScope },
-                set: { store.selectMonitor(scope: $0) })) {
-                ForEach(Self.scopeChoices, id: \.0) { s in Text(s.1).tag(s.0) }
-            }.pickerStyle(.segmented).fixedSize()
-            if showingStale {
-                Text("切换中 · 显示\(Self.windowLabels[store.monitorReportWindow] ?? store.monitorReportWindow)旧数据")
-                    .font(.system(size: 11)).foregroundColor(.dim)
-            } else if store.monitorLoading {
-                Text("更新中…").font(.system(size: 11)).foregroundColor(.faint)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                monitorFilters
+                Spacer()
+                SmallBtn("刷新") { store.fetchMonitorReport(); store.fetchPoolRuntime() }
             }
-            Spacer()
-            SmallBtn("刷新") { store.fetchMonitorReport(); store.fetchPoolRuntime() }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) { monitorFilters }
+                HStack {
+                    Spacer()
+                    SmallBtn("刷新") { store.fetchMonitorReport(); store.fetchPoolRuntime() }
+                }
+            }
         }.padding(.horizontal, 18).padding(.vertical, 10)
     }
 
@@ -2585,9 +2610,9 @@ struct MonitorView: View {
         return v >= 1000 ? String(format: "%.1fs", v / 1000) : String(format: "%.0fms", v)
     }
     private func costText(_ t: MonitorTotals) -> String {
-        // 缺价格配置 = unknown（"未配价"），不冒充 $0.00
-        guard let usd = t.cost_estimate_usd else { return "未配价" }
-        return String(format: "$%.2f", usd)
+        // 缺价格配置 = unknown（"未配价"），不冒充 ¥0.00；单位与价格配置一致（¥）
+        guard let v = t.cost_estimate else { return "未配价" }
+        return String(format: "¥%.2f", v)
     }
 }
 
