@@ -211,7 +211,11 @@ def _parse_pool(name: str, raw: dict, issues: list[str]) -> PoolConfig | None:
     allow_cross = _strict_bool(raw.get("allow_cross_location"), "allow_cross_location",
                                f"pool '{name}'", issues)
     enabled = _strict_bool(raw.get("enabled"), "enabled", f"pool '{name}'", issues)
-    accept_declared = _strict_bool(raw.get("accept_declared"), "accept_declared",
+    # MacFabric 裁决（2026-11-15）：accept_declared 默认 true — 证据五态里
+    # DECLARED 本就是"管理员明确声明"，App 配置服务商端点+模型入池即是声明；
+    # 默认 false 曾让全部池卡死在 no_evidence（探测端点不存在，声明无人写入）。
+    # YAML 显式 false 仍然尊重（需要实测证据强约束的池可显式收紧）。
+    accept_declared = _strict_bool(raw.get("accept_declared", True), "accept_declared",
                                    f"pool '{name}'", issues)
     if allow_cross is None or enabled is None or accept_declared is None:
         return None

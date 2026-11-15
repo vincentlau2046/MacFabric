@@ -13,7 +13,7 @@ import logging
 import os
 import tempfile
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable, Union
 
@@ -397,6 +397,16 @@ class PoolRegistry:
                         "cloud", cand.provider,
                         f"openai={route['openai_base']}|anthropic={route['anthropic_base']}",
                         cand.model_id)
+                    # MacFabric 开箱即路由（2026-11-15 用户实测：池配置正确但
+                    # 恒 no_evidence — declared_protocols 无人写入、探测端点
+                    # 不存在，证据门槛成死锁）。候选未显式声明协议时从服务商
+                    # 配置推导：启用 provider + 模型入池 = 管理员已声明走该端点；
+                    # 显式声明优先，推导只兜底。
+                    if not cand.declared_protocols:
+                        protocols = ["openai"]
+                        if route.get("anthropic_base"):
+                            protocols.append("anthropic")
+                        cand = replace(cand, declared_protocols=tuple(protocols))
                 resolved.append(ResolvedCandidate(
                     candidate=cand, endpoint_fingerprint=fp,
                     evidence=self._evidence_for(cand, fp),

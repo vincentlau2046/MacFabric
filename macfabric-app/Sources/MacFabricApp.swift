@@ -1521,6 +1521,32 @@ let poolUseLabels: [String: String] = [
 struct PoolsView: View {
     @ObservedObject var store: GatewayStore
 
+    static let usageSnippet = """
+    curl http://127.0.0.1:\(GW_PORT)/v1/chat/completions \\
+      -H "Authorization: Bearer sk-iff-…" -H "Content-Type: application/json" \\
+      -d '{"model":"iff/fast","messages":[{"role":"user","content":"你好"}]}'
+    """
+
+    static func copyUsageSnippet() {
+        let text = """
+        # MacFabric 池调用（OpenAI 方言；Anthropic 方言把 URL 换成 http://127.0.0.1:\(GW_PORT) 即可）
+        export OPENAI_BASE_URL=http://127.0.0.1:\(GW_PORT)/v1
+        export OPENAI_API_KEY=sk-iff-…   # 设置页「API Key 鉴权」新建
+        # model 填池名：iff/fast · iff/small · iff/premium（按池内优先级自动调度）
+        \(usageSnippet)
+        """
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    @ViewBuilder private func guideRow(_ title: String, _ detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title).font(.system(size: 11, weight: .semibold)).foregroundColor(.ink)
+            Text(detail).font(.system(size: 11)).foregroundColor(.dim)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -1540,8 +1566,32 @@ struct PoolsView: View {
                     ForEach(names, id: \.self) { name in
                         PoolCard(store: store, name: name, def: cfg[name]!)
                     }
-                    Text("候选按优先级竖排（数字小者优先）— 路由自上而下逐个尝试；拖拽或 ↑↓ 调整顺序即时生效（revision CAS）")
-                        .font(.system(size: 11)).foregroundColor(.faint)
+                    // 调用指引（用户视角 — 客户端怎么用这些池）
+                    Card {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("如何调用这些池").font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
+                                Spacer()
+                                SmallBtn("复制调用示例") { Self.copyUsageSnippet() }
+                            }
+                            guideRow("① 服务地址（Base URL）",
+                                     "OpenAI 方言 \(GW_BASE)/v1 · Anthropic 方言 \(GW_BASE)")
+                            guideRow("② 模型名（model）",
+                                     "直接填池名：iff/fast · iff/small · iff/premium — 网关按池内优先级自动选候选，失败自动换下一个，无需改客户端")
+                            guideRow("③ API Key",
+                                     store.securityEnforced
+                                        ? "鉴权已开启 — 用设置页「API Key 鉴权 → ＋ 新建密钥」生成的 sk-iff-…，请求头 Authorization: Bearer <key>"
+                                        : "鉴权未开启 — 本机调用免 key；开启鉴权后在设置页新建")
+                            Text("示例（终端可直接粘贴）")
+                                .font(.system(size: 10.5)).foregroundColor(.dim)
+                            Text(Self.usageSnippet)
+                                .font(.system(size: 10.5, design: .monospaced)).foregroundColor(.dim)
+                                .lineLimit(4).truncationMode(.middle)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                                .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+                        }.padding(12)
+                    }
                 } else {
                     Card {
                         Text(store.gatewayUp ? "池配置加载中…" : "网关离线 — 启动后此处显示角色池")
@@ -1725,28 +1775,11 @@ struct PoolCard: View {
                     }
                     .font(.system(size: 11))
                     Spacer()
-                    SmallBtn("复制池配置") { copyPoolYAML() }
-                        .help("复制本池 YAML 片段到剪贴板")
                 }
                 .padding(.top, 4)
             }
             .padding(12)
         }
-    }
-
-    /// 一键拷贝池 YAML 片段（含 iff/<pool> 全路径头，可直接粘进 model_pools.yaml）
-    func copyPoolYAML() {
-        var lines = ["\(name):", "  enabled: \(def.enabled ?? true)", "  candidates:"]
-        for c in candidates {
-            lines.append("    - id: \(c.target ?? c.id)")
-            lines.append("      target: \(c.target ?? c.id)")
-            lines.append("      kind: \(c.kind ?? "local")")
-            lines.append("      priority: \(c.priority)")
-        }
-        let text = lines.joined(separator: "\n")
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        store.actionMessage = "✅ 池配置已复制到剪贴板"
     }
 }
 
@@ -2391,6 +2424,29 @@ struct SettingsView: View {
         return f
     }()
 
+    @ViewBuilder private func keyRow(_ k: SecurityKeyInfo) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: k.revoked ? "key.slash" : "key")
+                .font(.system(size: 10)).foregroundColor(k.revoked ? .faint : .okC)
+            Text(k.name).font(.system(size: 12)).foregroundColor(.ink)
+            if k.revoked { Chip("已撤销", color: Color.faint) }
+            if let ts = k.createdAt {
+                Text(Self.keyDate.string(from: Date(timeIntervalSince1970: ts)))
+                    .font(.system(size: 10.5)).foregroundColor(.faint)
+            }
+            Spacer()
+            if !k.revoked {
+                if store.securityKeyRevokeConfirm == k.id {
+                    SmallBtn("确认撤销", primary: true) { store.revokeSecurityKey(k.id) }
+                    SmallBtn("取消") { store.securityKeyRevokeConfirm = nil }
+                } else {
+                    SmallBtn("撤销") { store.securityKeyRevokeConfirm = k.id }
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
     private var ramGB: Int {
         Int(ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024))
     }
@@ -2451,30 +2507,24 @@ struct SettingsView: View {
                                 .disabled(store.securityBusy)
                         }
                         .padding(.vertical, 8)
-                        // 密钥管理（明文永不回显 — 新建时一次性展示）
+                        // 密钥管理（明文永不回显 — 新建时一次性展示）。
+                        // 撤销密钥最多留 3 条痕 — 防撤销历史把设置页无限拉长（用户裁决）
                         if !store.securityKeys.isEmpty {
+                            let active = store.securityKeys.filter { !$0.revoked }
+                            let revokedAll = store.securityKeys.filter { $0.revoked }
+                                .sorted { ($0.createdAt ?? 0) > ($1.createdAt ?? 0) }
+                            let revoked = revokedAll.prefix(3)
+                            let hiddenRevoked = revokedAll.count - revoked.count
                             VStack(alignment: .leading, spacing: 4) {
-                                ForEach(store.securityKeys) { k in
-                                    HStack(spacing: 8) {
-                                        Image(systemName: k.revoked ? "key.slash" : "key")
-                                            .font(.system(size: 10)).foregroundColor(k.revoked ? .faint : .okC)
-                                        Text(k.name).font(.system(size: 12)).foregroundColor(.ink)
-                                        if k.revoked { Chip("已撤销", color: Color.faint) }
-                                        if let ts = k.createdAt {
-                                            Text(Self.keyDate.string(from: Date(timeIntervalSince1970: ts)))
-                                                .font(.system(size: 10.5)).foregroundColor(.faint)
-                                        }
-                                        Spacer()
-                                        if !k.revoked {
-                                            if store.securityKeyRevokeConfirm == k.id {
-                                                SmallBtn("确认撤销", primary: true) { store.revokeSecurityKey(k.id) }
-                                                SmallBtn("取消") { store.securityKeyRevokeConfirm = nil }
-                                            } else {
-                                                SmallBtn("撤销") { store.securityKeyRevokeConfirm = k.id }
-                                            }
-                                        }
-                                    }
-                                    .padding(.vertical, 2)
+                                ForEach(active) { k in
+                                    keyRow(k)
+                                }
+                                ForEach(revoked) { k in
+                                    keyRow(k)
+                                }
+                                if hiddenRevoked > 0 {
+                                    Text("另有 \(hiddenRevoked) 把更早的已撤销密钥（已折叠，不影响鉴权）")
+                                        .font(.system(size: 10.5)).foregroundColor(.faint)
                                 }
                             }
                             .padding(.vertical, 4)
