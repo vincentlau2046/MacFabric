@@ -68,3 +68,18 @@ Docker 适用于纯 CPU 的非加速服务；对以 Metal 为第一公民的 Mac
 
 删项目目录 + `~/.inferfabric` 后系统无任何残留（无 brew 包、无 conda env、
 无 launchd 服务、无 /usr /Library 写入）；运行中卸载先停服务再拆环境。
+
+## 五、能力包隔离修订（2026-11-15 用户裁决）
+
+> 能力包（Pack）架构下，"一模型一环境"为**严格独立**：每包复制自己的
+> 引擎二进制 / venv，不共享 `engines/`，卸载 = 删包目录，无引用计数。
+> 统一的是沙箱方案、目录模板、安装事务和 Supervisor，不是运行时本体。
+
+- 上述 §四 的**引擎引用计数（`_collect_engine_refs`）仅保留给用户导入
+  模型的旧路径**；能力包安装/卸载不走该机制。
+- 包目录：`~/.inferfabric/packs/<pack_id>/<pack_version>/`（runtime/、
+  models/、work/、logs/、tmp/、sandbox/、state/ 均包自有）。
+- 卸载语义：确认框列出受影响模型池候选 → 用户确认后自动清除 →
+  drain 在途请求（上限 10s，超时强杀进程组、在途请求按 503 返回）→
+  整目录删除 → 热重载。详细状态机见
+  `docs/superpowers/specs/2026-11-15-capability-packs-design.md`。

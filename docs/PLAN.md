@@ -8,7 +8,7 @@
 
 ## 0. 一句话定位
 
-**MacFabric**：Apple Silicon 上的小模型多协议聚合平台——本机端侧能力（对话/看图/嵌入/重排/ASR/TTS/OCR/文生图/图生图，本地 LLM ≤4B 封顶）+ 云端大模型聚合，统一经 `:8999` 网关以 OpenAI/Anthropic 双协议暴露；原生 SwiftUI App + 菜单栏常驻，单 dmg 安装、零终端。
+**MacFabric**：Apple Silicon 上的小模型多协议聚合平台——本机端侧能力（对话/看图/嵌入/重排/ASR/TTS/OCR/文生图/图生图，本地 LLM 默认 ≤4B、高级设置可配置）+ 云端大模型聚合，统一经 `:8999` 网关以 OpenAI/Anthropic 双协议暴露；原生 SwiftUI App + 菜单栏常驻，单 dmg 安装、零终端。
 
 上游血统：定制自 [InferFabric](https://github.com/vincentlau2046/InferFabric)（Atlas 本地推理底座），保留其网关内核设计，退役其 CUDA 部署线。
 
@@ -19,7 +19,7 @@
 | D1 | 架构路线 | 保留 Python 网关内核（aiohttp，上游 ~12k 行 + 近 2000 测试的资产）+ 原生 SwiftUI 壳。不做全 Swift 重写 |
 | D2 | 协议翻译层 | 接受。**只做 Anthropic→OpenAI 单向**；范围：messages / tools / 流式事件映射 / 图像块→image_url；不做 prompt caching 映射（`cache_control` 透传忽略）。测试金标 = 录制 Claude Code 真实会话回放 |
 | D3 | UI 形态 | 菜单栏常驻（状态灯+微缩织物条+即停即睡）+ 主窗口，双形态 |
-| D4 | 本地 LLM 档位 | **≤4B 封顶**（纯文本与 VL 同限）。大模型需求一律走云端聚合。候选：Qwen3-4B/1.7B、LFM2-2.6B、Gemma-3-4B、Phi-4-mini、Qwen3-VL-4B |
+| D4 | 本地 LLM 档位 | **默认 ≤4B**（纯文本与 VL 同限），作为高级设置可配置（2026-11-15 修订，原"封顶"）。参数量门禁仅作用于对话类 LLM/VL；ASR/TTS/Embedding/Rerank/OCR 按内存门禁，不设参数门槛。任何放宽都必须经设置 + 实际资源预检，默认配置行为不变。大模型需求默认走云端聚合。候选：Qwen3-4B/1.7B、LFM2-2.6B、Gemma-3-4B、Phi-4-mini、Qwen3-VL-4B |
 | D5 | 机型适配 | 状态机按 RAM 参数化；36GB 为开发基准，预设分 36/24/16GB 三档 |
 | D6 | 项目形态 | 独立新仓库 MacFabric；models.d YAML schema 与上游兼容（能力包可互通）；上游保持通用定位 |
 | D7 | 内存状态机 | **三规则版**（见 §3）。腾挪策略降级为安全网；`B = RAM − 8G` 唯一公式，**无第二道上限**（128GB 机型天然放宽；引擎真被系统拒分配时按引擎失败路径呈现，产品层不做预判） |
