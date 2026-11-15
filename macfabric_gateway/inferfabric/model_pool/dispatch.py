@@ -161,14 +161,21 @@ def _pool_has_cloud_candidates(pool_snap) -> bool:
 
 
 def _ensure_cloud_discovered(pm, pool_snap) -> None:
-    """池含云候选时补一次云发现（惰性；pm 未提供入口则跳过，评审 #14）。"""
+    """池含云候选时确保云发现（Task 5：后台单飞，不阻塞请求关键路径）。
+
+    发现失败/未完成时云候选按 last-known 状态路由；无 last-known 的
+    云候选在 select/transport 层快速明确失败，不等待发现。pm 只提供
+    旧签名（无 background 参数）时退回同步调用（兼容）。"""
     ecd = getattr(pm, "ensure_cloud_discovered", None)
     if ecd is None or not _pool_has_cloud_candidates(pool_snap):
         return
     try:
-        ecd()
+        try:
+            ecd(background=True)
+        except TypeError:
+            ecd()
     except Exception as e:
-        log.warning("cloud discovery failed on pool path (%s) — "
+        log.warning("cloud discovery dispatch failed (%s) — "
                     "cloud candidates use last known state", type(e).__name__)
 
 
