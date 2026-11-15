@@ -27,7 +27,7 @@ from inferfabric.model_pool.selector import (
 )
 from inferfabric.proxy.chat_handlers import (
     _ENGINE_API_PATHS,
-    _forward_request,
+    _forward_request_ex,
     _normalize_tools_for_openai,
     handle_ollama_native,
 )
@@ -566,15 +566,26 @@ def _attempt_local_openai(handler, pm, data, *, model, pool, cand,
         upstream_path = _ENGINE_API_PATHS.get(model_obj.type, "/v1/chat/completions")
 
         # 池请求不写响应缓存（映射变化后旧答案不可复用，spec §9.3）。
-        # model_name 必须是真实模型名 — _forward_request 以它释放副本配额
-        if _forward_request(handler, pm, target_port, body, stream,
-                            model_name=model_obj.name, upstream_path=upstream_path,
-                            cache_body=None, timeout=remaining):
-            return AttemptResult(ok=True, status=200, committed=True, route=route,
-                                 usage=getattr(handler, "_usage", {}) or {},
-                                 ttft_ms=getattr(handler, "_ttft_ms", None))
-        return AttemptResult(status=None, route=route,
-                             error=f"local target '{c.model_name}' unreachable")
+        # model_name 必须是真实模型名 — _forward_request 以它释放副本配额。
+        # Task 3：结构化结果 — 布尔"已交付"不再等同 ok（非 2xx 直发/流中断
+        # 如实分类），真实状态/流分类保留给动作表与 pool_summary。
+        fx = _forward_request_ex(handler, pm, target_port, body, stream,
+                                 model_name=model_obj.name,
+                                 upstream_path=upstream_path,
+                                 cache_body=None, timeout=remaining)
+        if not fx["committed"]:
+            return AttemptResult(status=None, route=route, error=fx["error"])
+        if fx["ok"]:
+            return AttemptResult(ok=True, status=fx["status"], committed=True,
+                                 route=route, usage=fx["usage"] or {},
+                                 ttft_ms=fx["ttft_ms"],
+                                 stream_state=fx["stream_state"])
+        # 已提交失败（非 2xx 直发/流中断）→ 终止不回退，不写第二信封
+        return AttemptResult(ok=False, committed=True, status=fx["status"],
+                             route=route,
+                             error=fx["error"] or "upstream_error",
+                             usage=fx["usage"] or {}, ttft_ms=fx["ttft_ms"],
+                             stream_state=fx["stream_state"])
     finally:
         gate.release()
 

@@ -453,26 +453,28 @@ def handle_chat(handler, pm, data):
         gate.release()
 
 
-def _forward_request(handler, pm, target_port, body, stream, model_name="", upstream_path=None, cache_body=None, timeout=None):
-    """Forward a request to an upstream service.
+def _forward_request_ex(handler, pm, target_port, body, stream, model_name="", upstream_path=None, cache_body=None, timeout=None):
+    """结构化转发（PLAN-2026-11-15 v2 Task 3）：_forward_request 的可观测版。
 
-    Args:
-        upstream_path: 上游 API 路径（由模型引擎 YAML type 字段驱动）。
-                       为 None 时回退 handler.path（兼容旧调用方）。
-        cache_body: A3 (R5) — 转发前请求 body 快照（model 为客户端原名、
-                    tools 未归一化）。非流式 200 且 JSON 可解析时用它写
-                    响应缓存，保证与 GET 侧缓存键一致；None 则不写。
-        timeout: 可选连接/读超时秒数（池路径按剩余预算传入，终审 #7）。
-                 None = 引擎默认（既有行为逐字节不变）。
-
-    Returns True if the response was fully sent to the client.
-    Returns False if the caller should retry (headers not yet sent).
+    返回 dict：
+      committed    响应已开始/完整写给客户端（headers 已发）— 已提交后池层
+                   终止，不重试不切换，也绝不写第二个错误信封
+      ok           真实成功：2xx 且（非流式 或 stream_state == "completed"）
+      status       上游真实 HTTP 状态（连接失败为 None）
+      stream_state 流结束分类：completed / missing_terminal / error_event /
+                   read_error / client_disconnect；非流式为 None
+      usage/ttft_ms/error
+    客户端可见字节序列与旧 _forward_request 成功路径逐字节一致；差异仅在
+    失败路径：流中断后补写 chunked 终止块（0\r\n\r\n），避免客户端悬挂。
     """
     if upstream_path is None:
         upstream_path = handler.path
     headers_sent = False
     conn = None
     resp = None
+    result = {"committed": False, "ok": False, "status": None,
+              "stream_state": None, "usage": {}, "ttft_ms": None,
+              "error": None}
     try:
         # 池预算超时必须经构造参数传入：HTTPConnection 无 settimeout
         # （原 `conn.settimeout(timeout)` AttributeError → 本地池候选必
@@ -485,6 +487,7 @@ def _forward_request(handler, pm, target_port, body, stream, model_name="", upst
         resp = conn.getresponse()
 
         resp_status = resp.status
+        result["status"] = resp_status
         resp_headers = {k.lower(): v for k, v in resp.getheaders()}
         resp_ct = resp_headers.get("content-type", "application/json")
 
@@ -502,6 +505,7 @@ def _forward_request(handler, pm, target_port, body, stream, model_name="", upst
             ttft_recorded = False
             sse_buf = SSELineBuffer(first_token_ttft_cb(handler))  # G-1b + v6.1
             use_token_ttft = getattr(sse_buf, "_on_first_token", None) is not None
+            stream_error = None
             try:
                 while True:
                     chunk = resp.read(8192)
@@ -518,14 +522,37 @@ def _forward_request(handler, pm, target_port, body, stream, model_name="", upst
                     handler._safe_write(b"\r\n")
                     # G-1b: 旁路观察提取 usage
                     sse_buf.feed(chunk)
-                handler._safe_write(b"0\r\n\r\n")
             except Exception as e:
+                stream_error = e
                 log.debug("Stream forwarding interrupted: %s", e)
             finally:
                 # G-1b: flush 残余 + 保存 usage（即使异常也保留已提取的部分）
                 sse_buf.flush()
                 handler._usage = dict(sse_buf.usage)
+                # Task 3：中断也补写 chunked 终止块（best-effort）——
+                # 客户端 HTTP 层不再悬挂；SSE 层缺 [DONE] 由 stream_state
+                # 如实分类，不冒充成功
+                if not getattr(handler, "_client_gone", False):
+                    handler._safe_write(b"0\r\n\r\n")
                 resp.close()
+            result["usage"] = dict(sse_buf.usage)
+            result["ttft_ms"] = getattr(handler, "_ttft_ms", None)
+            result["committed"] = True
+            if getattr(handler, "_client_gone", False):
+                result["stream_state"] = "client_disconnect"
+            elif stream_error is not None:
+                result["stream_state"] = "read_error"
+                result["error"] = f"stream read error: {stream_error}"
+            elif sse_buf.saw_error:
+                result["stream_state"] = "error_event"
+                result["error"] = "stream error event"
+            elif sse_buf.saw_done:
+                result["stream_state"] = "completed"
+            else:
+                result["stream_state"] = "missing_terminal"
+                result["error"] = "stream ended without terminal marker"
+            result["ok"] = (200 <= resp_status < 300
+                            and result["stream_state"] == "completed")
         else:
             # 非流式不记 TTFT：引擎算完整响应才回 header，"收到 header"≈总耗时，
             # 无"首 token"语义。若记为 ttft，聚合器派生 TPOT
@@ -562,7 +589,12 @@ def _forward_request(handler, pm, target_port, body, stream, model_name="", upst
             handler.send_header("Access-Control-Allow-Origin", "*")
             handler.end_headers()
             handler._safe_write(resp_body)
-        return True
+            result["committed"] = True
+            result["usage"] = dict(getattr(handler, "_usage", {}) or {})
+            result["ok"] = 200 <= resp_status < 300
+            if not result["ok"]:
+                result["error"] = f"upstream returned HTTP {resp_status}"
+        return result
     except Exception as e:
         log.error("Forward to :%d failed: %s", target_port, e)
         try:
@@ -576,8 +608,33 @@ def _forward_request(handler, pm, target_port, body, stream, model_name="", upst
         except Exception:
             pass
         if not headers_sent:
-            return False
-        return True
+            result["error"] = str(e)
+            return result
+        result["committed"] = True
+        return result
     finally:
         if model_name:
             pm.release_port(model_name, target_port)
+
+
+def _forward_request(handler, pm, target_port, body, stream, model_name="", upstream_path=None, cache_body=None, timeout=None):
+    """Forward a request to an upstream service.
+
+    Args:
+        upstream_path: 上游 API 路径（由模型引擎 YAML type 字段驱动）。
+                       为 None 时回退 handler.path（兼容旧调用方）。
+        cache_body: A3 (R5) — 转发前请求 body 快照（model 为客户端原名、
+                    tools 未归一化）。非流式 200 且 JSON 可解析时用它写
+                    响应缓存，保证与 GET 侧缓存键一致；None 则不写。
+        timeout: 可选连接/读超时秒数（池路径按剩余预算传入，终审 #7）。
+                 None = 引擎默认（既有行为逐字节不变）。
+
+    Returns True if the response was fully sent to the client.
+    Returns False if the caller should retry (headers not yet sent).
+
+    Task 3 起为 _forward_request_ex 的布尔包装（committed 位）— 既有调用方
+    语义逐字节不变；池路径改用 _forward_request_ex 取真实状态/流分类。
+    """
+    return _forward_request_ex(handler, pm, target_port, body, stream,
+                               model_name=model_name, upstream_path=upstream_path,
+                               cache_body=cache_body, timeout=timeout)["committed"]

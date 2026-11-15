@@ -451,7 +451,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(data)
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
+            # 客户端断连观测位（PLAN-2026-11-15 v2 Task 3）：池传输据此把
+            # 流结束分类为 client_disconnect，不冒充成功
+            self._client_gone = True
 
     # ─── HTTP methods ─────────────────────────────────────────────
 

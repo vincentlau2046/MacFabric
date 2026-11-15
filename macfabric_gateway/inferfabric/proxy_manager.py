@@ -182,11 +182,15 @@ class ProxyManager:
     def _local_protocols(self, served_name: str) -> "list[str] | None":
         """registry 存量自愈回调（池 bug #1）：served_name → 该模型引擎的
         本地协议声明。与目录（build_catalog）同源同映射 — 目录给新建候选
-        存正确声明，这里让目录修正前的存量配置免迁移自愈。"""
-        from inferfabric.model_pool.catalog import local_protocols_for_engine
+        存正确声明，这里让目录修正前的存量配置免迁移自愈。
+        Task 3：按模型实例判定 — anthropic_native=True 的 llama_cpp 等
+        引擎追加 anthropic（与直连 handler 原生/桥分流同判据）。"""
+        from inferfabric.model_pool.catalog import local_protocols_for_model
         for m in self.mgr._models.values():
             if m.served_name == served_name:
-                return local_protocols_for_engine(m.type)
+                return local_protocols_for_model(
+                    m.type, anthropic_native=bool(
+                        getattr(m, "anthropic_native", False)))
         return None
 
     def new_request_id(self) -> str:
