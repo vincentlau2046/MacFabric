@@ -613,5 +613,6 @@ def test_fake_pack_full_lifecycle(tmp_path, aio_client):
 ## 交付边界与后续
 
 - 本计划交付网关侧 PK0–PK3 门禁；**App 能力包页（PK4，SwiftUI）与真实 Qwen3-4B 包全链路实测（PK3 真包验收）另出后续计划**，以本计划冻结的 HTTP 契约为接口。
+- **卸载/503 生产接线推迟（终审 F5 补记，2026-11-15）**：`PackManager.attach_uninstaller`（PoolRegistry/路由禁用/lifecycle 回调）在本分支无生产调用方 — 真实网关中 `POST /admin/packs/uninstall`、`GET /admin/packs/uninstall-preview` 与 `is_model_disabled` 503 判定在 PK4 集成接线前**不可用**（当前仅门面层测试覆盖）。HTTP 契约与 uninstaller 状态机已按本计划冻结并全测；接线缺口在此如实记录，于 PK4 集成时闭合。
 - PK5 批次（VL/ASR/TTS/Embedding 新运行时模板）不在本计划内 — 每种运行时独立验证后逐个立项。
 - SBPL 注入的真实实现（`SandboxProvider` 非 Noop 分支）在 PK3 后按探测实测结果立项；本计划只冻结探测与降级准入。
