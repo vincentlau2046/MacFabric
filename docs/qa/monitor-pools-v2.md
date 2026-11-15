@@ -33,7 +33,8 @@ PLAN-2026-11-15 v2（Task 7 报告契约 + Task 8 原生监控台 + Task 9/10 �
   在模型池页（PoolsView），监控台不恢复每池复制 YAML 按钮。
 
 ### E1 边界显示
-- **预期**：无数据 → 空态文案；未配价 → 费用「未配价」（不是 $0.00）；
+- **预期**：无数据 → 空态文案；未配价 → 费用「未配价」（不是 ¥0.00，
+  币种与价格配置一致，价格单位 ¥/1M tokens）；
   缺 TTFT/usage → 「—」与 unknown 计数（不是 0ms/0）；模型名过长 →
   表格省略 + 详情卡完整可选中复制。
 
@@ -135,3 +136,33 @@ PLAN-2026-11-15 v2（Task 7 报告契约 + Task 8 原生监控台 + Task 9/10 �
 - [ ] Tab 顺序走查 + ⌘1–8 切页
 - [ ] 减弱动态效果开启下操作反馈呈现
 - [ ] 无图表数据时监控台空态文案可读
+
+## 6. 终审修复轮取证（2026-11-15，整分支评审 fix-first → 7c309ef + ce24591）
+
+评审（fresh reviewer，0f07cf8..2b64d54）：1 Critical + 10 Important + 2 Minor，
+逐条对照源码重定级后一轮修复；每项先 RED 后 GREEN，回归 125/125，
+调试构建 0 warning。重定级与拒绝项裁决见 SDD 台账 Final 段。
+
+| 发现 | 修复 | 证据（测试） |
+|---|---|---|
+| C1 上游错误体经 pool_summary.attempts 入 metadata/进程日志 | safe_attempt_error 固定码化（摘要 + _log_failed_attempts 同源） | test_summary_attempts_error_fixed_code / test_failed_attempt_process_log_sanitized（密文零出现） |
+| I1 同秒洪流提前停扫谎报完整；`> since` 违反 [since,until) | (timestamp,id) 真键集分页；下界含 since；_MAX_PAGES 触顶如实 truncated | test_same_timestamp_flood_full_count（100001 同秒行全计）/ test_since_boundary_inclusive |
+| I2 3xx 计成功 | 2xx 契约 | test_3xx_not_success |
+| I3 直连行缺 usage 冒认 0 | 无摘要证据成功行 0/0 计 usage_unknown_rows | test_direct_row_missing_usage_counts_unknown |
+| I4 身份未用 actual_model_id | 池行按 final_target.actual_model_id 聚合 | test_alias_grouped_by_actual_model（iff/fast → qwen3-4b） |
+| I5 价格未接线 + 单位/币种错 | handler 传 price_config；复用 cost_of_row（¥/1M）；字段 cost_estimate | test_cost_uses_price_table_yuan_per_1m / test_unpriced_reports_none |
+| I6 本地 OpenAI 动作表状态直发 | _forward_request_ex suppress（401/403/429/5xx≠501 未提交交动作表；400/404/413/422/501 PR-14 直发保留） | TestLocalSuppressActionableStatuses 6 项（含 429 Retry-After、流式、客户端零字节） |
+| I7 传输异常不计尝试 | 异常 admitted=True + 消耗 max_attempts（冷却语义不变） | test_transport_exception_consumes_attempt |
+| I8 fetchPools 无代际守卫 | 池拉取代数，旧响应丢弃 | 构建验证（交互时序属人工 GUI 项） |
+| I9 monitor 加载态/onAppear | 加载态随代数清；重进无条件拉取 | 构建验证（人工 GUI 项） |
+| I10 筛选行无 ViewThatFits（QA 断言此前与源码不符） | ViewThatFits 宽单行/窄两行 | 构建验证（窄窗人工项） |
+
+### 契约变更（本分支内，未发布）
+
+- `totals.cost_estimate_usd` → `totals.cost_estimate`（币种如实：价格配置
+  单位 ¥/1M tokens；UI 显示 ¥，「未配价」语义不变）。
+- 本地 OpenAI 池候选对 401/403/429/5xx（501 除外）不再直发客户端错误，
+  改为未提交交动作表（冷却/等待/回退）；非回退类 400/404/413/422/501
+  直发语义不变（PR-14 冻结范围收窄到其本意）。
+- usage 缺失推断：无摘要证据的成功 0/0 行计 unknown（tokens 列 NOT NULL，
+  NULL 化需 schema 迁移另案获批）。
