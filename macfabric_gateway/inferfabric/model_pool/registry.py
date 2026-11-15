@@ -198,7 +198,10 @@ class PoolRegistry:
             # 否则持有旧 revision 的编辑者可 CAS 覆盖掉他人的修改（评审 #2）
             revision = current + 1
         try:
-            parsed, issues = load_pools_dict(raw, current_revision=revision)
+            # 磁盘存量载入 tolerant（strict=False）：范围超界告警容忍不裁剪；
+            # CAS 新写入（update/flip）走默认 strict
+            parsed, issues = load_pools_dict(raw, current_revision=revision,
+                                             strict=False)
         except Exception as e:
             # 解析崩溃（畸形类型逃逸静态校验等）→ 保留最后有效快照，不抛出
             log.error("model_pools.yaml parse crashed (%s) — keeping last good snapshot",
