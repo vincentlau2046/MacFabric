@@ -289,3 +289,14 @@
   enable 热替换 pm.auth/SecurityAdmin + 首把 key 明文仅回显一次；设置页静态 mock → 真开关 + 一次性密钥复制面板。
   实测链路：status → enable（401 无 key / 200 带 key）→ disable（policy off，密钥保留）。
 - 测试遗留：~/.inferfabric/security.db 存一把名为 selftest 的测试密钥（policy=off 不拦截，可在 /admin/keys 撤销）。
+
+## 2026-11-15 专项：池排序 UI 不实时刷新 — edb11fd
+- **根因**：页面视图（PoolsView/PoolCard/CloudView 等 13 个）持普通 `var store` —
+  引用类型字段 diff 恒等，不订阅 @Published；store.pools 已更新但视图不重渲染，
+  只有切卡片（结构重建）才刷新。与此前云端页"切卡片才生效"同根因；
+  InferenceView 一直有 @ObservedObject 所以模型列表实时 — 全部页面对齐该模式。
+- **排序三层保障**：① 乐观更新 — 点击/拖拽本地 pools 立即重排，CAS 后台回写，
+  失败 fetchPools 自动回滚；② 409 自动重试一次（连点不丢点击）；③ priority
+  全量重建 index*10（前日 no-op 根因修复保持）。
+- 网关侧已实测 POST 后 pools[*].candidates 立即按新序返回 — 服务端无问题。
+- 遗留：GitHub push 连接超时（gitcode 已推成功），待网络恢复补推 origin。
