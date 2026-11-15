@@ -152,6 +152,20 @@ class CooldownStore:
                 # 重新冷却保留原 reason（新故障原因由 add() 覆盖，探测失败不覆盖）
                 self._until[fingerprint] = self._now(now) + self._ttl
 
+    def release_probe(self, fingerprint: str, now: float | None = None) -> None:
+        """释放探测权但不回写结果（PLAN-2026-11-15 v2 Task 4）。
+
+        适用：探测领取后请求在真实上游调用前退出（未准入 / 传输异常 /
+        客户端取消）。端点未被证实成功或失败 — 保持「到期待探测」状态
+        （_until 不动），下一个请求可重新领取；绝不误记端点失败。
+        """
+        with self._lock:
+            if fingerprint not in self._probing:
+                return
+            self._probing.discard(fingerprint)
+            self._record_event(fingerprint, "probe_cancel",
+                               self._reason.get(fingerprint), self._now(now))
+
     # ── 运行态只读视图（v7.1.0，供 GET /admin/model-pools/runtime）──
 
     def entries(self, now: float | None = None) -> dict[str, dict]:
@@ -441,6 +455,11 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
         cand = queue[0]
         last_cand = cand
 
+        # 预算/次数已尽先于探测领取（Task 4）：先领后判会把探测权困在
+        # 已耗尽的循环里 — 不领取就不会泄漏
+        if attempts >= max_attempts:
+            break
+
         # 准入 1/2 — 端点冷却/半开单飞（终审 #18）：仍在冷却或已有并发
         # 探测在途 → 跳过该候选。准入失败不是真实上游调用，不消耗预算。
         if cooldowns is not None and not cooldowns.claim_probe(
@@ -451,15 +470,33 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
             queue.pop(0)
             continue
 
-        if attempts >= max_attempts:
-            break
-
         t0 = mono()
-        res = transport(cand, remaining)
+        try:
+            res = transport(cand, remaining)
+        except Exception as e:
+            # 传输层异常（Task 4）：探测权释放但不回写失败（端点未被证实），
+            # 按连接失败动作表切下一候选 — 异常不得把半开探测权困死到重启
+            log.warning("pool transport raised for candidate '%s': %s",
+                        cand.candidate.id, e)
+            if cooldowns is not None:
+                cooldowns.release_probe(cand.endpoint_fingerprint, now=mono())
+            records.append(AttemptRecord(
+                ordinal=len(records) + 1, candidate_id=cand.candidate.id,
+                error=f"transport error: {e}", admitted=False,
+                duration_ms=(mono() - t0) * 1000.0))
+            queue.pop(0)
+            continue
+
+        # 传输耗时已消耗预算：重算剩余（Task 4）— 429 等待/后续决策不得
+        # 使用循环顶部的 stale remaining
+        remaining = deadline - mono()
 
         # 准入 2/2 — 传输回调判定准入失败（gate 超时/端口预留失败等，
-        # 终审 #11）：不消耗 attempt 预算，切下一候选
+        # 终审 #11）：不消耗 attempt 预算，切下一候选。探测权释放但不
+        # 回写失败（Task 4：拒绝准入不误记端点失败）
         if not res.admitted:
+            if cooldowns is not None:
+                cooldowns.release_probe(cand.endpoint_fingerprint, now=mono())
             records.append(AttemptRecord(
                 ordinal=len(records) + 1, candidate_id=cand.candidate.id,
                 route=res.route, error=res.error or "not_admitted",

@@ -320,7 +320,10 @@ def handle_pool_chat(handler, pm, data, model) -> bool:
     # 统一限流：gate 以逻辑名为键、覆盖所有转发分支（local/ollama/cloud），
     # 避免任何分支绕过 RPM/并发限制（安全审查 2026-10-23 #1）
     budget_start = time.monotonic()   # 排队等待计入预算（§6.3，评审 #7）
-    gate = pm.dual_gate.acquire(model)
+    # Task 4：逻辑 gate 等待受池预算约束（不超 deadline，上限仍 30s）—
+    # OpenAI 路径此前无 timeout（无界排队可绕过硬截止）
+    logical_gate_timeout = _gate_timeout(pool_snap.pool.deadline_ms / 1000.0)
+    gate = pm.dual_gate.acquire(model, timeout=logical_gate_timeout)
     if not gate.ok:
         _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
              status=429, error=gate.reason, route=f"pool:{pool_snap.pool.name}",
@@ -449,7 +452,9 @@ def handle_pool_messages(handler, pm, data, model) -> bool:
 
     # 统一限流（同 OpenAI 路径；Anthropic 直连路径带 30s 等待语义，保持一致）
     budget_start = time.monotonic()   # 排队等待计入预算（§6.3，评审 #7）
-    gate = pm.dual_gate.acquire(model, timeout=30)
+    # Task 4：逻辑 gate 等待受池预算约束（Anthropic 路径原固定 30s）
+    gate = pm.dual_gate.acquire(
+        model, timeout=_gate_timeout(pool_snap.pool.deadline_ms / 1000.0))
     if not gate.ok:
         _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
              status=429, error=gate.reason, route=f"pool:{pool_snap.pool.name}",
@@ -513,11 +518,14 @@ def _log_failed_attempts(pm, handler, outcome, *, req_id, key_name, model):
                     rec.retry_after, rec.error, rec.route)
 
 
-def _gate_timeout(remaining: float | None) -> float | None:
-    """物理门等待上限：受剩余预算约束（终审 #7），不超过默认 30s。"""
+def _gate_timeout(remaining: float | None) -> float:
+    """物理/逻辑门等待上限：受剩余预算约束（终审 #7 + Task 4 绝对截止）。
+
+    剩余耗尽 → 0（立即失败，不再保底 1s — 那会让每段等待超出总预算）；
+    remaining=None（非池路径）保持 30s 兼容默认。"""
     if remaining is None:
         return 30.0
-    return max(1.0, min(30.0, float(remaining)))
+    return max(0.0, min(30.0, float(remaining)))
 
 
 def _attempt_local_openai(handler, pm, data, *, model, pool, cand,
