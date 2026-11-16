@@ -183,13 +183,35 @@ struct LocalModelsPayload: Codable {
     var discovered: [LocalDiscovered]?
     var configured: [String]?
 }
-struct PackDownloadState: Codable {
-    var status: String?
-    var downloaded: Int?
-    var total: Int?
-    var error: String?
-    var detail: String?      // 引擎构建阶段文案（"cmake 配置…"/"编译中…"）
+// ── PK4: 能力包 Catalog-only 契约（/admin/packs/*，URL/hash 由后端提供）──
+struct PackModelMeta: Codable { var id: String; var parameter_count_b: Int?; var quantization: String?; var license: String? }
+struct PackRuntimeMeta: Codable { var engine: String?; var runtime_template: String? }
+struct PackResources: Codable { var download_mb: Int?; var disk_mb: Int?; var peak_memory_mb: Int?; var gpu_role: String? }
+struct PackLifecycle: Codable { var mode: String? }
+struct PackExecMeta: Codable { var model_config_template: String?; var healthcheck: String? }
+struct PackManifest: Codable {
+    var pack_id: String; var pack_version: String; var capability: String
+    var model: PackModelMeta?; var runtime: PackRuntimeMeta?
+    var resources: PackResources?; var lifecycle: PackLifecycle?
+    var execution: PackExecMeta?
 }
+struct PackCatalogEntry: Codable, Identifiable {
+    var pack_id: String; var display_name: String; var summary: String
+    var tags: [String]?; var capability: String; var builtin: Bool
+    var risk_level: String; var manifest: PackManifest
+    var id: String { pack_id }
+}
+struct PackCatalogPayload: Codable { var packs: [PackCatalogEntry] }
+struct PackPoolRef: Codable { var pool: String; var candidate_id: String?; var model_name: String? }
+struct PackStatusRec: Codable, Identifiable {
+    var pack_id: String; var pack_version: String?; var status: String
+    var stage: String?; var error: String?; var sandbox_degraded: Bool?
+    var installed_at: Int?; var affected_pools: [PackPoolRef]?
+    var id: String { pack_id }
+}
+struct PackStatusPayload: Codable { var packs: [PackStatusRec] }
+struct PackPreviewPayload: Codable { var affected_pools: [PackPoolRef]? }
+struct PackPolicyPayload: Codable { var max_model_parameters_b: Int; var system_reserved_memory_mb: Int }
 struct SecurityKeyInfo: Identifiable {
     let id: String
     let name: String
@@ -330,17 +352,6 @@ final class GatewayStore: ObservableObject {
     private var msgClear: DispatchWorkItem?
     @Published var hubExpanded = ""
     @Published var pools: PoolsPayload?
-    /// 待确认卸载的能力包名 — 6s 未确认自动复位（两击确认不残留）
-    @Published var uninstallConfirm: String? = nil {
-        didSet {
-            confirmResetPack?.cancel(); confirmResetPack = nil
-            guard uninstallConfirm != nil else { return }   // 手动复位/超时回 nil 时不排程
-            let work = DispatchWorkItem { [weak self] in self?.confirmResetPack = nil
-                                          self?.uninstallConfirm = nil }
-            confirmResetPack = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
-        }
-    }
     // 全局确认弹窗（SwiftUI confirmationDialog；action 在用户确认后执行）
     @Published var confirmText: String? = nil
     @Published var confirmAction: (() -> Void)? = nil
@@ -363,7 +374,6 @@ final class GatewayStore: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
         }
     }
-    private var confirmResetPack: DispatchWorkItem?
     private var confirmResetProvider: DispatchWorkItem?
     @Published var cloudFormName = ""
     @Published var cloudFormBase = ""
@@ -389,8 +399,10 @@ final class GatewayStore: ObservableObject {
     @Published var monitorRuntime: PoolRuntimePayload? // Task 6 运行态（冷却/最近尝试）
     private var monitorGeneration = 0          // 请求代数：旧响应不得覆盖新选择
     private var monitorTimer: Timer?
-    // 能力包下载进度（键 = 模型名）
-    @Published var packDownloads: [String: PackDownloadState] = [:]
+    // ── PK4: 能力包 Catalog（v2，Catalog-only）──
+    @Published var packCatalog: PackCatalogPayload?
+    @Published var packStatus: PackStatusPayload?
+    @Published var packPolicy: PackPolicyPayload?
     // ── API Key 鉴权（设置页接线 — /admin/security/*）──
     @Published var securityEnforced = false
     @Published var securityKeyCount = 0
@@ -420,8 +432,9 @@ final class GatewayStore: ObservableObject {
         refresh(); fetchModels(); fetchCurve(); fetchPools(); fetchCloud(); scanLocalModels(); fetchMetrics(); fetchSecurityStatus()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             guard let self, self.windowVisible else { return }
-            self.refresh(); self.fetchModels(); self.fetchDownloadStatus(); self.fetchSecurityStatus()
+            self.refresh(); self.fetchModels(); self.fetchSecurityStatus()
             self.fetchPools()   // 池可能被其它页面/服务端联动改变（如卸载触发的候选清除）
+            if self.tab == 5 { self.fetchPackStatus() }   // PK4: 能力包页可见时轮询安装态
         }
         curveTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             guard let self, self.windowVisible else { return }
@@ -791,22 +804,115 @@ final class GatewayStore: ObservableObject {
     }
 
     /// F2: 能力包卸载 = 停服务 + 删 models.d YAML + 热重载
-    func uninstallPack(_ name: String) {
-        notify(.progress, "卸载 \(name) 中…")
-        var req = URLRequest(url: base.appendingPathComponent("/admin/packs/uninstall"), timeoutInterval: 60)
+    // ── PK4: 能力包 Catalog-only API（App 只提交 pack_id，URL/hash 后端定）──
+
+    func fetchPackCatalog() {
+        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/packs/catalog")) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let p = try? JSONDecoder().decode(PackCatalogPayload.self, from: data) else { return }
+            DispatchQueue.main.async { self.packCatalog = p }
+        }.resume()
+    }
+
+    func fetchPackStatus() {
+        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/packs/status")) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let p = try? JSONDecoder().decode(PackStatusPayload.self, from: data) else { return }
+            DispatchQueue.main.async {
+                self.packStatus = p
+                // installed/failed 终态 → 模型列表可能变化（受控 YAML 生成）
+                if p.packs.contains(where: { ["installed", "failed"].contains($0.status) }) { self.fetchModels() }
+            }
+        }.resume()
+    }
+
+    func fetchPackPolicy() {
+        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/packs/policy")) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let p = try? JSONDecoder().decode(PackPolicyPayload.self, from: data) else { return }
+            DispatchQueue.main.async { self.packPolicy = p }
+        }.resume()
+    }
+
+    func savePackPolicy(_ maxB: Int, _ reservedMB: Int) {
+        var req = URLRequest(url: base.appendingPathComponent("/admin/packs/policy"), timeoutInterval: 15)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": name])
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "max_model_parameters_b": maxB, "system_reserved_memory_mb": reservedMB])
         URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             DispatchQueue.main.async {
+                if (200..<300).contains(code) {
+                    self?.notify(.success, "✅ 能力包策略已保存（仅影响后续安装）")
+                    self?.fetchPackPolicy()
+                } else {
+                    self?.notify(.error, "❌ 策略保存失败(\(code)): \(body.prefix(160))")
+                }
+            }
+        }.resume()
+    }
+
+    /// 安装：只提交 pack_id（Catalog-only 裁决）；进度看卡片阶段文案
+    func startPackInstall(_ packId: String, _ label: String) {
+        notify(.progress, "\(label) 安装中…")
+        var req = URLRequest(url: base.appendingPathComponent("/admin/packs/install"), timeoutInterval: 15)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["pack_id": packId])
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                if code == 202 {
+                    self?.notify(.info, "\(label) 开始安装…进度看卡片")
+                    self?.fetchPackStatus()
+                } else {
+                    self?.notify(.error, "❌ 安装请求失败(\(code)): \(body.prefix(160))")
+                }
+            }
+        }.resume()
+    }
+
+    /// 卸载：先预览受影响池 → 全局确认框（空列表也走确认，防误删）→ confirmed 执行
+    func previewPackUninstall(_ packId: String, _ label: String) {
+        var comps = URLComponents(string: "\(GW_BASE)/admin/packs/uninstall-preview")!
+        comps.queryItems = [URLQueryItem(name: "pack_id", value: packId)]
+        URLSession.shared.dataTask(with: comps.url!) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                guard code == 200, let self,
+                      let p = try? JSONDecoder().decode(PackPreviewPayload.self, from: data ?? Data()) else {
+                    self?.notify(.error, "❌ 预览失败(\(code)): \(body.prefix(160))")
+                    return
+                }
+                let pools = p.affected_pools ?? []
+                let poolList = pools.map { $0.pool }.sorted().joined(separator: "、")
+                let text = pools.isEmpty
+                    ? "卸载能力包「\(label)」？将停止进程、删除配置与全部包文件（不可恢复）。"
+                    : "卸载能力包「\(label)」？以下模型池的候选将被清除：\(poolList)。\n进程停止、配置与包文件全部删除（不可恢复）。"
+                self.confirm(text) { self.uninstallPackConfirmed(packId, label) }
+            }
+        }.resume()
+    }
+
+    func uninstallPackConfirmed(_ packId: String, _ label: String) {
+        notify(.progress, "卸载 \(label) 中…")
+        var req = URLRequest(url: base.appendingPathComponent("/admin/packs/uninstall"), timeoutInterval: 60)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["pack_id": packId, "confirmed": true])
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                // 卸载是跨页面事件：模型列表、池（服务端联动清除）、本地扫描即时刷新
                 self?.notify((200..<300).contains(code) ? .success : .error,
-                    (200..<300).contains(code) ? "✅ \(name) 已卸载" : "❌ 卸载失败(\(code)): \(body.prefix(120))")
-                // 卸载是跨页面事件：模型列表、池（服务端已联动清除候选）、
-                // 本地扫描、下载状态全部即时刷新 — 不等轮询、不用切页面
+                    (200..<300).contains(code) ? "✅ \(label) 已卸载" : "❌ 卸载失败(\(code)): \(body.prefix(160))")
                 self?.fetchModels(); self?.fetchPools()
-                self?.scanLocalModels(); self?.fetchDownloadStatus()
+                self?.scanLocalModels(); self?.fetchPackStatus()
             }
         }.resume()
     }
@@ -1100,42 +1206,6 @@ final class GatewayStore: ObservableObject {
                 self?.fetchCloud()
                 self?.fetchPools()
                 completion?(ok)
-            }
-        }.resume()
-    }
-
-    /// 能力包下载进度轮询（3s 定时器复用）
-    func fetchDownloadStatus() {
-        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/packs/download-status")) { [weak self] data, _, _ in
-            guard let self, let data,
-                  let obj = try? JSONDecoder().decode([String: PackDownloadState].self, from: data) else { return }
-            DispatchQueue.main.async {
-                self.packDownloads = obj
-                // 下载完成 → 刷新模型列表（新装包出现在能力包/本地推理）
-                if obj.values.contains(where: { $0.status == "installed" }) { self.fetchModels(); self.scanLocalModels() }
-            }
-        }.resume()
-    }
-
-    /// 能力包一键安装：网关负责"已在盘→直接装机 / 不在→下载后装机"
-    func installPack(_ name: String, url: String, filename: String, label: String, engine: String = "") {
-        notify(.progress, "\(name) 安装中…")
-        var req = URLRequest(url: base.appendingPathComponent("/admin/packs/download"), timeoutInterval: 30)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        var body: [String: Any] = ["name": name, "url": url, "filename": filename, "model_type_label": label]
-        if !engine.isEmpty { body["engine"] = engine }
-        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-            DispatchQueue.main.async {
-                if (200..<300).contains(code) {
-                    self?.notify(.info, "\(name) 开始下载…进度看卡片")
-                    self?.fetchDownloadStatus()
-                } else {
-                    self?.notify(.error, "❌ 安装失败(\(code)): \(body.prefix(120))")
-                }
             }
         }.resume()
     }
@@ -2665,35 +2735,44 @@ struct MainWindowView: View {
     }
 }
 
-/// 能力包：产品主入口 —— 装的是能力不是模型文件（v1 静态目录 + 安装态对齐 models.d）
+/// 能力包：产品主入口 —— 装的是能力不是模型文件（PK4 v2：Catalog 驱动，
+/// App 只提交 pack_id，URL/hash 由后端提供 — Catalog-only 裁决 spec §6.1）
+func packStageLabel(_ s: String?) -> String {
+    switch s {
+    case "preflight": return "预检中…"
+    case "staging": return "准备中…"
+    case "downloading": return "下载中…"
+    case "verifying": return "校验中…"
+    case "preparing_runtime": return "准备运行时…"
+    case "writing_config": return "写入配置…"
+    case "isolated_healthcheck": return "健康检查中…"
+    case "gateway_reload": return "重载中…"
+    case "installed": return "已安装"
+    default: return s == nil || s!.isEmpty ? "" : s!
+    }
+}
+
 struct PacksView: View {
     @ObservedObject var store: GatewayStore
-
-    // (线色 model_type, 能力名, 描述, 大小GB nil=内置, 对应模型名)
-    let packs: [(String, String, String, String?, String?)] = [
-        ("llm", "轻量对话", "qwen3-4b · 中文对话与工具调用 · 按需", "3.1", "qwen3-4b"),
-        ("embedding", "通用文本嵌入", "bge-m3 · 中英多语 · 常驻", "1.2", "bge-m3"),
-        ("judge", "决策判官", "qwen3-1.7b · 意图分类与路由 · 常驻", "1.4", "qwen3-1.7b"),
-        ("rerank", "检索重排", "bge-reranker-v2-m3 · 常驻", "1.2", "bge-reranker-v2-m3"),
-        ("tts", "中文语音合成", "kokoro-82m · 含系统语音兜底 · 常驻", "0.6", "kokoro-82m"),
-        ("asr", "语音转写", "whisper-v3-turbo · 中英 · 按需", "1.6", "whisper-v3-turbo"),
-        ("vl", "轻量看图", "qwen3-vl-4b · 截图理解 · 按需", "3.8", "qwen3-vl-4b"),
-        ("ocr", "屏幕与文档识别", "macOS 视觉框架 · 零模型 · 常驻", nil, nil),
-    ]
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 FeedbackBanner(store: store)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
-                    ForEach(packs, id: \.1) { pk in
-                        PackCard(store: store, pack: pk)
+                    ForEach(store.packCatalog?.packs ?? []) { entry in
+                        PackCard(store: store, entry: entry)
                     }
                 }
-                // F4: 本机模型发现/安装（与卸载对称；安装不启动）
+                // F4: 本机模型发现/安装（用户导入流，与 Catalog 卸载对称）
                 LocalDiscoverCard(store: store)
             }
             .padding(16)
+        }
+        .onAppear {
+            store.fetchPackCatalog()
+            store.fetchPackStatus()
+            store.fetchPackPolicy()
         }
     }
 }
@@ -2738,97 +2817,76 @@ struct LocalDiscoverCard: View {
     }
 }
 
+/// PK4 v2：Catalog 驱动卡 — 状态机（未安装/进行中[阶段文案]/已安装/失败[重试]/
+/// 待接入[运行时模板未实现，后端 preflight 亦拒]）
 struct PackCard: View {
     @ObservedObject var store: GatewayStore
-    let pack: (String, String, String, String?, String?)
+    let entry: PackCatalogEntry
 
-    // (下载URL, 文件名, model_type 线色标签, engine?) — engine 非空 = 先项目内建引擎再下模型
-    static let packPresets: [String: (String, String, String, String?)] = [
-        "bge-m3": ("https://hf-mirror.com/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf",
-                   "bge-m3-Q4_K_M.gguf", "embedding", nil),
-        "bge-reranker-v2-m3": ("https://hf-mirror.com/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf",
-                               "bge-reranker-v2-m3-Q4_K_M.gguf", "rerank", nil),
-        "qwen3-1.7b": ("https://hf-mirror.com/lmstudio-community/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf",
-                       "Qwen3-1.7B-Q4_K_M.gguf", "llm", nil),
-        "qwen3-vl-4b": ("https://hf-mirror.com/lmstudio-community/Qwen3-VL-4B-Instruct-GGUF/resolve/main/Qwen3-VL-4B-Instruct-Q4_K_M.gguf",
-                        "Qwen3-VL-4B-Instruct-Q4_K_M.gguf", "vl", nil),
-        "whisper-v3-turbo": ("https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
-                             "ggml-large-v3-turbo.bin", "asr", "whisper"),
-    ]
-    var confirmingUninstall: Bool { store.uninstallConfirm == pack.1 }   // 两击确认，防误删
-
-    var installed: Bool {
-        guard let target = pack.4 else { return true }          // OCR 内置即就绪
-        return store.models.contains { $0.name == target }
-    }
-    var modelType: String? {
-        guard let target = pack.4 else { return "ocr" }
-        return store.models.first { $0.name == target }?.model_type ?? pack.0
+    var packId: String { entry.pack_id }
+    var label: String { entry.display_name }
+    var manifest: PackManifest { entry.manifest }
+    /// 后端 KNOWN_TEMPLATES 单一事实源的 App 侧镜像：仅 llama_cpp_chat_v1 可装
+    var templateReady: Bool { manifest.execution?.model_config_template == "llama_cpp_chat_v1" }
+    var statusRec: PackStatusRec? { store.packStatus?.packs.first { $0.pack_id == packId } }
+    var installed: Bool { statusRec?.status == "installed" }
+    var failed: Bool { statusRec?.status == "failed" }
+    var inProgress: Bool { statusRec != nil && !installed && !failed }
+    var diskGB: String? {
+        guard let mb = manifest.resources?.disk_mb, mb > 1 else { return nil }   // 1MB=内置占位
+        return String(format: "%.1f GB", Double(mb) / 1024.0)
     }
 
     var body: some View {
         Card {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 8) {
-                    RoundedRectangle(cornerRadius: 4).fill(threadColor(modelType))
+                    RoundedRectangle(cornerRadius: 4).fill(threadColor(manifest.capability))
                         .frame(width: 10, height: 10)
-                    Text(pack.1).font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
-                }
-                Text(pack.2).font(.system(size: 11.5)).foregroundColor(.dim).lineLimit(2)
-                HStack {
-                    Text(pack.3 ?? "内置").font(.system(size: 11.5, design: .monospaced)).foregroundColor(.faint)
+                    Text(label).font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
                     Spacer()
-                    if installed {
-                        Chip(pack.4 == nil ? "已就绪" : "已安装")
-                        if let target = pack.4 {
-                            if confirmingUninstall {
-                                SmallBtn("确认卸载", primary: true) {
-                                    store.uninstallConfirm = nil
-                                    store.uninstallPack(target)
-                                }
-                                SmallBtn("取消") { store.uninstallConfirm = nil }
-                            } else {
-                                SmallBtn("卸载") { store.uninstallConfirm = pack.1 }
-                                    .help("端到端卸载：停服务 + 删配置 + 删模型文件 + 引擎环境整体移除（零系统残留）")
-                            }
-                        }
-                    } else if let target = pack.4, let preset = PackCard.packPresets[target] {
-                        // 真安装：文件在盘 → 直接装机；不在 → 网关下载后自动装机
-                        let dl = store.packDownloads[target]
-                        if dl?.status == "building" {
-                            Text(dl?.detail ?? "构建引擎中…")
-                                .font(.system(size: 11, design: .monospaced)).foregroundColor(.warnC)
-                        } else if dl?.status == "downloading" || dl?.status == "installing" {
-                            let pct: Int = {
-                                guard let d = dl, let t = d.total, t > 0 else { return 0 }
-                                return Int(Double(d.downloaded ?? 0) / Double(t) * 100)
-                            }()
-                            Text(dl?.status == "installing" ? "装机中…" : "下载 \(pct)%")
-                                .font(.system(size: 11, design: .monospaced)).foregroundColor(.accent)
-                        } else if dl?.status == "error" {
-                            SmallBtn("重试", primary: true) {
-                                store.installPack(target, url: preset.0, filename: preset.1,
-                                                  label: preset.2, engine: preset.3 ?? "")
-                            }
-                            Text("失败").font(.system(size: 10.5)).foregroundColor(.warnC)
-                                .help(dl?.error ?? "")
-                        } else {
-                            SmallBtn("安装", primary: true) {
-                                store.installPack(target, url: preset.0, filename: preset.1,
-                                                  label: preset.2, engine: preset.3 ?? "")
-                            }
-                            .help(preset.3 == nil
-                                  ? "从 hf-mirror 下载 GGUF 到 MacFabric/models 后自动写入 models.d；不自动启动"
-                                  : "端到端装机：项目内构建 Metal 引擎 → 下载模型 → 写入 models.d（全程隔离，卸载整体移除）")
-                        }
-                    } else if pack.4 != nil {
-                        // 无 preset：引擎未接入，诚实禁用
-                        Text("待接入").font(.system(size: 10.5)).foregroundColor(.faint)
-                            .help("该能力的引擎未接入，暂不可安装")
+                    if entry.risk_level == "verified" { Chip("已验证") }
+                }
+                Text(entry.summary).font(.system(size: 11.5)).foregroundColor(.dim).lineLimit(2)
+                HStack {
+                    Text(diskGB ?? "内置").font(.system(size: 11.5, design: .monospaced)).foregroundColor(.faint)
+                    if let q = manifest.model?.quantization, diskGB != nil {
+                        Text(q).font(.system(size: 11, design: .monospaced)).foregroundColor(.faint)
                     }
+                    if statusRec?.sandbox_degraded == true {
+                        Text("沙箱降级").font(.system(size: 10.5)).foregroundColor(.warnC)
+                            .help("SBPL 沙箱不可用时降级安装（官方已验证包允许）")
+                    }
+                    Spacer()
+                    footerControls
+                }
+                if failed, let err = statusRec?.error {
+                    Text(err).font(.system(size: 10.5, design: .monospaced))
+                        .foregroundColor(.warnC).lineLimit(2)
+                        .help(err)
                 }
             }
             .padding(12)
+        }
+    }
+
+    @ViewBuilder private var footerControls: some View {
+        if installed {
+            Chip("已安装")
+            SmallBtn("卸载") { store.previewPackUninstall(packId, label) }
+                .help("端到端卸载：停进程 + 删受控配置 + 删包文件（零系统残留）；受影响池会先列出")
+        } else if inProgress {
+            Text(packStageLabel(statusRec?.stage))
+                .font(.system(size: 11, design: .monospaced)).foregroundColor(.accent)
+        } else if failed {
+            SmallBtn("重试", primary: true) { store.startPackInstall(packId, label) }
+            Text("失败").font(.system(size: 10.5)).foregroundColor(.warnC)
+        } else if !templateReady {
+            Text("待接入").font(.system(size: 10.5)).foregroundColor(.faint)
+                .help("该包的运行时模板未接入（PK5 批次），暂不可安装")
+        } else {
+            SmallBtn("安装", primary: true) { store.startPackInstall(packId, label) }
+                .help("从后端 Catalog 冻结的源下载并校验后安装；不自动启动 — 首请求按需唤醒")
         }
     }
 }
