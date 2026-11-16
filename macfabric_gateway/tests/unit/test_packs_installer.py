@@ -304,3 +304,17 @@ def test_preflight_delegates_param_gate(tmp_path, monkeypatch):
     res = inst.install(entry)
     assert not res.ok and res.stage == "preflight"
     assert "injected_violation" in res.error
+
+
+def test_install_reports_stage_progress(tmp_path):
+    # PK4 生产验收发现：App 阶段文案流转依赖安装进度上报 — installer 需
+    # on_stage(pack_id, stage) 回调，在各阶段起点触发
+    stages = []
+    inst, entry = make_installer(
+        tmp_path, on_stage=lambda pid, st: stages.append(st))
+    assert inst._report is not None
+    res = inst.install(entry)
+    assert res.ok and res.stage == "installed", res.error
+    assert stages == ["preflight", "downloading", "verifying",
+                      "preparing_runtime", "writing_config",
+                      "isolated_healthcheck", "gateway_reload"], stages

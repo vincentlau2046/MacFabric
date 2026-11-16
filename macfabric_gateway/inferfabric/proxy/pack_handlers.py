@@ -107,7 +107,8 @@ class PackManager:
             sandbox_provider=NoopProvider(), catalog_probe=probe_sandbox,
             write_model_config=self._write_model_config,
             reload_gateway=self._reload_gateway,
-            memory_available_mb=system_available_memory_mb)
+            memory_available_mb=system_available_memory_mb,
+            on_stage=self._on_install_stage)
         reconcile_on_boot(self.store, self.root)
         self._uninstaller = None    # 惰性：attach_uninstaller 注入网关侧回调
         self._disabled_models: set[str] = set()
@@ -189,7 +190,11 @@ class PackManager:
             for pack_id, stage in self._in_progress.items():
                 for p in packs:
                     if p["pack_id"] == pack_id:
+                        # 进行中：阶段以实时进度为准；上次失败的 error/stage
+                        # 不得泄漏（PK4 生产验收发现）
                         p["status"] = stage
+                        p["stage"] = stage
+                        p["error"] = None
                 if all(p["pack_id"] != pack_id for p in packs):
                     packs.append({"pack_id": pack_id, "status": stage,
                                   "stage": stage, "error": None,
@@ -205,6 +210,13 @@ class PackManager:
         return d
 
     # ── 安装 ──
+
+    def _on_install_stage(self, pack_id: str, stage: str) -> None:
+        """installer 进度回调：实时推进 _in_progress（App 阶段文案数据源）。
+        不在进行中的包不复活条目（卸载/完成后回调迟到）。"""
+        with self._progress_lock:
+            if pack_id in self._in_progress:
+                self._in_progress[pack_id] = stage
 
     def start_install(self, pack_id: str) -> tuple[int, dict]:
         entry = self.catalog.find(pack_id)

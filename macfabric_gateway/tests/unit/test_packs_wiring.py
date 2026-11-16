@@ -193,3 +193,34 @@ def test_chat_503_when_pack_model_disabled(pack_manager, monkeypatch):
     if h2.sent is not None:
         assert not (h2.sent[0] == 503 and
                     h2.sent[1].get("error") == "pack_uninstalling")
+
+
+def test_install_stage_progress_wired(pack_manager):
+    # installer 进度回调 → _in_progress 实时推进（App 阶段文案数据源）
+    mgr = pack_manager
+    with mgr._progress_lock:
+        mgr._in_progress[PID] = "preflight"
+    mgr.installer._report(PID, "downloading")
+    with mgr._progress_lock:
+        assert mgr._in_progress[PID] == "downloading"
+    # 不在进行中的包不得复活条目（卸载/完成后回调迟到）
+    mgr.installer._report("llm.other", "downloading")
+    with mgr._progress_lock:
+        assert "llm.other" not in mgr._in_progress
+
+
+def test_status_payload_clears_stale_error_while_in_progress(pack_manager):
+    # PK4 生产验收发现：失败后重装，旧记录的 error/stage 泄漏到进行中状态
+    # （下载中却显示上次的 download_error:URLError）
+    from inferfabric.packs.store import PackRecord
+    mgr = pack_manager
+    mgr.store.set(PackRecord(pack_id=PID, pack_version="1.0.0",
+                             status="failed", stage="downloading",
+                             error="download_error:URLError",
+                             sandbox_degraded=False, installed_at=None))
+    with mgr._progress_lock:
+        mgr._in_progress[PID] = "verifying"
+    p = {x["pack_id"]: x for x in mgr.status_payload()["packs"]}[PID]
+    assert p["status"] == "verifying"
+    assert p["stage"] == "verifying"
+    assert p["error"] is None

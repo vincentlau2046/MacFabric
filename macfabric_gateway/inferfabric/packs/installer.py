@@ -21,6 +21,7 @@
 """
 
 import hashlib
+import logging
 import os
 import shutil
 import threading
@@ -29,6 +30,8 @@ from pathlib import Path
 
 from inferfabric.packs import policy as pack_policy_mod
 from inferfabric.packs.config_gen import KNOWN_TEMPLATES
+
+log = logging.getLogger(__name__)
 
 INSTALL_STAGES = ("preflight", "staging", "downloading", "verifying",
                   "preparing_runtime", "writing_config",
@@ -68,7 +71,8 @@ class PackInstaller:
     def __init__(self, root: Path, fetcher, policy, sandbox_provider,
                  catalog_probe=None, prepare_runtime=None,
                  write_model_config=None, run_healthcheck=None,
-                 reload_gateway=None, memory_available_mb=None):
+                 reload_gateway=None, memory_available_mb=None,
+                 on_stage=None):
         self._root = Path(root)
         self._fetcher = fetcher
         self._policy = policy
@@ -78,6 +82,9 @@ class PackInstaller:
         self._write_model_config = write_model_config or _noop
         self._run_healthcheck = run_healthcheck or _noop
         self._reload_gateway = reload_gateway or _noop
+        # 进度上报：on_stage(pack_id, stage) 在各阶段起点触发（PK4 —
+        # App 阶段文案数据源；异常吞掉，进度失败不得影响安装事务）
+        self._on_stage = on_stage
         # 可用内存探测（callable → MiB 或 None）；None=门禁关闭（仅测试）。
         # 生产由 PackManager 注入 system_available_memory_mb（终审 F3）。
         self._memory_available_mb = memory_available_mb
@@ -87,6 +94,14 @@ class PackInstaller:
     def _lock_for(self, pack_id: str) -> threading.Lock:
         with self._locks_guard:
             return self._locks.setdefault(pack_id, threading.Lock())
+
+    def _report(self, pack_id: str, stage: str) -> None:
+        if self._on_stage is None:
+            return
+        try:
+            self._on_stage(pack_id, stage)
+        except Exception:
+            log.exception("on_stage callback failed for %s", pack_id)
 
     # ── 目录布局 ──
 
@@ -222,6 +237,7 @@ class PackInstaller:
                                  sandbox_degraded=sandbox_degraded)
 
         # preflight
+        self._report(manifest.pack_id, "preflight")
         ok, err, sandbox_degraded = self._preflight(entry)
         if not ok:
             return fail("preflight", err)
@@ -229,6 +245,7 @@ class PackInstaller:
             shutil.rmtree(staging, ignore_errors=True)
             pack_dir.mkdir(parents=True, exist_ok=True)
             try:
+                self._report(manifest.pack_id, "preparing_runtime")
                 self._prepare_runtime(pack_dir, manifest)
                 remember_written(self._write_model_config(pack_dir, manifest))
                 self._run_healthcheck(pack_dir, manifest)
@@ -244,6 +261,7 @@ class PackInstaller:
         staging.mkdir(parents=True, exist_ok=True)
 
         # downloading
+        self._report(manifest.pack_id, "downloading")
         try:
             for artifact in manifest.artifacts:
                 dest = staging / self._artifact_rel(artifact)
@@ -255,6 +273,7 @@ class PackInstaller:
             return fail("downloading", f"download_error:{type(exc).__name__}")
 
         # verifying（staging 内校验，通过后才移动）
+        self._report(manifest.pack_id, "verifying")
         err = self._verify_hashes(manifest, staging)
         if err:
             return fail("verifying", err)
@@ -270,24 +289,28 @@ class PackInstaller:
         shutil.rmtree(staging, ignore_errors=True)
 
         # preparing_runtime
+        self._report(manifest.pack_id, "preparing_runtime")
         try:
             self._prepare_runtime(pack_dir, manifest)
         except Exception as exc:
             return fail("preparing_runtime", f"runtime_error:{exc}")
 
         # writing_config
+        self._report(manifest.pack_id, "writing_config")
         try:
             remember_written(self._write_model_config(pack_dir, manifest))
         except Exception as exc:
             return fail("writing_config", f"config_error:{exc}")
 
         # isolated_healthcheck
+        self._report(manifest.pack_id, "isolated_healthcheck")
         try:
             self._run_healthcheck(pack_dir, manifest)
         except Exception as exc:
             return fail("isolated_healthcheck", f"healthcheck_error:{exc}")
 
         # gateway_reload
+        self._report(manifest.pack_id, "gateway_reload")
         try:
             self._reload_gateway()
         except Exception as exc:
