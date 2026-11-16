@@ -354,6 +354,7 @@ _POST_ROUTES = {
     # MACFABRIC F2: 能力包卸载（安装管理的减法 — 停服务+删 YAML+重载）
     "/admin/packs/uninstall":  _admin(lambda h, pm: h._handle_pack_uninstall(pm)),
     "/admin/packs/install":    _admin(lambda h, pm: h._handle_pack_install(pm)),
+    "/admin/packs/custom":     _admin(lambda h, pm: h._handle_pack_custom(pm)),
     "/admin/models/set-autostart": _admin(lambda h, pm: h._handle_set_autostart(pm)),
     "/admin/packs/download":        _admin(lambda h, pm: h._handle_pack_download(pm)),
     "/admin/packs/policy":          _admin(lambda h, pm: h._handle_pack_policy_post(pm)),
@@ -1704,6 +1705,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._send_json(payload, code)
 
     # ─── MACFABRIC F2: 能力包卸载 ─────────────────────────────────
+    def _handle_pack_custom(self, pm):
+        """POST /admin/packs/custom — 用户扩展能力包（统一架构 2026-11-16）。
+
+        body: {name, url, capability, sha256?}；校验链后台执行，
+        进度/结果走既有 /admin/packs/status 状态机。
+        """
+        data = self._read_body()
+        code, payload = pack_handlers.get_pack_manager().start_custom_install(
+            data)
+        self._send_json(payload, code)
+
     def _handle_pack_uninstall(self, pm):
         """卸载入口分流：body 含 ``pack_id`` → 能力包状态机（Task 10）；
         否则旧流程（用户模型/发现产物清理，原样保留）。"""

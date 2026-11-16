@@ -12,16 +12,22 @@ HTTP 契约（handler.py 薄委托）：
 per-pack Lock + 本门面 in_progress 表共同保证）。
 """
 
+import hashlib
 import http.client
 import json
 import logging
+import shutil
 import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 from inferfabric.packs.catalog import Catalog, load_catalog
+from inferfabric.packs.custom import (
+    SimpleArtifact, build_custom_manifest, find_reusable_engine,
+    validate_custom_body, validate_gguf)
 from inferfabric.packs.config_gen import (
     ConfigExistsError,
     build_model_config,
@@ -133,6 +139,8 @@ class PackManager:
         from inferfabric.packs.runtime_prep import (
             healthcheck_llama_cpp as _hc_default,
             prepare_runtime as _prep_default)
+        from inferfabric.packs.custom import CustomPackRegistry
+        self._custom = CustomPackRegistry(self.root / "user_custom.json")
         self.installer = PackInstaller(
             root=self.root, fetcher=self._fetcher, policy=self.policy,
             sandbox_provider=NoopProvider(), catalog_probe=probe_sandbox,
@@ -164,7 +172,14 @@ class PackManager:
 
     def _manifest_for(self, pack_id: str):
         entry = self.catalog.find(pack_id)
-        return entry.manifest if entry else None
+        if entry is not None:
+            return entry.manifest
+        # 统一架构：自定义包也在能力级目录里（真 Manifest，可卸载可重试）
+        rec = self._custom.get(pack_id)
+        if rec is not None and rec.get("manifest"):
+            from inferfabric.packs.schema import parse_manifest
+            return parse_manifest(rec["manifest"])
+        return None
 
     def preview_uninstall(self, pack_id: str) -> tuple[int, dict]:
         if self._uninstaller is None or self._manifest_for(pack_id) is None:
@@ -178,6 +193,9 @@ class PackManager:
         if code == 200:
             self._disabled_models.discard(
                 self._manifest_for(pack_id).model_id)
+            # 自定义包：注册表同步移除（catalog 合并项随之消失）
+            if self._custom.get(pack_id) is not None:
+                self._custom.remove(pack_id)
         return code, payload
 
     def is_model_disabled(self, model_name: str) -> bool:
@@ -207,7 +225,7 @@ class PackManager:
     # ── 查询 ──
 
     def catalog_payload(self) -> dict:
-        return {"packs": [{
+        packs = [{
             "pack_id": e.manifest.pack_id,
             "display_name": e.display_name,
             "summary": e.summary,
@@ -216,7 +234,44 @@ class PackManager:
             "builtin": e.builtin,
             "risk_level": e.risk_level,
             "manifest": e.manifest.to_dict(),
-        } for e in self.catalog.entries]}
+        } for e in self.catalog.entries]
+        # 统一架构（2026-11-16）：用户自定义包与官方包同目录展示；
+        # 校验链未走完的失败残项合成占位 manifest（可重试，错误在卡上可见）
+        for m in self._custom.all().values():
+            if m.get("manifest"):
+                manifest = m["manifest"]
+            else:
+                manifest = {
+                    "pack_id": m["pack_id"], "pack_version": "1.0.0",
+                    "capability": m["capability"],
+                    "model": {"id": m["name"], "parameter_count_b": 0,
+                              "quantization": "", "license": "user-provided"},
+                    "runtime": {"engine": "llama_cpp",
+                                "runtime_template": "llama-cpp-macos-arm64-v1"},
+                    "resources": {"download_mb": 0, "disk_mb": 0,
+                                  "peak_memory_mb": 0, "gpu_role": "shared"},
+                    "lifecycle": {"mode": "on_demand"},
+                    "network": {"listen": "loopback",
+                                "allowed_upstream": []},
+                    "artifacts": [],
+                    "execution": {"model_config_template": CUSTOM_TEMPLATE,
+                                  "healthcheck": "openai_chat_ready_v1"},
+                    "sandbox": {"policy": "verified-local-pack-v1",
+                                "degraded_install_allowed": True}}
+            packs.append({
+                "pack_id": m["pack_id"],
+                "display_name": m["name"],
+                "summary": ("用户自定义能力包（自带下载链接，已过校验链）"
+                            if m.get("manifest")
+                            else "自定义包校验未通过 — 修正链接后重试"),
+                "tags": ["custom"],
+                "capability": m["capability"],
+                "builtin": False,
+                "risk_level": "experimental",
+                "user_custom": True,
+                "manifest": manifest,
+            })
+        return {"packs": packs}
 
     def status_payload(self) -> dict:
         packs = [self._rec_payload(r) for r in self.store.all()]
@@ -262,6 +317,10 @@ class PackManager:
     def start_install(self, pack_id: str) -> tuple[int, dict]:
         entry = self.catalog.find(pack_id)
         if entry is None:
+            # 自定义包失败重试：从注册表重启下载（同一 URL，同一校验链）
+            rec = self._custom.get(pack_id)
+            if rec is not None:
+                return self._retry_custom(rec)
             return 404, {"error": f"unknown pack_id {pack_id!r}"}
         rec = self.store.get(pack_id)
         if rec is not None and rec.status == "installed":
@@ -303,6 +362,161 @@ class PackManager:
         except Exception:
             # 终审 F4：簿记崩溃不得让线程带异常消失、pack_id 永久 409
             log.exception("pack install bookkeeping failed for %s", pack_id)
+        finally:
+            with self._progress_lock:
+                self._in_progress.pop(pack_id, None)
+        self._reload()
+
+    # ── 用户扩展能力包（统一架构裁决 2026-11-16） ──
+
+    def start_custom_install(self, body) -> tuple[int, dict]:
+        """用户只提交 name/url/capability/sha256?；校验链在后台线程执行。"""
+        try:
+            name, url, capability, sha256 = validate_custom_body(body)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+        pack_id = f"{capability}.{name}"   # schema 硬约束：前缀==capability
+        existing = self._custom.get(pack_id)
+        if self.catalog.find(pack_id) is not None \
+                or (existing is not None and existing.get("manifest")) \
+                or (self.store.get(pack_id) is not None
+                    and self.store.get(pack_id).status == "installed"):
+            return 409, {"error": f"pack {pack_id!r} already exists; "
+                                  f"uninstall first to reinstall"}
+        # existing 无 manifest = 上次校验链未走完（失败残留）→ 允许覆盖重装
+        # （修 URL/参数后直接重新提交，无需先卸载）
+        engine = find_reusable_engine(self.root)
+        if engine is None:
+            return 400, {"error": "no_llama_cpp_engine: 请先安装一个 "
+                                  "llama.cpp 框架能力包（如轻量对话/嵌入），"
+                                  "自定义包复用其引擎做试加载"}
+        with self._progress_lock:
+            if pack_id in self._in_progress:
+                return 409, {"error": f"install already in progress for "
+                                      f"{pack_id!r}"}
+            self._in_progress[pack_id] = "downloading"
+        t = threading.Thread(target=self._run_custom_install, args=(
+            {"pack_id": pack_id, "name": name, "url": url,
+             "capability": capability, "sha256": sha256}, None),
+            daemon=True, name=f"pack-custom-{pack_id}")
+        t.start()
+        return 202, {"pack_id": pack_id, "status": "downloading"}
+
+    def _fail_custom(self, rec: dict, stage: str, err: str,
+                     manifest=None) -> None:
+        self.store.set(PackRecord(
+            pack_id=rec["pack_id"],
+            pack_version=manifest.pack_version if manifest else "1.0.0",
+            status="failed", stage=stage, error=err,
+            sandbox_degraded=False, installed_at=None))
+        # 失败也要可重试：注册表先记用户输入（manifest 可为 None，重试时重建）
+        if self._custom.get(rec["pack_id"]) is None:
+            self._custom.add({k: rec.get(k) for k in
+                              ("pack_id", "name", "url", "sha256",
+                               "capability")} | {"manifest": None,
+                                                "installed_at": None})
+        # 零残留：staging 与包目录全清
+        shutil.rmtree(self.root / "_staging" / rec["pack_id"],
+                      ignore_errors=True)
+        if manifest is not None:
+            shutil.rmtree(self.root / manifest.pack_id / manifest.pack_version,
+                          ignore_errors=True)
+
+    def _retry_custom(self, rec: dict) -> tuple[int, dict]:
+        pack_id = rec["pack_id"]
+        cur = self.store.get(pack_id)
+        if cur is not None and cur.status == "installed":
+            return 409, {"error": f"pack {pack_id!r} already installed; "
+                                  f"uninstall first to reinstall"}
+        if find_reusable_engine(self.root) is None:
+            return 400, {"error": "no_llama_cpp_engine: 无可用 llama.cpp 引擎"}
+        with self._progress_lock:
+            if pack_id in self._in_progress:
+                return 409, {"error": f"install already in progress for "
+                                      f"{pack_id!r}"}
+            self._in_progress[pack_id] = "downloading"
+        threading.Thread(target=self._run_custom_install,
+                         args=(rec, rec.get("manifest")), daemon=True,
+                         name=f"pack-custom-retry-{pack_id}").start()
+        return 202, {"pack_id": pack_id, "status": "downloading"}
+
+    def _run_custom_install(self, rec: dict, manifest_dict: dict | None):
+        """校验链：下载→sha256/GGUF→磁盘门禁→真引擎试加载→受控 YAML→注册。
+
+        manifest_dict 非空 = 失败重试（manifest 已知，跳过重建）。
+        """
+        pack_id = rec["pack_id"]
+        manifest = None
+        try:
+            staging = self.root / "_staging" / pack_id
+            staging.mkdir(parents=True, exist_ok=True)
+            part = staging / "model.gguf.part"
+
+            self._on_install_stage(pack_id, "downloading")
+            self._fetcher.fetch(SimpleArtifact("model", "model", rec["url"]),
+                                part)
+
+            self._on_install_stage(pack_id, "verifying")
+            size_mb = part.stat().st_size // (1024 * 1024)
+            actual = hashlib.sha256(part.read_bytes()).hexdigest()
+            if rec.get("sha256") and rec["sha256"] != actual:
+                raise ValueError(f"sha256_mismatch: 期望 {rec['sha256']}，"
+                                 f"实际 {actual} — 下载源内容不符")
+            validate_gguf(part)
+            if manifest_dict is not None:
+                from inferfabric.packs.schema import parse_manifest
+                manifest = parse_manifest(manifest_dict)
+            else:
+                manifest = build_custom_manifest(
+                    rec["name"], rec["capability"], rec["url"],
+                    rec.get("sha256"), size_mb)
+            free = shutil.disk_usage(self.root).free
+            if free < part.stat().st_size * 1.2:
+                raise ValueError(
+                    f"insufficient_disk: 需要约 "
+                    f"{part.stat().st_size // (1024*1024)}MB，"
+                    f"磁盘仅余 {free // (1024*1024)}MB")
+
+            pack_dir = self.root / manifest.pack_id / manifest.pack_version
+            (pack_dir / "models").mkdir(parents=True, exist_ok=True)
+            shutil.move(str(part), str(pack_dir / "models" / "model"))
+            # 自定义包无引擎 artifact：复用已装包引擎（runtime 整目录符号链接
+            # — rpath @loader_path 要求 engine 与 dylib 同目录，链接同时
+            # 满足健康检查与服务期 binary_path）
+            runtime_dir = pack_dir / "runtime"
+            if not runtime_dir.exists():
+                engine = find_reusable_engine(self.root)
+                if engine is None:
+                    raise ValueError("no_llama_cpp_engine: 引擎在安装中途消失")
+                runtime_dir.symlink_to(engine.parent,
+                                       target_is_directory=True)
+
+            self._on_install_stage(pack_id, "isolated_healthcheck")
+            # 真引擎试加载 = 框架可运行性的最终裁决（内存不够/格式坏在此暴露）
+            self.installer._run_healthcheck(pack_dir, manifest)
+
+            self._on_install_stage(pack_id, "writing_config")
+            cfg = build_model_config(manifest, pack_dir, port=_free_port())
+            write_managed_yaml(cfg, self.models_d, manifest)
+
+            self._custom.add({
+                "pack_id": pack_id, "name": rec["name"], "url": rec["url"],
+                "sha256": actual, "capability": rec["capability"],
+                "manifest": manifest.to_dict(),
+                "installed_at": int(time.time())})
+            self.store.set(PackRecord(
+                pack_id=pack_id, pack_version=manifest.pack_version,
+                status="installed", stage="installed", error=None,
+                sandbox_degraded=False, installed_at=int(time.time())))
+            shutil.rmtree(staging, ignore_errors=True)
+        except Exception as exc:
+            import time as _t
+            try:
+                self._fail_custom(rec, "failed",
+                                  str(exc) or type(exc).__name__,
+                                  manifest)
+            except Exception:
+                log.exception("custom pack failure bookkeeping: %s", pack_id)
         finally:
             with self._progress_lock:
                 self._in_progress.pop(pack_id, None)

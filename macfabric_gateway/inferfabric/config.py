@@ -457,6 +457,9 @@ class ModelConfig:
     # MACFABRIC P1: 上游引擎是否原生支持 Anthropic /v1/messages。
     # true → 透传（llama-server b12361）；false → 走 anthropic_bridge 翻译层。
     anthropic_native: bool = False
+    # 统一架构（2026-11-16）：managed_by_pack 非空 = 由能力包装入生成；
+    # /models 暴露给 App，本地推理页标注"来自能力包 xxx"
+    managed_by_pack: dict | None = None
     # MACFABRIC G1: 内存账本三字段（D2/D3 裁决）。
     # mem_baseline_mb 为 0 时回退 peak_vram_mb；mode: resident | on_demand | ""
     mem_baseline_mb: int = 0
@@ -933,6 +936,7 @@ def load_models(models_dir: Path = MODELS_DIR, include_applied: bool = True) -> 
             replicas=raw.get("replicas", []),
             deployment=raw.get("deployment", ""),
             anthropic_native=bool(raw.get("anthropic_native", False)),
+            managed_by_pack=raw.get("managed_by_pack"),
             mem_baseline_mb=int(raw.get("mem_baseline_mb", 0)),
             ledger_mode=_ledger_mode,
             idle_timeout_min=float(raw.get("idle_timeout_min", 30)),

@@ -106,8 +106,11 @@ struct ModelItem: Codable {
     var ledger_mode: String?
     var autostart: Bool?
     var anthropic_native: Bool?
+    var managed_by_pack: PackRef?
     var ledgerMode: String { ledger_mode ?? "on_demand" }
 }
+/// 统一架构（2026-11-16）：/models.managed_by_pack — 本地推理标注能力包来源
+struct PackRef: Codable { var pack_id: String; var pack_version: String? }
 
 struct CurvePoint: Codable {
     var t: Double
@@ -407,6 +410,42 @@ final class GatewayStore: ObservableObject {
     // 设置页策略表单草稿（CLT 无 SwiftUI 宏，视图内 @State 不可用 — 既有约束）
     @Published var packMaxBDraft = "4"
     @Published var packReservedMBDraft = "8192"
+    // ── 用户扩展能力包（统一架构 2026-11-16：填链接 → 网关校验链）──
+    @Published var customName = ""
+    @Published var customURL = ""
+    @Published var customCap = "llm"
+    @Published var customSHA = ""
+    @Published var customBusy = false
+
+    func submitCustomPack() {
+        guard !customBusy else { return }
+        var body: [String: Any] = [
+            "name": customName.trimmingCharacters(in: .whitespaces),
+            "url": customURL.trimmingCharacters(in: .whitespaces),
+            "capability": customCap]
+        let sha = customSHA.trimmingCharacters(in: .whitespaces)
+        if !sha.isEmpty { body["sha256"] = sha }
+        customBusy = true
+        var req = URLRequest(url: base.appendingPathComponent("/admin/packs/custom"),
+                             timeoutInterval: 15)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let detail = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                self?.customBusy = false
+                if (200..<300).contains(code) {
+                    self?.notify(.success, "✅ 自定义包已提交 — 校验链执行中（下载→格式→真引擎试加载），进度看卡片")
+                    self?.customName = ""; self?.customURL = ""; self?.customSHA = ""
+                    self?.fetchPackStatus()
+                } else {
+                    self?.notify(.error, "❌ 自定义包被拒(\(code)): \(detail.prefix(200))")
+                }
+            }
+        }.resume()
+    }
     // ── API Key 鉴权（设置页接线 — /admin/security/*）──
     @Published var securityEnforced = false
     @Published var securityKeyCount = 0
@@ -1870,6 +1909,11 @@ struct ModelRowView: View {
                         .font(.system(size: 11, design: .monospaced)).foregroundColor(.faint)
                 }
                 if sleeping { Pill(kind: .sleep) } else { Pill.make(active: m.active, health: nil) }
+                // 统一架构：标注所属能力包（本地推理 = 已安装能力的运行视图）
+                if let pid = m.managed_by_pack?.pack_id {
+                    Chip("包:\(pid)", color: Color.thLlm)
+                        .help("由能力包 \(pid) 装入生成 — 卸载请到能力包页")
+                }
                 // F5: VL 能力徽章（model_type == vl）
                 if m.model_type == "vl" { Chip("VL", color: Color.thVl) }
                 Chip(loadChip)                       // 装载模式 chip
@@ -2811,6 +2855,8 @@ struct PacksView: View {
                         }
                     }
                 }
+                // 用户扩展能力包（统一架构 2026-11-16）：填链接 → 校验链
+                CustomPackCard(store: store)
                 // F4: 本机模型发现/安装（用户导入流，收进折叠区不抢主视线）
                 DisclosureGroup {
                     LocalDiscoverCard(store: store).padding(.top, 4)
@@ -2864,6 +2910,41 @@ struct LocalDiscoverCard: View {
                 }
             }
             .padding(12)
+        }
+    }
+}
+
+/// 用户扩展能力包表单（统一架构 2026-11-16）：只填 下载链接 + 名称 + 类型，
+/// 校验链在网关（格式/内存/真引擎试加载），失败给明确原因
+struct CustomPackCard: View {
+    @ObservedObject var store: GatewayStore
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("添加自定义能力").font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
+                Text("填模型下载链接（GGUF · llama.cpp 框架），网关自动校验：sha256（可选）→ 格式 → 磁盘 → 真引擎试加载；失败给出明确原因，改链接后可重新提交。")
+                    .font(.system(size: 10.5)).foregroundColor(.faint)
+                HStack(spacing: 8) {
+                    TextField("名称（如 qwen3-06b）", text: $store.customName)
+                        .textFieldStyle(.roundedBorder).frame(width: 150)
+                        .font(.system(size: 12))
+                    TextField("https://…/model.gguf", text: $store.customURL)
+                        .textFieldStyle(.roundedBorder).frame(minWidth: 240)
+                        .font(.system(size: 12))
+                    Picker("", selection: $store.customCap) {
+                        Text("对话").tag("llm")
+                        Text("看图").tag("vl")
+                        Text("嵌入").tag("embedding")
+                    }.frame(width: 100)
+                    SmallBtn(store.customBusy ? "提交中…" : "添加", primary: true) {
+                        store.submitCustomPack()
+                    }.disabled(store.customBusy)
+                }
+                TextField("sha256（可选，提供即校验）", text: $store.customSHA)
+                    .textFieldStyle(.roundedBorder).frame(width: 300)
+                    .font(.system(size: 11, design: .monospaced))
+            }.padding(12)
         }
     }
 }
