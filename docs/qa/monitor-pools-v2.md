@@ -149,7 +149,7 @@ PLAN-2026-11-15 v2（Task 7 报告契约 + Task 8 原生监控台 + Task 9/10 �
 | I1 同秒洪流提前停扫谎报完整；`> since` 违反 [since,until) | (timestamp,id) 真键集分页；下界含 since；_MAX_PAGES 触顶如实 truncated | test_same_timestamp_flood_full_count（100001 同秒行全计）/ test_since_boundary_inclusive |
 | I2 3xx 计成功 | 2xx 契约 | test_3xx_not_success |
 | I3 直连行缺 usage 冒认 0 | 无摘要证据成功行 0/0 计 usage_unknown_rows | test_direct_row_missing_usage_counts_unknown |
-| I4 身份未用 actual_model_id | 池行按 final_target.actual_model_id 聚合 | test_alias_grouped_by_actual_model（iff/fast → qwen3-4b） |
+| I4 身份未用 actual_model_id | 池行按 final_target.actual_model_id 聚合 | test_alias_grouped_by_actual_model（fabric-fast → qwen3-4b） |
 | I5 价格未接线 + 单位/币种错 | handler 传 price_config；复用 cost_of_row（¥/1M）；字段 cost_estimate | test_cost_uses_price_table_yuan_per_1m / test_unpriced_reports_none |
 | I6 本地 OpenAI 动作表状态直发 | _forward_request_ex suppress（401/403/429/5xx≠501 未提交交动作表；400/404/413/422/501 PR-14 直发保留） | TestLocalSuppressActionableStatuses 6 项（含 429 Retry-After、流式、客户端零字节） |
 | I7 传输异常不计尝试 | 异常 admitted=True + 消耗 max_attempts（冷却语义不变） | test_transport_exception_consumes_attempt |

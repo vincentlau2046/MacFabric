@@ -126,7 +126,7 @@ class ProxyManager:
         # R9: AnomalyCollector — 结构化异常事件（线程安全环形缓冲）
         from inferfabric.anomaly_collector import AnomalyCollector
         self.anomalies = AnomalyCollector()
-        # 逻辑模型池（iff/*）：配置缺失/损坏 = 功能关闭，不阻塞代理启动
+        # 逻辑模型池（fabric-*）：配置缺失/损坏 = 功能关闭，不阻塞代理启动
         from inferfabric.model_pool.registry import PoolRegistry
         self.pool_registry = PoolRegistry(
             IFF_DATA_DIR / "model_pools.yaml",

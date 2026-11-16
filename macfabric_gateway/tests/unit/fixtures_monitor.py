@@ -48,7 +48,7 @@ def synthetic_rows(until: float = T0) -> list[dict]:
              route="cloud:prov_b/gpt-x", cloud_provider="prov_b",
              error="upstream 502", ts=since + 30),
         # 无上游（池内无可用候选/预算耗尽，未到达上游）
-        _row("e-no-upstream", model="iff/premium", status=503,
+        _row("e-no-upstream", model="fabric-premium", status=503,
              route="pool:premium", tokens_in=0, tokens_out=0,
              ttft_ms=None, duration_ms=5.0, error="no_available_candidate",
              ts=since + 40,
@@ -85,12 +85,12 @@ def synthetic_rows(until: float = T0) -> list[dict]:
              metadata={"pool_summary": {"usage_known": False}}),
         # 别名：请求名是别名，实际模型不同（身份按 actual_model_id 记录在
         # metadata；行级 model 保留请求名以复现历史行为）
-        _row("a-alias", model="iff/fast", status=OK,
+        _row("a-alias", model="fabric-fast", status=OK,
              route="pool:fast/local:qwen3-4b", ts=mid + 40,
              metadata={"pool_summary": {
-                 "requested_model": "iff/fast",
+                 "requested_model": "fabric-fast",
                  "final_target": {"candidate_id": "c3", "provider": "",
-                                  "requested_model_id": "iff/fast",
+                                  "requested_model_id": "fabric-fast",
                                   "actual_model_id": "qwen3-4b"}}}),
         # 已删除池的历史（池已不存在，历史行仍可查、按 route 归类）
         _row("h-deleted-pool", model="gpt-x", status=OK,

@@ -281,7 +281,7 @@ class TestReviewFixPass:
         local_models = {m["model"] for m in report["models"]
                         if m["location"] == "local"}
         assert "qwen3-4b" in local_models
-        assert "iff/fast" not in local_models
+        assert "fabric-fast" not in local_models
 
     def test_cost_uses_price_table_yuan_per_1m(self, tmp_path):
         """I5：复用 cost_of_row 唯一计价入口（¥/1M tokens），字段名 cost_estimate。"""

@@ -12,10 +12,12 @@ HTTP 契约（handler.py 薄委托）：
 per-pack Lock + 本门面 in_progress 表共同保证）。
 """
 
+import http.client
 import json
 import logging
 import socket
 import threading
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -75,10 +77,35 @@ class HttpArtifactFetcher:
             _NoDowngradeRedirectHandler())
 
     def fetch(self, artifact, dest) -> None:
+        # 断点续传（2026-11-16 生产取证）：ModelScope CDN 掐长连接，
+        # ~2GB 级文件两连败于 TimeoutError。中断后带 Range 重试续传，
+        # 上限 5 次；协议级错误（HTTPError）不重试。
+        for attempt in range(6):
+            try:
+                self._fetch_once(artifact, dest)
+                return
+            except urllib.error.HTTPError:
+                raise
+            except (OSError, http.client.HTTPException):
+                # OSError 覆盖 socket.timeout(=TimeoutError)/ConnectionError/
+                # URLError(网络层)；HTTPError 已在上方放行
+                if attempt >= 5:
+                    raise
+                continue
+
+    def _fetch_once(self, artifact, dest) -> None:
+        offset = dest.stat().st_size if dest.exists() else 0
         req = urllib.request.Request(artifact.source, method="GET")
-        written = 0
+        if offset:
+            req.add_header("Range", f"bytes={offset}-")
+        written = offset
         with self._opener.open(req, timeout=60) as resp, \
-                open(dest, "wb") as f:
+                open(dest, "ab") as f:
+            if offset and getattr(resp, "status", 206) != 206:
+                # 服务器不支持 Range（返回 200 全量）→ 丢弃半截从头写
+                written = 0
+                f.seek(0)
+                f.truncate()
             while True:
                 chunk = resp.read(self._chunk)
                 if not chunk:

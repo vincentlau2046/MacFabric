@@ -7,9 +7,9 @@
 
 ### F1 模型池（role 语义）— ✅ 本轮落地
 **语义**：池 = 模型角色的路由链，非静态目录。LLM 三默认角色池：
-- `iff/fast` 快速对话 — qwen3-4b(本机) → zhipu/glm-5(云端)
-- `iff/small` 轻量任务 — qwen3-4b → zhipu/glm-5-flash
-- `iff/premium` 高质量长文 — 纯云端 glm-5（本机 4B 不够格，`allow_cross_location: false`）
+- `fabric-fast` 快速对话 — qwen3-4b(本机) → zhipu/glm-5(云端)
+- `fabric-small` 轻量任务 — qwen3-4b → zhipu/glm-5-flash
+- `fabric-premium` 高质量长文 — 纯云端 glm-5（本机 4B 不够格，`allow_cross_location: false`）
 
 **规则**：priority 数字小者优先；路由自上而下逐候选尝试（本地失败/离线 → 云端兜底）；候选含本机与云端混排（`kind: local|cloud`，云端以 `provider/model` 表示）。
 **实现**：`~/.inferfabric/model_pools.yaml`（revision CAS）；GET/POST `/admin/model-pools`（POST body = raw 配置 + expected_revision，409 revision_conflict 时重取重试）；App 模型池页 = 竖排候选链（priority 序号 + 点亮态 + 本机/云端 chip + 首选徽章 + ↑↓ 调序按钮）。

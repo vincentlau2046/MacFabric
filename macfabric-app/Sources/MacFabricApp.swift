@@ -740,7 +740,7 @@ final class GatewayStore: ObservableObject {
                     return
                 }
                 self.notify((200..<300).contains(code) ? .success : .error,
-                    (200..<300).contains(code) ? "✅ iff/\(name) 已\(enabled ? "启用" : "停用")" : "❌ 开关失败(\(code)): \(body.prefix(100))")
+                    (200..<300).contains(code) ? "✅ fabric-\(name) 已\(enabled ? "启用" : "停用")" : "❌ 开关失败(\(code)): \(body.prefix(100))")
                 self.fetchPools()
             }
         }.resume()
@@ -791,7 +791,7 @@ final class GatewayStore: ObservableObject {
             if let n = dSet { pc["deadline_ms"] = n }
             poolsCfg[name] = pc
             raw["pools"] = poolsCfg
-        }, okMsg: "✅ iff/\(name) 池参数已更新", failPrefix: "池参数保存失败")
+        }, okMsg: "✅ fabric-\(name) 池参数已更新", failPrefix: "池参数保存失败")
     }
 
     /// 恢复服务端默认：删除这两个键（服务端缺省 max_attempts=2 / deadline_ms=60000）
@@ -803,7 +803,7 @@ final class GatewayStore: ObservableObject {
             pc.removeValue(forKey: "deadline_ms")
             poolsCfg[name] = pc
             raw["pools"] = poolsCfg
-        }, okMsg: "✅ iff/\(name) 池参数已恢复默认", failPrefix: "池参数恢复失败")
+        }, okMsg: "✅ fabric-\(name) 池参数已恢复默认", failPrefix: "池参数恢复失败")
     }
 
     /// F2: 能力包卸载 = 停服务 + 删 models.d YAML + 热重载
@@ -1969,7 +1969,7 @@ struct PoolsView: View {
     static let usageSnippet = """
     curl http://127.0.0.1:\(GW_PORT)/v1/chat/completions \\
       -H "Authorization: Bearer sk-iff-…" -H "Content-Type: application/json" \\
-      -d '{"model":"iff/fast","messages":[{"role":"user","content":"你好"}]}'
+      -d '{"model":"fabric-fast","messages":[{"role":"user","content":"你好"}]}'
     """
 
     static func copyUsageSnippet() {
@@ -1977,7 +1977,7 @@ struct PoolsView: View {
         # MacFabric 池调用（OpenAI 方言；Anthropic 方言把 URL 换成 http://127.0.0.1:\(GW_PORT) 即可）
         export OPENAI_BASE_URL=http://127.0.0.1:\(GW_PORT)/v1
         export OPENAI_API_KEY=sk-iff-…   # 设置页「API Key 鉴权」新建
-        # model 填池名：iff/fast · iff/small · iff/premium（按池内优先级自动调度）
+        # model 填池名：fabric-fast · fabric-small · fabric-premium（按池内优先级自动调度）
         \(usageSnippet)
         """
         NSPasteboard.general.clearContents()
@@ -2018,7 +2018,7 @@ struct PoolsView: View {
                             guideRow("① 服务地址（Base URL）",
                                      "OpenAI 方言 \(GW_BASE)/v1 · Anthropic 方言 \(GW_BASE)")
                             guideRow("② 模型名（model）",
-                                     "直接填池名：iff/fast · iff/small · iff/premium — 网关按池内优先级自动选候选，失败自动换下一个，无需改客户端")
+                                     "直接填池名：fabric-fast · fabric-small · fabric-premium — 网关按池内优先级自动选候选，失败自动换下一个，无需改客户端")
                             guideRow("③ API Key",
                                      store.securityEnforced
                                         ? "鉴权已开启 — 用设置页「API Key 鉴权 → ＋ 新建密钥」生成的 sk-iff-…，请求头 Authorization: Bearer <key>"
@@ -2110,7 +2110,7 @@ struct PoolCard: View {
         Card {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    Text("iff/\(name)").font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
+                    Text("fabric-\(name)").font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
                     Text(use).font(.system(size: 11.5)).foregroundColor(.dim)
                     Spacer()
                     Text(activeCount > 0 ? "● 调用中" : "\(candidates.count) 候选")
@@ -2176,7 +2176,7 @@ struct PoolCard: View {
                         // 排序入口（↑↓/拖拽）保留在行面
                         Menu {
                             Button("移除候选…") {
-                                store.confirm("从池 iff/\(name) 移除候选 \(c.target ?? c.id)？") {
+                                store.confirm("从池 fabric-\(name) 移除候选 \(c.target ?? c.id)？") {
                                     store.removePoolCandidate(pool: name, candidateId: c.id)
                                 }
                             }
@@ -2568,7 +2568,7 @@ struct MonitorView: View {
                 store.monitorPoolExpanded = store.monitorPoolExpanded == name ? nil : name
             } label: {
                 HStack(spacing: 12) {
-                    Text("iff/\(name)").font(.system(size: 12, weight: .semibold)).foregroundColor(.ink)
+                    Text("fabric-\(name)").font(.system(size: 12, weight: .semibold)).foregroundColor(.ink)
                     Text("\(fmtInt(reqs)) 请求").font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim)
                     Text("成功率 \(rateText(rate))")
                         .font(.system(size: 11.5, design: .monospaced)).foregroundColor(.dim)
@@ -3558,9 +3558,9 @@ struct WizardView: View {
             Text("池按模型角色定义，本地失败自动落到云端，候选优先级随时可调：")
                 .font(.system(size: 13)).foregroundColor(.dim)
             VStack(alignment: .leading, spacing: 8) {
-                poolRow("iff/fast", "快速对话 · 低延迟优先", "qwen3-4b → glm-5")
-                poolRow("iff/small", "轻量任务 · 意图分类", "qwen3-4b → glm-5-flash")
-                poolRow("iff/premium", "高质量长文", "glm-5（云端）")
+                poolRow("fabric-fast", "快速对话 · 低延迟优先", "qwen3-4b → glm-5")
+                poolRow("fabric-small", "轻量任务 · 意图分类", "qwen3-4b → glm-5-flash")
+                poolRow("fabric-premium", "高质量长文", "glm-5（云端）")
             }
         }
     }

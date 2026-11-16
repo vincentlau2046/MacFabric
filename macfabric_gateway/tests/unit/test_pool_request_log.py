@@ -128,7 +128,7 @@ class TestPoolErrorsPersist:
     def test_unknown_pool(self, tmp_env):
         pm = make_pm(tmp_env, pools=[local_pool("fast")])
         h = FakeHandler()
-        assert dispatch.handle_pool_chat(h, pm, {}, "iff/nope") is True
+        assert dispatch.handle_pool_chat(h, pm, {}, "fabric-nope") is True
         rs = rows(tmp_env, pm)
         assert len(rs) == 1
         r = rs[0]
@@ -139,7 +139,7 @@ class TestPoolErrorsPersist:
     def test_auth_rejected(self, tmp_env):
         pm = make_pm(tmp_env, pools=[local_pool("fast")], auth=FailingAuth())
         h = FakeHandler()
-        assert dispatch.handle_pool_chat(h, pm, {}, "iff/fast") is True
+        assert dispatch.handle_pool_chat(h, pm, {}, "fabric-fast") is True
         rs = rows(tmp_env, pm)
         assert len(rs) == 1
         r = rs[0]
@@ -150,7 +150,7 @@ class TestPoolErrorsPersist:
     def test_no_candidates(self, tmp_env):
         pm = make_pm(tmp_env, pools=[local_pool("empty", cands=[])])
         h = FakeHandler()
-        assert dispatch.handle_pool_chat(h, pm, {}, "iff/empty") is True
+        assert dispatch.handle_pool_chat(h, pm, {}, "fabric-empty") is True
         rs = rows(tmp_env, pm)
         assert len(rs) == 1
         r = rs[0]
@@ -162,7 +162,7 @@ class TestPoolErrorsPersist:
         pm = make_pm(tmp_env, pools=[local_pool("fast")],
                      gate=FakeGate(ok=False))
         h = FakeHandler()
-        assert dispatch.handle_pool_chat(h, pm, {}, "iff/fast") is True
+        assert dispatch.handle_pool_chat(h, pm, {}, "fabric-fast") is True
         rs = rows(tmp_env, pm)
         assert len(rs) == 1
         r = rs[0]
@@ -181,7 +181,7 @@ class TestPoolErrorsPersist:
 
         monkeypatch.setattr(dispatch, "_attempt_local_openai", fake_transport)
         h = FakeHandler()
-        assert dispatch.handle_pool_chat(h, pm, {}, "iff/fast") is True
+        assert dispatch.handle_pool_chat(h, pm, {}, "fabric-fast") is True
         rs = rows(tmp_env, pm)
         assert len(rs) == 1  # 终态一行，attempt 不单独成行
         r = rs[0]
@@ -209,7 +209,7 @@ class TestAttemptSummaryRoundtrip:
 
         monkeypatch.setattr(dispatch, "_attempt_local_openai", fake_transport)
         h = FakeHandler()
-        assert dispatch.handle_pool_chat(h, pm, {}, "iff/fast") is True
+        assert dispatch.handle_pool_chat(h, pm, {}, "fabric-fast") is True
         rs = rows(tmp_env, pm)
         assert len(rs) == 1
         return rs[0]
@@ -227,7 +227,7 @@ class TestAttemptSummaryRoundtrip:
         assert ps["retry_count"] == 1
         assert ps["fallback_count"] == 0
         assert ps["final_target"]["candidate_id"] == "c1"
-        assert ps["requested_model"] == "iff/fast"
+        assert ps["requested_model"] == "fabric-fast"
         assert ps["config_revision"] == 7
         assert len(ps["attempts"]) == 2
 

@@ -102,7 +102,7 @@
     return { cls: 'idle', label: '空闲' };
   }
 
-  // 调用树渲染：每行完整链「:8999 ── iff/<角色> ── <候选链：每候选五态灯+名>」+ 态徽标。
+  // 调用树渲染：每行完整链「:8999 ── fabric-<角色> ── <候选链：每候选五态灯+名>」+ 态徽标。
   // 四角色固定序 + 额外池（YAML 手工组）追加其后，不隐藏（R3）。
   function treeHtml(defs, rt) {
     var pools = (defs && defs.pools) || {};
@@ -154,7 +154,7 @@
         // 不进结构签名：轮询零闪烁）
         + '<span class="mp-link mp-link-' + ls.cls
         + '" id="mp-tlink-a-' + esc(name) + '"></span>'
-        + '<span class="mp-tree-role">iff/' + esc(name) + '</span>'
+        + '<span class="mp-tree-role">fabric-' + esc(name) + '</span>'
         + '<span class="mp-link mp-link-' + ls.cls
         + '" id="mp-tlink-b-' + esc(name) + '"></span>'
         // leaf 是完整 HTML（mp-tree-cands / mp-tree-leaf）——原样插入，
@@ -261,7 +261,7 @@
       + '<div class="mp-beam mp-beam-dark" id="mp-beam-' + esc(name)
       + '"></div>'
       + '<div class="if-card-hdr">'
-      + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
+      + '<span class="if-card-title mono">fabric-' + esc(name) + '</span>'
       + '<span class="mp-unconfigured-badge">未配置</span>'
       + '</div>'
       + (desc ? '<p class="mp-role-desc">' + esc(desc) + '</p>' : '')
@@ -656,7 +656,7 @@
       + '<div class="mp-beam ' + beamClass(st, rt) + '" id="mp-beam-'
       + esc(name) + '"></div>'
       + '<div class="if-card-hdr">'
-      + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
+      + '<span class="if-card-title mono">fabric-' + esc(name) + '</span>'
       + (roleDesc(name)
           ? '<span class="mp-role-desc">' + esc(roleDesc(name)) + '</span>'
           : '')
@@ -1206,7 +1206,7 @@
       if (res.ok) {
         clearActionError();
         _revision = d && typeof d.revision === 'number' ? d.revision : _revision;
-        UI.toast('已' + (enable ? '启用' : '停用') + ' iff/' + pool, 'ok');
+        UI.toast('已' + (enable ? '启用' : '停用') + ' fabric-' + pool, 'ok');
         await renderModelPools();
         return;
       }
@@ -1624,7 +1624,7 @@
       if (_inline !== session) {
         // 陈旧完成：请求已发出并生效，但行内会话已换 — 只提示 + 刷新
         if (res.ok) {
-          UI.toast('已更新 iff/' + poolName, 'ok');
+          UI.toast('已更新 fabric-' + poolName, 'ok');
           await renderModelPools();
         }
         return;
@@ -1635,7 +1635,7 @@
         _inline = null;
         _catalog = null;   // 配置已变 → 目录缓存失效，下次手势重取
         clearActionError();
-        UI.toast('已更新 iff/' + poolName, 'ok');
+        UI.toast('已更新 fabric-' + poolName, 'ok');
         await renderModelPools();
         return;
       }
@@ -1800,7 +1800,7 @@
     var base = scheme + '//' + host + ':8999';
     // model 字面量用 JSON.stringify 生成（Python 兼容转义）：池名含引号/
     // 反斜杠/换行也只是一个完整字符串参数，无法注入到复制的代码（安全评审）
-    var modelLit = JSON.stringify('iff/' + pool);
+    var modelLit = JSON.stringify('fabric-' + pool);
     if (proto === 'anthropic') {
       return 'from anthropic import Anthropic\n\n'
         + 'client = Anthropic(\n'
@@ -1833,10 +1833,10 @@
     var anthropic = snippetText(pool, 'anthropic');
     _snippet = { pool: pool, openai: openai, anthropic: anthropic };
     modal.innerHTML = '<div class="mp-editor">'
-      + '<div class="mp-editor-hdr"><b class="mono">iff/' + esc(pool)
+      + '<div class="mp-editor-hdr"><b class="mono">fabric-' + esc(pool)
       + '</b><span>接入片段 — 复制即用，之后换模型无需改客户端</span></div>'
       + '<p class="mp-hint">注意：若 API key 配置了 models ACL，需包含'
-      + '<span class="mono">iff/' + esc(pool) + '</span>，否则会 401。</p>'
+      + '<span class="mono">fabric-' + esc(pool) + '</span>，否则会 401。</p>'
       + '<p class="mp-snippet-title">OpenAI 协议</p>'
       + '<pre class="mp-snippet">' + esc(openai) + '</pre>'
       + '<button type="button" data-mp-copy="openai">复制 OpenAI 片段</button>'

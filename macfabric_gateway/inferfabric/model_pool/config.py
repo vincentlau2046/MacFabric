@@ -169,13 +169,13 @@ def _parse_candidate(raw: dict, pool_name: str, issues: list[str]) -> CandidateC
     if kind == "cloud" and not model_id:
         issues.append(f"pool '{pool_name}' candidate '{cid}': cloud candidate requires model_id")
 
-    # 禁池引用池：目标名不得落在 iff/ 逻辑命名空间
+    # 禁池引用池：目标名不得落在 fabric- 逻辑命名空间（2026-11-16 硬切 fabric-）
     target_names = [model_name, model_id] if kind == "cloud" else [model_name]
     for t in target_names:
-        if t.startswith("iff/"):
+        if t.startswith("fabric-"):
             issues.append(
-                f"pool '{pool_name}' candidate '{cid}': target '{t}' is in the iff/ "
-                f"logical namespace — pools must not reference pools")
+                f"pool '{pool_name}' candidate '{cid}': target '{t}' is in the "
+                f"fabric- logical namespace — pools must not reference pools")
             return None
 
     where = f"pool '{pool_name}' candidate '{cid}'"

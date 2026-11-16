@@ -336,7 +336,7 @@ def apply(model, preset: str, dry: bool = False, restart: bool = True, mgr=None)
     只写应用层（APPLIED_FILE）+ 内存，模型 YAML 永不改。
     dry=True: 只算 diff。restart=False: 写应用层不重启。
     mgr: ModelManager（重启编排用）；为 None 时跳过重启并提示。
-    返回含 status/diff/restart 详情的 dict; TuneError 表示可读失败。
+    返回含 status/dfabric-restart 详情的 dict; TuneError 表示可读失败。
     """
     p = preview(model, preset)
     blocking = [i for i in p["issues"] if i.startswith("❌")]

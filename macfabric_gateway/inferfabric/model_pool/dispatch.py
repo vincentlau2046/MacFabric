@@ -1,7 +1,7 @@
-"""inferfabric/model_pool/dispatch.py — OpenAI/Anthropic 入口的 iff/ 池调度。
+"""inferfabric/model_pool/dispatch.py — OpenAI/Anthropic 入口的 fabric- 池调度。
 
 在既有入口（handle_chat / _handle_messages）的鉴权段之前调用：
-- `iff/` 前缀检查（非池请求原样放行，返回 False）
+- `fabric-` 前缀检查（非池请求原样放行，返回 False）
 - 完整逻辑名鉴权（不做 split("/")[-1]，guest 白名单不自动扩权）
 - 捕获不可变快照 → select() → run_attempts 预算内回退（P2，spec §6.2–§6.4）
 - 池请求跳过响应缓存（GET/PUT 均不触碰）
@@ -36,7 +36,7 @@ from inferfabric.proxy.request_logger import RequestLog
 
 log = logging.getLogger("inferfabric.model_pool.dispatch")
 
-POOL_PREFIX = "iff/"
+POOL_PREFIX = "fabric-"   # 硬切 fabric-（用户裁决 2026-11-16：slash 命名客户端兼容差，不留别名）
 
 # 错误码 → (HTTP status, 是否带 Retry-After)
 _ERROR_CONTRACT = {
@@ -255,7 +255,7 @@ def _no_eligible_message(model: str, sel) -> str:
 
 
 def handle_pool_chat(handler, pm, data, model) -> bool:
-    """OpenAI /v1/chat/completions 的 iff/ 池分支。
+    """OpenAI /v1/chat/completions 的 fabric- 池分支。
 
     Returns:
         True  — 请求已完整处理（含错误响应已发）
@@ -396,7 +396,7 @@ def _send_pool_error_anthropic(handler, pm, *, req_id, key_name, model, code, me
 
 
 def handle_pool_messages(handler, pm, data, model) -> bool:
-    """Anthropic /v1/messages 的 iff/ 池分支。
+    """Anthropic /v1/messages 的 fabric- 池分支。
 
     Returns:
         True  — 请求已完整处理（含错误响应已发）

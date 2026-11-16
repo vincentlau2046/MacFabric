@@ -246,3 +246,110 @@ def test_bundled_catalog_default_path_exists():
     from inferfabric.proxy.pack_handlers import BUNDLED_CATALOG
     assert BUNDLED_CATALOG.name == "packs_catalog.yaml"
     assert BUNDLED_CATALOG.exists(), BUNDLED_CATALOG
+
+
+def test_fetcher_resumes_after_midstream_timeout(tmp_path):
+    # 生产真装两次断连取证（1.5G / 2.3G 处 TimeoutError，2026-11-16）—
+    # ModelScope CDN 掐长连接：fetcher 必须带 Range 断点续传重试，
+    # 而不是从头再来或直接失败
+    import socket
+    from types import SimpleNamespace
+    from inferfabric.proxy.pack_handlers import HttpArtifactFetcher
+
+    class FlakyResp:
+        def __init__(self, chunks, status=206):
+            self.chunks = list(chunks)
+            self.status = status
+
+        def read(self, n):
+            if not self.chunks:
+                return b""
+            c = self.chunks.pop(0)
+            if isinstance(c, Exception):
+                raise c
+            return c
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class FakeOpener:
+        def __init__(self, resps):
+            self.calls = []
+            self.resps = list(resps)
+
+        def open(self, req, timeout=None):
+            self.calls.append(req)
+            return self.resps.pop(0)
+
+    # 首次下载中断流（socket.timeout），第二次带 Range 续上剩余
+    f = HttpArtifactFetcher()
+    op = FakeOpener([
+        FlakyResp([b"AAAA", socket.timeout("read timed out")], status=200),
+        FlakyResp([b"BBBB", b"CCCC"]),
+    ])
+    f._opener = op
+    dest = tmp_path / "m.part"
+    f.fetch(SimpleNamespace(source="https://x/m.gguf"), dest)
+    assert dest.read_bytes() == b"AAAABBBBCCCC"
+    assert len(op.calls) == 2
+    assert op.calls[1].get_header("Range") == "bytes=4-"
+
+
+def test_fetcher_resume_gives_up_after_limit(tmp_path):
+    # 服务器持续断连 → 重试上限后诚实抛错（不无限循环）
+    import socket
+    from types import SimpleNamespace
+    from inferfabric.proxy.pack_handlers import HttpArtifactFetcher
+
+    class DeadResp:
+        status = 200
+
+        def read(self, n):
+            raise socket.timeout("read timed out")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class AlwaysDeadOpener:
+        def __init__(self):
+            self.calls = 0
+
+        def open(self, req, timeout=None):
+            self.calls += 1
+            return DeadResp()
+
+    f = HttpArtifactFetcher()
+    op = AlwaysDeadOpener()
+    f._opener = op
+    with pytest.raises(socket.timeout):
+        f.fetch(SimpleNamespace(source="https://x/m.gguf"), tmp_path / "m.part")
+    assert op.calls == 6   # 1 首发 + 5 次续传重试
+
+
+def test_fetcher_no_resume_on_http_error(tmp_path):
+    # 404 等协议级错误不重试（重试只救网络中断，不救坏 URL）
+    import urllib.error
+    from types import SimpleNamespace
+    from inferfabric.proxy.pack_handlers import HttpArtifactFetcher
+
+    class Always404Opener:
+        def __init__(self):
+            self.calls = 0
+
+        def open(self, req, timeout=None):
+            self.calls += 1
+            raise urllib.error.HTTPError(
+                "https://x/m.gguf", 404, "nope", {}, None)
+
+    f = HttpArtifactFetcher()
+    op = Always404Opener()
+    f._opener = op
+    with pytest.raises(urllib.error.HTTPError):
+        f.fetch(SimpleNamespace(source="https://x/m.gguf"), tmp_path / "m.part")
+    assert op.calls == 1

@@ -302,13 +302,13 @@
 - 遗留：GitHub push 连接超时（gitcode 已推成功），待网络恢复补推 origin。
 
 ## 2026-11-15 三项：池路由死锁修复 + 池调用指引 + 密钥留痕折叠 — 7c9d857 后
-- **池路由死锁（根因级）**：用户配好的 iff/fast 恒 no_compatible_target。排查：
+- **池路由死锁（根因级）**：用户配好的 fabric-fast 恒 no_compatible_target。排查：
   selector 证据门槛要求 PROBED/DECLARED，但 EvidenceStore.record 全运行时**无任何
   调用方**、管理员探测端点也不存在 — 所有池永远无法路由。修复：
   ① registry 编译期对未声明 declared_protocols 的云候选从服务商配置自动推导
   （启用 provider + 模型入池 = 管理员声明，显式声明仍优先）；
   ② accept_declared 默认 true（显式 false 尊重）。
-  实测：iff/fast → atlaswork/glm-5 ✅、iff/premium → qianfan/glm-5.3 ✅。
+  实测：fabric-fast → atlaswork/glm-5 ✅、fabric-premium → qianfan/glm-5.3 ✅。
 - atlascode 查证：无此服务商 — 用户实指 atlaswork，glm-5 直连/池路由均通。
 - 池页：删每池"复制池配置"按钮 → 底部新增「如何调用这些池」指引卡
   （Base URL 双方言 / model 填池名 / API Key 来源 + 可复制 curl 示例）。

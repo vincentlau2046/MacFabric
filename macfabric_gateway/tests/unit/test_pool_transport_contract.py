@@ -156,7 +156,7 @@ def local_rc(model_name="qwen3-4b"):
 def attempt_local(pm, data, cand=None):
     cand = cand or local_rc()
     return dispatch._attempt_local_openai(
-        FakeHandler(), pm, data, model="iff/fast", pool="fast", cand=cand,
+        FakeHandler(), pm, data, model="fabric-fast", pool="fast", cand=cand,
         remaining=10.0)
 
 
@@ -250,7 +250,7 @@ class TestStreamTerminal:
         h = FakeHandler()
         h._client_gone = True  # 模拟写失败（生产 _safe_write 置位语义）
         res = dispatch._attempt_local_openai(
-            h, pm, {"messages": [], "stream": True}, model="iff/fast",
+            h, pm, {"messages": [], "stream": True}, model="fabric-fast",
             pool="fast", cand=local_rc(), remaining=10.0)
         assert res.ok is False and res.committed is True
         assert res.stream_state == "client_disconnect"
@@ -348,7 +348,7 @@ class TestObservationParity:
         outcome = run_attempts(pool, [rc], pick, monotonic=mono)
         summary = build_pool_summary(outcome, pool_name="fast",
                                      protocol="openai", config_revision=1,
-                                     requested_model="iff/fast",
+                                     requested_model="fabric-fast",
                                      candidates=[rc])
         a1, a2 = summary["attempts"]
         assert a1["duration_ms"] == pytest.approx(2000.0)
@@ -373,7 +373,7 @@ class TestObservationParity:
                                monotonic=mono)
         summary = build_pool_summary(outcome, pool_name="fast",
                                      protocol="openai", config_revision=1,
-                                     requested_model="iff/fast", candidates=[rc])
+                                     requested_model="fabric-fast", candidates=[rc])
         a = summary["attempts"][0]
         assert a["usage_known"] is False
         assert a["tokens_in"] is None and a["tokens_out"] is None
@@ -430,7 +430,7 @@ class TestLocalSuppressActionableStatuses:
         h = FakeHandler()
         dispatch._attempt_local_openai(
             h, pm, {"messages": [{"role": "user", "content": "hi"}]},
-            model="iff/fast", pool="fast", cand=local_rc(), remaining=10.0)
+            model="fabric-fast", pool="fast", cand=local_rc(), remaining=10.0)
         assert h.status_line is None   # 未 send_response
         assert h.written == b""        # 未写任何字节
 
@@ -452,7 +452,7 @@ class TestAttemptErrorSanitized:
     def test_summary_attempts_error_fixed_code(self):
         s = build_pool_summary(self._outcome(), pool_name="fast",
                                protocol="openai", config_revision=1,
-                               requested_model="iff/fast", candidates=(local_rc(),))
+                               requested_model="fabric-fast", candidates=(local_rc(),))
         import json as _json
         assert self.SECRET not in _json.dumps(s)
         assert s["attempts"][0]["error"] == "upstream_http_502"
@@ -462,6 +462,6 @@ class TestAttemptErrorSanitized:
         from inferfabric.model_pool.dispatch import _log_failed_attempts
         with caplog.at_level(logging.WARNING):
             _log_failed_attempts(None, None, self._outcome(), req_id="r1",
-                                 key_name="k", model="iff/fast")
+                                 key_name="k", model="fabric-fast")
         assert self.SECRET not in caplog.text
         assert "upstream_http_502" in caplog.text

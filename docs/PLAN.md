@@ -103,11 +103,11 @@ macOS 哲学：没有显存状态机，只有**内存压力**和**按需加载/�
 ## 5. 模型池（默认五件套）+ 静态直连
 
 ```
-iff/fast      快速对话   ① qwen3-4b(本机) ② glm-5(云端)
-iff/small     轻量任务·意图分类  ① qwen3-1.7b(本机) ② glm-5-flash(云端)
-iff/premium   长文写作   ① glm-5(云端)            [本地 ≤4B 不入此池]
-iff/txt2img   文生图     ① mflux-schnell(本机) ② seedream-4.0(云端)
-iff/img2img   图生图     ① mflux-schnell·编辑模式 ② seedream-edit(云端)
+fabric-fast      快速对话   ① qwen3-4b(本机) ② glm-5(云端)
+fabric-small     轻量任务·意图分类  ① qwen3-1.7b(本机) ② glm-5-flash(云端)
+fabric-premium   长文写作   ① glm-5(云端)            [本地 ≤4B 不入此池]
+fabric-txt2img   文生图     ① mflux-schnell(本机) ② seedream-4.0(云端)
+fabric-img2img   图生图     ① mflux-schnell·编辑模式 ② seedream-edit(云端)
 静态直连（不进池）：bge-m3 · bge-reranker-v2-m3 —— 按模型名直接路由
 ```
 
@@ -132,7 +132,7 @@ iff/img2img   图生图     ① mflux-schnell·编辑模式 ② seedream-edit(�
 |---|---|---|
 | 模型服务 | 模型 Hub / 接入目录 | 统一接入配置出口 |
 | 本地推理 | 模型生命周期管理 | 启停/睡眠/唤醒/基线实测 |
-| 模型池 | iff/\<pool\> 逻辑路由 | 候选链/优先级/回退 |
+| 模型池 | fabric-\<pool\> 逻辑路由 | 候选链/优先级/回退 |
 | 监控台 | 运营观测 | token/延迟/请求日志 |
 | 能力包 | YAML 预设 + 模型清单 | 安装即落 models.d |
 | 云端接入 | 云服务商管理 | 预设/发现/打标/密钥 |
