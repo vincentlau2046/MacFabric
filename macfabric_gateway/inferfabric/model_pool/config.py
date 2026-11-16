@@ -9,8 +9,8 @@
       allowed_locations: [cloud]        # 空或缺省 = 不启用任何位置
       accept_declared: false            # 是否接受管理员声明的协议证据
       allow_cross_location: false       # 跨本地/云回退（需 allowed_locations 同时含 local+cloud）
-      max_attempts: 2
-      deadline_ms: 60000
+      max_attempts: 3
+      deadline_ms: 180000
       candidates:
         - id: fast_primary
           priority: 10                  # 越小越优先，池内唯一
@@ -130,8 +130,8 @@ class PoolConfig:
     allowed_locations: tuple[str, ...] = ()
     accept_declared: bool = False
     allow_cross_location: bool = False
-    max_attempts: int = 2
-    deadline_ms: int = 60000
+    max_attempts: int = 3
+    deadline_ms: int = 180000
     candidates: tuple[CandidateConfig, ...] = ()
 
 
@@ -267,10 +267,10 @@ def _parse_pool(name: str, raw: dict, issues: list[str],
         enabled = False
 
     ma = _strict_int(raw.get("max_attempts"), "max_attempts",
-                     f"pool '{name}'", issues, default=2,
+                     f"pool '{name}'", issues, default=3,
                      value_range=MAX_ATTEMPTS_RANGE, strict=strict)
     dm = _strict_int(raw.get("deadline_ms"), "deadline_ms",
-                     f"pool '{name}'", issues, default=60000,
+                     f"pool '{name}'", issues, default=180000,
                      value_range=DEADLINE_MS_RANGE, strict=strict)
     if ma is None or dm is None:
         return None

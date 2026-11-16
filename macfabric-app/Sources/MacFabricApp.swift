@@ -2148,10 +2148,12 @@ struct PoolCard: View {
                             if cloudAnthropic(c) { Chip("anthropic", color: Color.thJudge) }
                         }
                         Spacer()
-                        // 换模型：本机 + 云端全部模型可作候选
+                        // 换模型：本机（llm/vl，裁决 2026-11-16）+ 云端可作候选
                         Menu("换") {
                             Section("本机") {
-                                ForEach(store.models, id: \.name) { m in
+                                ForEach(store.models.filter {
+                                    $0.model_type == "llm" || $0.model_type == "vl"
+                                }, id: \.name) { m in
                                     Button(m.name) {
                                         store.confirm("将候选 \(c.target ?? c.id) 替换为 \(m.name)？") {
                                             store.replacePoolCandidate(pool: name, candidateId: c.id,
@@ -2212,7 +2214,11 @@ struct PoolCard: View {
                 HStack(spacing: 8) {
                     Menu("＋ 添加候选") {
                         Section("本机") {
-                            ForEach(store.models, id: \.name) { m in
+                            // 裁决 2026-11-16：池备选只列 chat 可用模型（llm/vl）—
+                            // embedding/tts/asr 进池永远不可用，模型越多列表越长
+                            ForEach(store.models.filter {
+                                $0.model_type == "llm" || $0.model_type == "vl"
+                            }, id: \.name) { m in
                                 Button(m.name) { store.addPoolCandidate(pool: name, target: m.name, kind: "local") }
                             }
                         }

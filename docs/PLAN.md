@@ -160,7 +160,14 @@ fabric-img2img   图生图     ① mflux-schnell·编辑模式 ② seedream-edit
 | P3 能力包 | ASR/TTS/OCR/嵌入/重排/生图 预设 + 新端点全通 | 每类能力一条 curl 可验 |
 | P4 打磨 | 引导安装 dmg、Sparkle 更新、Shortcuts、文档、公证分发 | 非开发者可安装使用 |
 
-## 11. 仓库与上游
+## 11. 待立项（技术债 / 设计缺口）
+
+- [ ] 池 per-attempt TTFT 上限（2026-11-16 裁决后续立项）：当前 deadline
+  覆盖整条 failover 链且无单次尝试上限——首候选挂死会吃光全部预算，
+  failover 实际不发生。方向：per-attempt cap = min(remaining, ~120s)，
+  兼顾慢模型 TTFT 与挂死快速切换。
+
+## 12. 仓库与上游
 
 - 本仓库：GitHub `vincentlau2046/MacFabric` + GitCode 镜像（public）
 - 上游：[InferFabric](https://github.com/vincentlau2046/InferFabric)（MIT）——YAML schema 兼容，设计引用注明出处

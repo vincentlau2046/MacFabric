@@ -121,6 +121,15 @@ class TestPoolParametersStrictValidation:
         pool_raw.update(overrides)
         return {"schema_version": 1, "pools": {"fast": pool_raw}}
 
+    def test_defaults_slow_model_tolerance(self):
+        # 用户裁决 2026-11-16：国内慢模型 TTFT 60s 是链路最先放弃的一环，
+        # agent 客户端（Claude/OpenAI SDK）默认容忍 600s — 默认放宽
+        # max_attempts 2→3、deadline_ms 60000→180000
+        parsed, issues = load_pools_dict(self._cfg(), current_revision=1)
+        assert parsed is not None and not issues
+        assert parsed.pools["fast"].max_attempts == 3
+        assert parsed.pools["fast"].deadline_ms == 180000
+
     @pytest.mark.parametrize("bad", [True, 2.5, "3", 0, -1])
     def test_max_attempts_type_and_range_rejected(self, bad):
         parsed, issues = load_pools_dict(self._cfg(max_attempts=bad),
