@@ -1,30 +1,69 @@
-# QA — 能力包 UI + 卸载生产接线（PK4，2026-11-16）
+# QA — 能力包 PK4 全链路验收 + fabric- 命名硬切 + 发布上线（2026-11-16）
 
-自动化：网关侧 240/240 绿（含 T1 接线 6 项、卸载契约真实化）；App 侧 build.sh 编译门禁。
-生产网关：127.0.0.1:8999（launchd com.macfabric.gateway）。
+自动化：网关侧 **261/261 绿**（含 runtime_prep 7 项、fabric- 前缀钉住、断点续传 3 项、
+served_name 路由回归、池默认值 3/180000）；App 侧 build.sh 编译门禁（fabric- 命名 + 池
+备选 LLM/VL 过滤）。
+生产网关：127.0.0.1:8999（launchd com.macfabric.gateway），**已切发布安装**
+（tag `gateway-v7.10.6`，`~/Library/MacFabric/prod` 独立 venv，pid 见 launchctl）。
+沙箱：127.0.0.1:8998（`scripts/sandbox-gateway.sh`，隔离 state + 真配置符号链接）。
 
-## 自动化/冒烟已验证
+## Catalog
 
-- ✅ `GET /admin/packs/catalog` → 200，首批 5 项（Qwen3-4B / BGE-M3 / Whisper / Kokoro / macOS Vision）
-- ✅ `GET /admin/packs/status` / `GET/PUT /admin/packs/policy` → 200
-- ✅ `GET /admin/packs/uninstall-preview?pack_id=llm.qwen3-4b-instruct-2507` → 200（**终审 F5 闭合证据**：接线前 404）
-- ✅ 真实安装发起 → preflight 全过（参数/内存/磁盘/沙箱门禁）→ **下载阶段被网络阻断**
-  （huggingface.co 直连 reset，spec §14 已知风险）→ 阶段化错误
-  `download_error:URLError` + failed 记录保留诊断 + 磁盘零残留 — 失败路径 UX 事实
-- ✅ 503 判定：chat/messages 路径 is_model_disabled 先于鉴权/池/本地分发（单测）
-- ✅ 卸载全链路回调（stop_independent → purge_candidates → reload_models）单测钉住
+- ✅ `GET /admin/packs/catalog` → 200，**4 项**（llm.qwen3-4b-instruct-2507 /
+  embedding.bge-m3 / tts.kokoro-82m-onnx / ocr.macos-vision）——whisper 已按裁决移出
+- ✅ 3 个旧静态包（rerank / qwen3-1.7b / qwen3-vl-4b）已按裁决从页移除
 
-## 人工 GUI 取证清单（待用户执行 — open macfabric-app/build/MacFabric.app）
+## 真包安装全链路（ModelScope 源，沙箱取证）
 
-- [ ] 能力包页渲染 5 张 Catalog 卡（Qwen3-4B 与 BGE-M3 可安装；Whisper/Kokoro/OCR"待接入"置灰）
-- [ ] 安装 Qwen3-4B：卡上阶段文案流转（预检中→下载中→…），失败后显示错误 + 重试按钮
-- [ ] （网络可达时）安装成功 → "已安装" → 模型服务页出现 pack 模型 → chat 冒烟 → 卸载确认框列池 → 卸载 → 卡回未安装态
-- [ ] 卸载确认框：受影响池列表展示（空池也出确认框）
-- [ ] 设置页"能力包策略"：保存生效、非法输入出错误横幅（参数量 ≥1；保留内存 1024–65536 MiB）
+- ✅ 真实安装 llm.qwen3-4b-instruct-2507：preflight（参数/内存/磁盘/沙箱门禁）→
+  ModelScope 下载 1.5G 模型 + 17M 引擎 → sha256 校验 → **真实运行时准备**
+  （runtime_prep：tar.gz 安全解包、dylib 符号链接保真、llama-server→runtime/engine）→
+  **真实隔离健康检查**（真拉起 engine 轮询 /health）→ installed
+- ✅ 断点续传：ModelScope CDN 掐长连接导致 ~2GB 两连败 → Range 续传（6 次尝试上限，
+  HTTPError 不重试，非 206 全量重写）——3 项单测钉住
+- ✅ 安装进度实时上报（on_stage → status），进行中清除上次失败 error/stage 残留
+- ✅ 引擎版本取证：`version: 1.0.0-dev (build 12361, commit 951d465f5)`
+- ✅ 安装后沙箱 chat 直连 pack 模型 200（qwen3-4b-instruct-2507）
+
+## 路由验证矩阵（沙箱 8998，全绿）
+
+| 请求 | 结果 |
+|---|---|
+| `fabric-fast` | 200 → `pool:fast/cloud:atlaswork/glm-5` |
+| `fabric-small` | 200 → `pool:small/cloud:atlaswork/glm-5` |
+| `fabric-premium` | 200 → `pool:premium/cloud:atlaswork/gpt-6.1-sol` |
+| `iff/fast`（旧命名） | **404 Unknown model**（硬切，无别名） |
+| 无鉴权 | 401（policy=all 管线完好） |
+
+## fabric- 命名硬切 + 池默认值（用户裁决 2026-11-16）
+
+- ✅ POOL_PREFIX=`fabric-`：proxy 分发 / 安全层 pool-scopes / config 校验 / App / 
+  dashboard 全量切换；iff/ 不再路由（`test_pool_prefix_fabric.py` 钉住硬切与
+  池自引用拒绝）
+- ✅ App 池备选列表仅 LLM+VL（`model_type in {llm, vl}`，用户裁决 VL 保留）
+- ✅ 池默认 max_attempts=3 / deadline_ms=180000（validation 范围不变）；
+  三个现役池显式值同步更新（生产 yaml 取证：3× (3, 180000)）
+
+## 发布上线（生产只吃发布产物 — 用户纪律固化）
+
+- ✅ `scripts/release-install.sh gateway-v7.10.6`：GitHub codeload 归档 → 原子换目录
+  `~/Library/MacFabric/prod` → uv 独立 venv（requirements.txt 17 包）→ models.d 首次
+  迁移到 `~/.inferfabric/models.d`（5 个配置，已存在永不覆盖）→ plist 重写
+  （MACFABRIC_MODELS_DIR + prod 路径，原 plist 备份）→ bootout/bootstrap → 冒烟
+- ✅ 生产冒烟：catalog 200（4 项）/ packs status qwen installed / 无鉴权 401 /
+  进程确认 `prod/.venv/bin/python -m inferfabric.proxy.handler`
+- 回滚 = `scripts/release-install.sh <旧 tag>`；配置在 `~/.inferfabric` 不受发布影响
+
+## 人工 GUI 取证清单（待用户执行 — App 需重开载入新构建）
+
+- [ ] 模型池页：池逻辑名显示 fabric-* 前缀；添加/替换池的备选列表仅 LLM/VL 模型
+- [ ] 能力包页：4 张 Catalog 卡；qwen 卡"已安装"态
+- [ ] 设置页"能力包策略"：保存生效、非法输入出错误横幅
 - [ ] 侧栏术语未变（"能力包"）
+  （安装/卸载 GUI 流程已由 API 契约冒烟等价覆盖，真包链路沙箱已全绿）
 
 ## 已知风险 / 后续
 
-- huggingface.co 直连阻断 → 真包完整链路（下载→chat）待镜像源支持后验收（另立项）；
-  引擎 artifact（github.com）此前实测可下载（sha256 已冻结）。
-- 3 个旧静态包（rerank / qwen3-1.7b / qwen3-vl-4b）已按裁决从页移除，待下批 Catalog 冻结回归。
+- 引擎下载代理/镜像回退（github.com 直连依赖）——另立项
+- per-attempt TTFT 上限（首候选挂死吃光 deadline 的缺口）——docs/PLAN.md §11 待立项
+- 严禁全局 pkill proxy.handler（两档命令行相同）——进程操作只按精确 PID / label
