@@ -92,6 +92,10 @@ def test_install_happy_path_reaches_installed(mgr):
             break
         time.sleep(0.05)
     assert rec["status"] == "installed"
+    # 安装路径可见性（2026-11-16 用户裁决：能力包页展示预设安装位置）
+    assert rec["install_path"] == str(
+        mgr.root / "llm.qwen3-4b-instruct-2507" / rec["pack_version"])
+    assert Path(rec["install_path"]).is_dir()
     # 受控 YAML 已生成
     y = (mgr.models_d / "pack-qwen3-4b-instruct-2507-1-0-0.yaml")
     assert y.exists()

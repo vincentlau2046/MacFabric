@@ -206,6 +206,7 @@ struct PackPoolRef: Codable { var pool: String; var candidate_id: String?; var m
 struct PackStatusRec: Codable, Identifiable {
     var pack_id: String; var pack_version: String?; var status: String
     var stage: String?; var error: String?; var sandbox_degraded: Bool?
+    var install_path: String?
     var installed_at: Int?; var affected_pools: [PackPoolRef]?
     var id: String { pack_id }
 }
@@ -2769,17 +2770,53 @@ func packStageLabel(_ s: String?) -> String {
 struct PacksView: View {
     @ObservedObject var store: GatewayStore
 
+    // 能力分类（2026-11-16 用户裁决：按能力分区，拒绝平铺卡墙）；
+    // 未知类型按字典序排在末尾，空分类不显示
+    private static let capOrder = ["llm", "vl", "embedding", "rerank", "tts", "asr", "ocr", "aigc"]
+    private static let capSection: [String: String] = [
+        "llm": "对话（LLM）", "vl": "看图（VL）", "embedding": "嵌入 / 检索",
+        "rerank": "重排", "tts": "语音合成", "asr": "语音转写",
+        "ocr": "文字识别", "aigc": "生图",
+    ]
+    private var groups: [(cap: String, entries: [PackCatalogEntry])] {
+        let packs = store.packCatalog?.packs ?? []
+        var byCap: [String: [PackCatalogEntry]] = [:]
+        for p in packs { byCap[p.capability, default: []].append(p) }
+        let known = Self.capOrder.compactMap { cap -> (String, [PackCatalogEntry])? in
+            byCap[cap].map { (cap, $0) }
+        }
+        let rest = byCap.filter { Self.capSection[$0.key] == nil }
+            .sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
+        return (known + rest).map { (cap: $0.0, entries: $0.1) }
+    }
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 14) {
                 FeedbackBanner(store: store)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
-                    ForEach(store.packCatalog?.packs ?? []) { entry in
-                        PackCard(store: store, entry: entry)
+                ForEach(groups, id: \.cap) { g in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(threadColor(g.cap)).frame(width: 9, height: 9)
+                            Text(Self.capSection[g.cap] ?? g.cap)
+                                .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
+                            Text("\(g.entries.count)")
+                                .font(.system(size: 10.5, design: .monospaced)).foregroundColor(.faint)
+                        }
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
+                            ForEach(g.entries) { entry in
+                                PackCard(store: store, entry: entry)
+                            }
+                        }
                     }
                 }
-                // F4: 本机模型发现/安装（用户导入流，与 Catalog 卸载对称）
-                LocalDiscoverCard(store: store)
+                // F4: 本机模型发现/安装（用户导入流，收进折叠区不抢主视线）
+                DisclosureGroup {
+                    LocalDiscoverCard(store: store).padding(.top, 4)
+                } label: {
+                    Text("本机模型发现").font(.system(size: 12, weight: .medium)).foregroundColor(.dim)
+                }
             }
             .padding(16)
         }
@@ -2862,6 +2899,12 @@ struct PackCard: View {
                     if entry.risk_level == "verified" { Chip("已验证") }
                 }
                 Text(entry.summary).font(.system(size: 11.5)).foregroundColor(.dim).lineLimit(2)
+                // 预设安装路径（2026-11-16 用户裁决：已装包展示真实位置）
+                if installed, let ip = statusRec?.install_path {
+                    Text(ip).font(.system(size: 9.5, design: .monospaced))
+                        .foregroundColor(.faint).lineLimit(1).truncationMode(.head)
+                        .help(ip)
+                }
                 HStack {
                     Text(diskGB ?? "内置").font(.system(size: 11.5, design: .monospaced)).foregroundColor(.faint)
                     if let q = manifest.model?.quantization, diskGB != nil {
@@ -3292,21 +3335,11 @@ struct SettingsView: View {
                         Text("内存账本 — B = RAM − 保留（全局唯一公式，无第二道上限）")
                             .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
                         infoRow("物理内存", "\(ramGB) GB")
-                        // 保留内存可设置（2026-11-16）：与能力包策略同一字段
-                        // （/admin/packs/policy system_reserved_memory_mb），
-                        // 账本准入 _admit_memory 每次动态重建 → 保存即时生效
-                        HStack(spacing: 8) {
-                            Text("为系统保留（MiB）").font(.system(size: 12)).foregroundColor(.dim)
-                            Spacer()
-                            TextField("8192", text: $store.packReservedMBDraft)
-                                .textFieldStyle(.roundedBorder).frame(width: 80)
-                                .font(.system(size: 12, design: .monospaced))
-                            SmallBtn("保存", primary: true) { savePackPolicy() }
-                        }
-                        Text(store.packPolicy.map {
-                            "当前生效 \($0.system_reserved_memory_mb) MiB — 账本与安装预检共用（B = RAM − 保留）"
-                        } ?? "策略未读取 — 默认 8192 MiB")
-                            .font(.system(size: 10.5)).foregroundColor(.faint)
+                        // 保留内存只在"能力包策略"卡编辑（2026-11-16 用户裁决：
+                        // 两处入口冗余，账本卡纯展示）— 账本与安装预检共用同一值
+                        infoRow("为系统保留",
+                                store.packPolicy.map { "\($0.system_reserved_memory_mb) MiB（能力包策略中设置）" }
+                                ?? "8192 MiB（能力包策略中设置）")
                         infoRow("账本预算 B", budgetMB.map { "\($0) MB" } ?? "—（网关离线）")
                         infoRow("当前已用", usedMB.map { "\($0) MB" } ?? "—")
                     }.padding(12)
@@ -3457,6 +3490,9 @@ struct SettingsView: View {
                 }
                 Text("仅作用于能力包安装预检（对话类 LLM/VL 参数量门禁 + 内存预算），不自动重装、不自动启动。")
                     .font(.system(size: 10.5)).foregroundColor(.faint)
+                // 预设安装路径说明（2026-11-16 用户裁决：展示 + 预设说明）
+                infoRow("安装位置", "~/.inferfabric/packs/<包名>/<版本>（预设）")
+                    .padding(.top, 2)
             }.padding(12)
         }
     }

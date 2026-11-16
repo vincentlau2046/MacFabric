@@ -233,13 +233,20 @@ class PackManager:
                     packs.append({"pack_id": pack_id, "status": stage,
                                   "stage": stage, "error": None,
                                   "sandbox_degraded": False,
+                                  "install_path": None,
                                   "pack_version": "", "installed_at": None})
         return {"packs": packs}
 
     def _rec_payload(self, rec) -> dict:
+        # 安装路径可见性（2026-11-16 用户裁决）：已装包展示预设安装位置
+        # root/<pack_id>/<version>（与 installer.pack_dir_for 同一拼法）
+        install_path = None
+        if rec.status == "installed":
+            install_path = str(self.root / rec.pack_id / rec.pack_version)
         d = {"pack_id": rec.pack_id, "pack_version": rec.pack_version,
              "status": rec.status, "stage": rec.stage, "error": rec.error,
              "sandbox_degraded": rec.sandbox_degraded,
+             "install_path": install_path,
              "installed_at": rec.installed_at, "affected_pools": []}
         return d
 
