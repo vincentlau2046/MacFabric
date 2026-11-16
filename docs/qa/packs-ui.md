@@ -54,6 +54,28 @@ served_name 路由回归、池默认值 3/180000）；App 侧 build.sh 编译门
   进程确认 `prod/.venv/bin/python -m inferfabric.proxy.handler`
 - 回滚 = `scripts/release-install.sh <旧 tag>`；配置在 `~/.inferfabric` 不受发布影响
 
+## 追加：统一能力架构（2026-11-16 下午 — 用户裁决"一定是统一的"）
+
+裁决记录：docs/superpowers/specs/2026-11-16-unified-capability-architecture.md
+
+- ✅ 静态迁清：qwen3-4b（与包双份）/bge-m3/kokoro-82m/whisper-v3-turbo 四个静态
+  yaml 删除（生产配置备份 ~/.inferfabric/models.d.bak-20261116-160736，磁盘模型
+  文件保留）；迁清后 /models 只剩包模型
+- ✅ bge-m3 走包架构端到端：安装（App 发起，全阶段）→ 沙箱 /v1/embeddings 200
+  1024 维向量
+- ✅ 本地推理标注来源：/models.managed_by_pack（TDD）→ App 卡片"包:<id>"
+- ✅ 用户扩展能力包：POST /admin/packs/custom 校验链（https → 下载断点续传 →
+  sha256 可选 → GGUF 魔数 → 磁盘门禁 → 真引擎隔离试加载 → 注册）；
+  单测 11 项（含失败残留覆盖重装、sha256 不符、非 GGUF 拒绝、零残留）
+- ✅ 沙箱真包 e2e：ModelScope Qwen3-0.6B-Q8_0（639MB）→ installed →
+  chat 200（真实推理返回，usage/completion 齐全）；卸载→修正链接重装→复跑通过
+- 取证修复：自定义包复用引擎经 runtime 符号链接（rpath @loader_path 约束）；
+  manifest 缺 engine artifact 导致 binary_path 空的缺口由 e2e 发现并修复
+- 取证修复（回归钉住 test_packs_wiring）：get_pack_manager 生产单例从未接线
+  reload_gateway → 装包后 _reload() 静默空转、/models 无新模型（Unknown model）
+  → attach_pack_uninstaller 启动装配点注入 set_reload_gateway（安装链与卸载链
+  同源 pm.mgr.reload_models）；测试 277/277 绿
+
 ## 追加：v7.10.7 — 保留内存用户可设置 + App 安装版更新（2026-11-16）
 
 - ✅ 网关 `budget_mb()`：env（显式覆盖）> 设置页 policy.json system_reserved_memory_mb

@@ -222,6 +222,17 @@ class PackManager:
         if self._reload_gateway is not None:
             self._reload_gateway()
 
+    def set_reload_gateway(self, fn) -> None:
+        """网关装配时注入安装路径热加载回调。
+
+        get_pack_manager 单例创建时不知网关回调（构造参数无从传入），
+        必须由 attach_pack_uninstaller 在启动装配点注入 — 回归钉住
+        2026-11-16 沙箱 e2e：单例从未接线 → 装包后 /models 无新模型。
+        installer 持有独立引用，需同步更新。
+        """
+        self._reload_gateway = fn
+        self.installer.reload_gateway = fn
+
     # ── 查询 ──
 
     def catalog_payload(self) -> dict:
@@ -565,6 +576,8 @@ def attach_pack_uninstaller(pm) -> None:
     同时挂 pm.pack_manager 供请求路径 503 检查（is_model_disabled）。
     """
     mgr = get_pack_manager()
+    # 安装路径热加载同源注入（卸载链已有 reload_fn；安装链此前静默空转）
+    mgr.set_reload_gateway(lambda: pm.mgr.reload_models())
 
     def stop_pack(name: str) -> None:
         try:

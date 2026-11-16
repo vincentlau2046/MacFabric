@@ -84,8 +84,9 @@ def pack_manager(tmp_path, monkeypatch):
     reset_pack_manager()
     mgr = PackManager(root=tmp_path / "packs",
                       models_d=tmp_path / "models.d",
-                      catalog_path=_catalog(tmp_path),
-                      reload_gateway=lambda: None)
+                      catalog_path=_catalog(tmp_path))
+    # 生产单例经 get_pack_manager() 创建时无 reload_gateway（未知网关回调）；
+    # 安装路径的热加载只能靠 attach_pack_uninstaller 装配注入 — 不在此预置。
     monkeypatch.setattr(pack_handlers, "_manager", mgr)   # 单例指向测试实例
     yield mgr
     reset_pack_manager()
@@ -118,6 +119,18 @@ def test_attach_wires_real_callbacks_and_mounts_pm(pack_manager):
     attach_pack_uninstaller(pm)
     assert pm.pack_manager is pack_manager
     assert pack_manager._uninstaller is not None
+
+
+def test_attach_wires_install_path_reload_gateway(pack_manager):
+    # 回归钉住 2026-11-16 沙箱 e2e 缺口：get_pack_manager 单例从未接线
+    # reload_gateway → 装包后 _reload() 静默空转 → /models 无新模型
+    # （Unknown model）。装配必须把 pm.mgr.reload_models 注入安装路径。
+    pm = FakePM()
+    attach_pack_uninstaller(pm)
+    assert pm.pack_manager._reload_gateway is not None
+    before = pm.mgr.reloaded
+    pm.pack_manager._reload()
+    assert pm.mgr.reloaded == before + 1
 
 
 def test_uninstall_full_flow_hits_production_callbacks(pack_manager, tmp_path):
