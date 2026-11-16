@@ -114,20 +114,23 @@ def make_manager(tmp_path):
         root=tmp_path / "packs", models_d=tmp_path / "models.d",
         catalog_path=cat, fetcher=LocalFetcher(files),
         reload_gateway=lambda: reloaded.append(1))
-    # 池注册表（fake registry：真实 PoolRegistry 由网关集成层装配）
+    # 池注册表（fake：真实 PoolRegistry 契约 raw_config — PK4 生产冒烟回归）
     class FakeRegistry:
         def __init__(self):
-            self.candidates = [{"pool": "fast", "raw": {
-                "id": "c1", "kind": "local", "model_name": MODEL_ID}}]
+            self.raw = {"pools": {"fast": {"candidates": [{
+                "id": "c1", "kind": "local", "model_name": MODEL_ID}]}}}
 
-        def iter_candidates(self):
-            return iter([(c["pool"], c["raw"]) for c in self.candidates])
+        def raw_config(self):
+            return self.raw
 
         def purge_candidates(self, predicate):
-            hit = [c for c in self.candidates if predicate(c["raw"])]
-            self.candidates = [c for c in self.candidates
-                               if not predicate(c["raw"])]
-            return len(hit), 2
+            removed = 0
+            for p in (self.raw.get("pools") or {}).values():
+                cands = p.get("candidates") or []
+                kept = [c for c in cands if not predicate(c)]
+                removed += len(cands) - len(kept)
+                p["candidates"] = kept
+            return removed, 2
 
     mgr.attach_uninstaller(
         registry=FakeRegistry(),

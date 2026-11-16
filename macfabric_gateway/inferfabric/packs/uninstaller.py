@@ -37,7 +37,7 @@ class PackUninstaller:
         self._supervisor = supervisor or PackSupervisor(
             drain_timeout_s=DRAIN_TIMEOUT_S)
         self._manifest_for = manifest_for or (lambda pid: None)
-        self._registry = registry    # 需 iter_candidates/purge_candidates
+        self._registry = registry    # 需 raw_config/purge_candidates（真实契约）
         self._disable_route_fn = disable_route_fn or _noop
         self._stop_pack_fn = stop_pack_fn or _noop
         self._is_alive_fn = is_alive_fn or (lambda: False)
@@ -55,11 +55,27 @@ class PackUninstaller:
 
     # ── 池影响查询 ──
 
+    def _iter_candidates(self):
+        """枚举 (pool, candidate_raw)。真实 PoolRegistry 契约：raw_config()
+        返回 pools YAML dict（pools→candidates 列表）— 生产冒烟回归（PK4）：
+        registry 并无 iter_candidates，测试 fake 曾假设了不存在的接口。"""
+        try:
+            raw = self._registry.raw_config()
+        except AttributeError:
+            return
+        if isinstance(raw, dict):
+            for pool, p in (raw.get("pools") or {}).items():
+                if not isinstance(p, dict):
+                    continue
+                for c in (p.get("candidates") or []):
+                    if isinstance(c, dict):
+                        yield pool, c
+
     def _affected_pools(self, model_names: set[str]) -> list[dict]:
         if self._registry is None:
             return []
         rows = []
-        for pool, raw in self._registry.iter_candidates():
+        for pool, raw in self._iter_candidates():
             if raw.get("kind") == "local" and \
                     raw.get("model_name") in model_names:
                 rows.append({"pool": pool,

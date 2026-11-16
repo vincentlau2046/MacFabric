@@ -49,19 +49,22 @@ class FakeMgr:
 
 
 class FakeRegistry:
+    # 真实 PoolRegistry 契约：raw_config()（PK4 生产冒烟回归）
     def __init__(self):
-        self.candidates = [{"pool": "fast", "raw": {
-            "id": "c1", "kind": "local", "model_name": MODEL_ID}}]
+        self.raw = {"pools": {"fast": {"candidates": [{
+            "id": "c1", "kind": "local", "model_name": MODEL_ID}]}}}
 
-    def iter_candidates(self):
-        for c in self.candidates:
-            yield c["pool"], c["raw"]
+    def raw_config(self):
+        return self.raw
 
     def purge_candidates(self, predicate):
-        hit = [c for c in self.candidates if predicate(c["raw"])]
-        self.candidates = [c for c in self.candidates
-                           if not predicate(c["raw"])]
-        return len(hit), 2
+        removed = 0
+        for p in (self.raw.get("pools") or {}).values():
+            cands = p.get("candidates") or []
+            kept = [c for c in cands if not predicate(c)]
+            removed += len(cands) - len(kept)
+            p["candidates"] = kept
+        return removed, 2
 
 
 class FakePM:
@@ -133,7 +136,7 @@ def test_uninstall_full_flow_hits_production_callbacks(pack_manager, tmp_path):
     # stop 以模型名（served name）为对象 → lifecycle stop_independent 命中
     assert pm.mgr.stopped_independent == [MODEL_ID]
     assert pm.mgr.reloaded >= 1
-    assert pm.pool_registry.candidates == []          # 池候选已清除
+    assert pm.pool_registry.raw == {"pools": {"fast": {"candidates": []}}}
     assert not pack_dir.exists()                      # 零残留
 
 

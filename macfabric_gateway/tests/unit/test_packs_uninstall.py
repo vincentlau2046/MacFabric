@@ -57,19 +57,22 @@ def env(tmp_path):
                          sandbox_degraded=False, installed_at=1))
 
     class FakeRegistry:
+        # 真实 PoolRegistry 契约：raw_config()（PK4 生产冒烟回归）
         def __init__(self):
-            self.candidates = [{"pool": "fast", "raw": {
-                "id": "c1", "kind": "local", "model_name": MODEL_ID}}]
+            self.raw = {"pools": {"fast": {"candidates": [{
+                "id": "c1", "kind": "local", "model_name": MODEL_ID}]}}}
+
+        def raw_config(self):
+            return self.raw
 
         def purge_candidates(self, predicate):
-            hit = [c for c in self.candidates if predicate(c["raw"])]
-            self.candidates = [c for c in self.candidates
-                               if not predicate(c["raw"])]
-            return len(hit), 2
-
-        def iter_candidates(self):
-            for c in self.candidates:
-                yield c["pool"], c["raw"]
+            hit = removed = 0
+            for p in (self.raw.get("pools") or {}).values():
+                cands = p.get("candidates") or []
+                kept = [c for c in cands if not predicate(c)]
+                removed += len(cands) - len(kept)
+                p["candidates"] = kept
+            return removed, 2
 
     events = []
 
@@ -128,7 +131,7 @@ def test_uninstall_without_confirm_409_with_pools(env):
 def test_uninstall_without_pools_needs_no_confirm(env, tmp_path=None):
     uni, events, root, models_d, store = env
     empty = type(uni._registry)()
-    empty.candidates = []   # 空池：无池引用 → 无需确认
+    empty.raw = {"pools": {"fast": {"candidates": []}}}   # 空池：无池引用 → 无需确认
     uni._registry = empty
     code, payload = uni.uninstall(PID)
     assert code == 200 and payload["status"] == "removed"
