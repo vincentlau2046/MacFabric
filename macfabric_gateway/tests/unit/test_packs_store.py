@@ -92,3 +92,15 @@ def test_reconcile_staging_dir_ignored(tmp_path):
     st = PackStore(tmp_path / "state.json")
     (tmp_path / "packs" / "_staging" / "llm.x").mkdir(parents=True)
     assert reconcile(st, tmp_path / "packs") == []
+
+
+def test_reconcile_unknown_origin_error_actionable(tmp_path):
+    # 终审 deferred #3：unknown_origin 保留供诊断（spec §7.3），错误信息可行动
+    root = tmp_path / "packs"
+    (root / "llm.mystery" / "1.0.0").mkdir(parents=True)
+    store = PackStore(tmp_path / "state.json")
+    fixed = reconcile(store, root)
+    assert fixed == ["llm.mystery"]
+    rec = store.get("llm.mystery")
+    assert rec is not None and rec.status == "failed"
+    assert "uninstall" in rec.error   # 指引清理路径

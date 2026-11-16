@@ -274,3 +274,33 @@ def test_builtin_entry_skips_download(tmp_path):
     res = inst.install(entry)
     assert res.ok and res.stage == "installed"
     assert fetcher_calls == []
+
+
+def test_preflight_rejects_unimplemented_template(tmp_path):
+    # 终审 deferred #5：未实现模板 preflight 即拒（早于下载，分阶段错误）
+    inst, entry = make_installer(tmp_path)
+    d = entry.manifest.to_dict()
+    d["execution"]["model_config_template"] = "asr_server_v1"
+    bad = CatalogEntry(manifest=parse_manifest(d), display_name="T",
+                       summary="s", tags=(), risk_level="verified",
+                       builtin=False)
+
+    class NoFetch:
+        def fetch(self, artifact, dest):
+            raise AssertionError("must not download before preflight")
+
+    inst._fetcher = NoFetch()
+    res = inst.install(bad)
+    assert not res.ok and res.stage == "preflight"
+    assert "asr_server_v1" in res.error
+
+
+def test_preflight_delegates_param_gate(tmp_path, monkeypatch):
+    # 终审 deferred #7：预检参数门禁复用 policy.check_param_gate（单一事实源）
+    from inferfabric.packs import policy as policy_mod
+    inst, entry = make_installer(tmp_path)
+    monkeypatch.setattr(policy_mod, "check_param_gate",
+                        lambda m, p: "injected_violation")
+    res = inst.install(entry)
+    assert not res.ok and res.stage == "preflight"
+    assert "injected_violation" in res.error

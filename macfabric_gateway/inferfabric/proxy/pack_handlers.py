@@ -43,20 +43,48 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-class HttpArtifactFetcher:
-    """生产 fetcher：HTTPS 流式下载到 dest（调用方保证 dest 为 .part）。"""
+DEFAULT_MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024 * 1024   # 32 GiB 硬上限
 
-    def __init__(self, chunk=1024 * 1024):
+
+class _NoDowngradeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """拒绝 https→http 降级重定向（deferred #6b）。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        origin = str(getattr(req, "full_url", "") or "")
+        if origin.startswith("https://") and \
+                not str(newurl).startswith("https://"):
+            raise urllib.error.URLError(
+                f"refusing https->http redirect: {newurl}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class HttpArtifactFetcher:
+    """生产 fetcher：HTTPS 流式下载到 dest（调用方保证 dest 为 .part）。
+
+    尺寸硬上限防超预检 disk_mb 耗尽磁盘（deferred #6a）；Catalog-only 下
+    URL/hash 后端冻结，完整性由下载后 sha256 校验兜底。
+    """
+
+    def __init__(self, chunk=1024 * 1024,
+                 max_bytes=DEFAULT_MAX_DOWNLOAD_BYTES):
         self._chunk = chunk
+        self._max_bytes = max_bytes
+        self._opener = urllib.request.build_opener(
+            _NoDowngradeRedirectHandler())
 
     def fetch(self, artifact, dest) -> None:
         req = urllib.request.Request(artifact.source, method="GET")
-        with urllib.request.urlopen(req, timeout=60) as resp, \
+        written = 0
+        with self._opener.open(req, timeout=60) as resp, \
                 open(dest, "wb") as f:
             while True:
                 chunk = resp.read(self._chunk)
                 if not chunk:
                     break
+                written += len(chunk)
+                if written > self._max_bytes:
+                    raise ValueError(
+                        f"download exceeds limit {self._max_bytes} bytes")
                 f.write(chunk)
 
 
@@ -116,7 +144,13 @@ class PackManager:
         return code, payload
 
     def is_model_disabled(self, model_name: str) -> bool:
-        """包卸载中/已完成的路由禁用查询 — 新请求 503 的判定依据。"""
+        """包卸载中/已完成的路由禁用查询 — 新请求 503 的判定依据。
+
+        已接线 uninstaller 时委托之（单一事实源，deferred #2b）；
+        未接线时退回本门面集合。
+        """
+        if self._uninstaller is not None:
+            return self._uninstaller.is_route_disabled(model_name)
         return model_name in self._disabled_models
 
     # ── 钩子 ──

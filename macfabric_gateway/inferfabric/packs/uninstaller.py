@@ -99,15 +99,17 @@ class PackUninstaller:
                 is_alive_fn=alive_fn, pgid_fn=self._pgid_fn)
             if res.forced_kill is False and not res.stopped and self._pgid_fn:
                 # supervisor 无 PGID 不盲杀；本层持有组 ID 时兜底强杀
-                if self._force_kill is not None:
-                    self._force_kill(self._pgid_fn())
-                else:
-                    import os
-                    import signal
-                    try:
-                        os.killpg(self._pgid_fn(), signal.SIGKILL)
-                    except OSError:
-                        pass
+                pgid = self._pgid_fn()
+                if pgid is not None:   # pgid_fn 可能动态返回 None（deferred #2a）
+                    if self._force_kill is not None:
+                        self._force_kill(pgid)
+                    else:
+                        import os
+                        import signal
+                        try:
+                            os.killpg(pgid, signal.SIGKILL)
+                        except OSError:
+                            pass
 
         # removing_generated_config（按 managed_by_pack 定位受控 YAML）
         self._remove_managed_yamls(pack_id)
@@ -121,8 +123,11 @@ class PackUninstaller:
         # deleting_pack_directory（包自有全部版本；零残留连父目录）
         shutil.rmtree(self.root / pack_id, ignore_errors=True)
 
-        # 状态移除 + gateway_reload
+        # 状态移除 + gateway_reload；卸载完成解除路由禁用（禁用只覆盖
+        # 卸载在途窗口 — 禁用集单一事实源在本层，deferred #2b）
         self._store.remove(pack_id)
+        with self._lock:
+            self._disabled -= model_names
         self._reload_fn()
         return 200, {"pack_id": pack_id, "status": "removed",
                      "affected_pools": affected}

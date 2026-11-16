@@ -90,7 +90,9 @@ def reconcile(store: PackStore, root) -> list[str]:
     for name in sorted(on_disk - recorded):
         store.set(PackRecord(pack_id=name, pack_version="0.0.0",
                              status="failed", stage="reconcile",
-                             error="unknown_origin: pack directory without record",
+                             error="unknown_origin: pack directory without "
+                                   "record (kept for diagnosis per spec "
+                                   "§7.3; remove via uninstall)",
                              sandbox_degraded=False, installed_at=None))
         fixed.append(name)
     return fixed

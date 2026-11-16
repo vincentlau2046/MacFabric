@@ -22,6 +22,10 @@ CAPABILITY_TO_MODEL_TYPE = {
     "embedding": "embedding", "rerank": "rerank", "ocr": "ocr",
 }
 
+# 已实现模板注册表（单一事实源）：installer 预检据此提前拒绝未实现模板，
+# 避免下载数 GB 后才在 writing_config 失败（deferred #5）。
+KNOWN_TEMPLATES = frozenset({"llama_cpp_chat_v1"})
+
 
 class ConfigExistsError(ValueError):
     pass

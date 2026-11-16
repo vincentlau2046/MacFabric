@@ -184,3 +184,57 @@ def test_singleton_defaults_from_env(tmp_path, monkeypatch):
     assert pmgr.root == tmp_path / "state" / "packs"
     assert pmgr.models_d == tmp_path / "models.d"
     pack_handlers.reset_pack_manager()
+
+
+def test_is_model_disabled_delegates_to_uninstaller(mgr):
+    # 终审 deferred #2b：禁用查询统一委托 uninstaller（单一事实源）
+    class FakeUni:
+        def __init__(self):
+            self.disabled = set()
+
+        def is_route_disabled(self, name):
+            return name in self.disabled
+
+    fake = FakeUni()
+    mgr._uninstaller = fake
+    fake.disabled.add("m1")
+    assert mgr.is_model_disabled("m1") is True
+    assert mgr.is_model_disabled("m2") is False
+
+
+def test_fetcher_enforces_size_limit(tmp_path):
+    # 终审 deferred #6a：下载超尺寸上限 → 拒绝（防绕过 disk_mb 预检）
+    from types import SimpleNamespace
+    from inferfabric.proxy.pack_handlers import HttpArtifactFetcher
+
+    class FakeResp:
+        def __init__(self):
+            self.left = [b"x" * 5, b"x" * 5]
+
+        def read(self, n):
+            return self.left.pop(0) if self.left else b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    f = HttpArtifactFetcher(max_bytes=8)
+    f._opener = SimpleNamespace(open=lambda req, timeout=None: FakeResp())
+    with pytest.raises(ValueError):
+        f.fetch(SimpleNamespace(source="https://x/m.gguf"), tmp_path / "m.part")
+
+
+def test_fetcher_redirect_https_downgrade_refused():
+    # 终审 deferred #6b：https→http 降级重定向拒绝
+    import urllib.error
+    import urllib.request
+    from inferfabric.proxy.pack_handlers import _NoDowngradeRedirectHandler
+
+    h = _NoDowngradeRedirectHandler()
+    req = urllib.request.Request("https://a/x")
+    with pytest.raises(urllib.error.URLError):
+        h.redirect_request(req, None, 302, "found", {}, "http://b/x")
+    assert h.redirect_request(req, None, 302, "found", {}, "https://b/x") \
+        is not None

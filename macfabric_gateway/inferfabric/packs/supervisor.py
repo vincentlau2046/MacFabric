@@ -65,10 +65,19 @@ class PackSupervisor:
         if pgid_fn is None:
             return DrainResult(stopped=False, forced_kill=False,
                                elapsed_s=elapsed)
+        pgid = pgid_fn()
+        if pgid is None:
+            # pgid_fn 动态返回 None（进程已无组可查）→ 同"无 PGID 不盲杀"
+            return DrainResult(stopped=False, forced_kill=False,
+                               elapsed_s=elapsed)
         try:
-            os.killpg(pgid_fn(), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
             pass  # 组已不存在 → 视为终止
+        except OSError:
+            # EPERM 等：强杀未生效，不得谎报 stopped（终审 deferred #1）
+            return DrainResult(stopped=False, forced_kill=True,
+                               elapsed_s=elapsed)
         return DrainResult(stopped=True, forced_kill=True, elapsed_s=elapsed)
 
     def mark_crashed(self, pack_id: str, reason: str) -> None:

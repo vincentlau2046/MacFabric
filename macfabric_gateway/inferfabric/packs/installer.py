@@ -27,6 +27,9 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from inferfabric.packs import policy as pack_policy_mod
+from inferfabric.packs.config_gen import KNOWN_TEMPLATES
+
 INSTALL_STAGES = ("preflight", "staging", "downloading", "verifying",
                   "preparing_runtime", "writing_config",
                   "isolated_healthcheck", "gateway_reload", "installed")
@@ -104,10 +107,14 @@ class PackInstaller:
         manifest = entry.manifest
         self._root.mkdir(parents=True, exist_ok=True)
         policy = self._policy.load()
-        if manifest.capability in ("llm", "vl") and \
-                manifest.parameter_count_b > policy.max_model_parameters_b:
-            return False, (f"parameter_count_b {manifest.parameter_count_b} > "
-                           f"max {policy.max_model_parameters_b}"), False
+        # 参数门禁复用 policy.check_param_gate（单一事实源，deferred #7）
+        param_err = pack_policy_mod.check_param_gate(manifest, policy)
+        if param_err:
+            return False, param_err, False
+        # 运行时模板门禁：未实现模板 preflight 即拒，早于下载（deferred #5）
+        if manifest.model_config_template not in KNOWN_TEMPLATES:
+            return False, (f"model_config_template_not_implemented:"
+                           f"{manifest.model_config_template}"), False
         # 内存预算门禁（spec §7.1/§9）：可用内存 - 系统保留 < 峰值 → 拒绝
         if self._memory_available_mb is not None:
             avail = self._memory_available_mb()

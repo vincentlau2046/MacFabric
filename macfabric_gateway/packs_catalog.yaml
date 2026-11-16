@@ -2,8 +2,11 @@
 # 首批冻结 5 项（2026-11-15 裁决）：Qwen3-4B-Instruct-2507（首个完整试点）、
 # BGE-M3、Whisper large-v3-turbo、Kokoro ONNX、macOS Vision。
 # Gemma 许可证复核前不得进入本目录。
-# sha256 占位 000...0（TBD-HASH）— Task 12 冻结真实下载源与 hash 后替换。
-# 本目录随应用发布；能力包安装只接受此处 pack_id，URL/hash 由后端提供。
+# sha256 均为 2026-11-15 冻结的真实值：模型取自 HF LFS x-linked-etag，
+# 引擎为本机下载实测（见各行尾注）。本目录随应用发布；能力包安装只接受
+# 此处 pack_id，URL/hash 由后端提供。
+# 注意：whisper/kokoro 的 asr_server_v1/tts_server_v1 运行时模板属 PK5
+# 批次，未实现前安装会在 preflight 被拒（model_config_template_not_implemented）。
 packs:
   - pack_id: llm.qwen3-4b-instruct-2507
     display_name: Qwen3-4B Instruct (2507)

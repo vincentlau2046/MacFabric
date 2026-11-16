@@ -97,3 +97,33 @@ def test_crash_marks_degraded_only_this_pack(tmp_path):
     assert st.get("llm.a").status == "degraded"
     assert "exit_code_137" in st.get("llm.a").error
     assert st.get("llm.b").status == "installed"   # 不污染其他包
+
+
+def test_drain_timeout_killpg_eperm_honest(monkeypatch):
+    # 终审 deferred #1：killpg EPERM 等失败不得谎报 stopped=True
+    from inferfabric.packs import supervisor as sup
+
+    def fake_killpg(pg, sig):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(sup.os, "killpg", fake_killpg)
+    s = PackSupervisor(drain_timeout_s=0.05, poll_interval_s=0.01)
+    res = s.drain_and_stop("p", stop_fn=lambda: None,
+                           is_alive_fn=lambda: True, pgid_fn=lambda: 999)
+    assert res.stopped is False
+    assert res.forced_kill is True
+
+
+def test_drain_timeout_killpg_group_gone_is_stopped(monkeypatch):
+    # 组已不存在（ESRCH）→ 视为终止，仍报 stopped
+    from inferfabric.packs import supervisor as sup
+
+    def fake_killpg(pg, sig):
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(sup.os, "killpg", fake_killpg)
+    s = PackSupervisor(drain_timeout_s=0.05, poll_interval_s=0.01)
+    res = s.drain_and_stop("p", stop_fn=lambda: None,
+                           is_alive_fn=lambda: True, pgid_fn=lambda: 999)
+    assert res.stopped is True
+    assert res.forced_kill is True

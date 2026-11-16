@@ -178,3 +178,21 @@ def test_uninstall_drain_timeout_force_kills(env, monkeypatch):
 def test_route_registration_uninstall_preview():
     from inferfabric.proxy.handler import _GET_ROUTES
     assert "/admin/packs/uninstall-preview" in _GET_ROUTES
+
+
+def test_uninstall_fallback_kill_tolerates_pgid_none(env):
+    # 终审 deferred #2a：pgid_fn 返回 None 时兜底强杀不得 TypeError 中断卸载
+    uni, events, root, models_d, store = env
+    uni._pgid_fn = lambda: None
+    uni._is_alive_fn = lambda: True   # 永不停止 → drain 超时走兜底分支
+    code, payload = uni.uninstall(PID, confirmed=True)
+    assert code == 200 and payload["status"] == "removed"
+    assert not (root / PID).exists()
+
+
+def test_disabled_cleared_after_uninstall(env):
+    # 终审 deferred #2b：禁用集生命周期归一 — 卸载完成即解除
+    uni, events, root, models_d, store = env
+    code, _ = uni.uninstall(PID, confirmed=True)
+    assert code == 200
+    assert uni.is_route_disabled(MODEL_ID) is False
