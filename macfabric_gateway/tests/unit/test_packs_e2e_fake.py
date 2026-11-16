@@ -133,7 +133,7 @@ def make_manager(tmp_path):
         registry=FakeRegistry(),
         disable_route_fn=lambda name: None,
         stop_pack_fn=lambda name: None,   # 健康检查已收割；生产走 lifecycle
-        is_alive_fn=lambda: False,
+        is_alive_fn=lambda names: False,
         pgid_fn=None)
     return mgr, reloaded
 

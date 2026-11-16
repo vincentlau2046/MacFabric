@@ -202,6 +202,15 @@ def handle_chat(handler, pm, data):
     if not model:
         handler._send_json({"error": "model field is required", "status": "bad_request"}, 400)
         return
+
+    # PK4 T1: 能力包卸载在途 → 503 pack_uninstalling（先于鉴权/池/本地分发；
+    # disable 先于删除是卸载状态机顺序，此处是新请求 503 的判定点）
+    _pack_pm = getattr(pm, "pack_manager", None)
+    if _pack_pm is not None and _pack_pm.is_model_disabled(model):
+        handler._send_json(
+            {"error": "pack_uninstalling", "status": "pack_uninstalling"}, 503)
+        return
+
     log.debug("Incoming request: model=%s", model)
 
     # PR-B: Request context for logging

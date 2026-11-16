@@ -89,14 +89,15 @@ class PackUninstaller:
         for name in model_names:
             self._disable_route_fn(name)
 
-        # draining + stopping_process_group（stop 以模型名为对象 — 生产侧
-        # 由注入回调映射到受控 ModelConfig；与 disable 同一命名空间）
+        # draining + stopping_process_group（stop/is_alive 均以模型名为对象 —
+        # 生产侧由注入回调映射到受控 ModelConfig；与 disable 同一命名空间）
         alive_fn = self._is_alive_fn
-        if alive_fn():
+        if alive_fn(model_names):
             res = self._supervisor.drain_and_stop(
                 pack_id,
                 stop_fn=lambda: [self._stop_pack_fn(n) for n in model_names],
-                is_alive_fn=alive_fn, pgid_fn=self._pgid_fn)
+                is_alive_fn=lambda: alive_fn(model_names),
+                pgid_fn=self._pgid_fn)
             if res.forced_kill is False and not res.stopped and self._pgid_fn:
                 # supervisor 无 PGID 不盲杀；本层持有组 ID 时兜底强杀
                 pgid = self._pgid_fn()

@@ -617,6 +617,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         original_model = data.get("model", "")
         auth_header = self.headers.get("Authorization", "") or self.headers.get("x-api-key", "")
 
+        # PK4 T1: 能力包卸载在途 → 503 pack_uninstalling（先于鉴权/池/本地分发）
+        _pack_pm = getattr(pm, "pack_manager", None)
+        if _pack_pm is not None and original_model and \
+                _pack_pm.is_model_disabled(original_model):
+            self._send_json(
+                {"error": "pack_uninstalling",
+                 "status": "pack_uninstalling"}, 503)
+            return
+
         # PR-B: Request context for logging
         req_id = pm.new_request_id()
         req_start = time.monotonic()
@@ -3432,6 +3441,13 @@ def main():
 
     server = _create_server()
     server.proxy_mgr = mgr
+    # PK4 T1: 能力包卸载生产接线（真实回调注入 + pm.pack_manager 挂载）
+    from inferfabric.proxy.pack_handlers import attach_pack_uninstaller
+    try:
+        attach_pack_uninstaller(mgr)
+    except Exception as exc:   # 接线失败不阻断网关启动，卸载 API 将诚实 404
+        logging.getLogger("inferfabric.packs").warning(
+            "pack uninstaller attach failed: %s", exc)
     server.watchdog = watchdog
 
     # MACFABRIC: autostart 模型开机拉起（用户裁决默认 False —— 不自动启动）。

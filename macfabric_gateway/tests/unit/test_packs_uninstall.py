@@ -87,7 +87,7 @@ def env(tmp_path):
         disable_route_fn=lambda name: events.append(("disable", name)),
         stop_pack_fn=lambda name: events.append(("stop", name)) or
         live.__setitem__("alive", False) or None,
-        is_alive_fn=lambda: live["alive"],
+        is_alive_fn=lambda names: live["alive"],
         pgid_fn=lambda: 424242,
         reload_fn=lambda: events.append(("reload", None)))
     return uni, events, root, models_d, store
@@ -169,7 +169,7 @@ def test_uninstall_drain_timeout_force_kills(env, monkeypatch):
     monkeypatch.setattr("inferfabric.packs.supervisor.os.killpg",
                         lambda pg, sig: killed.append(pg))
     uni._stop_pack_fn = lambda name: None
-    uni._is_alive_fn = lambda: True
+    uni._is_alive_fn = lambda names: True
     code, payload = uni.uninstall(PID, confirmed=True)
     assert killed == [424242]
     assert code == 200
@@ -184,7 +184,7 @@ def test_uninstall_fallback_kill_tolerates_pgid_none(env):
     # 终审 deferred #2a：pgid_fn 返回 None 时兜底强杀不得 TypeError 中断卸载
     uni, events, root, models_d, store = env
     uni._pgid_fn = lambda: None
-    uni._is_alive_fn = lambda: True   # 永不停止 → drain 超时走兜底分支
+    uni._is_alive_fn = lambda names: True   # 永不停止 → drain 超时走兜底分支
     code, payload = uni.uninstall(PID, confirmed=True)
     assert code == 200 and payload["status"] == "removed"
     assert not (root / PID).exists()

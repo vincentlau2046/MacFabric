@@ -286,6 +286,40 @@ class PackManager:
                      "system_reserved_memory_mb": p.system_reserved_memory_mb}
 
 
+def attach_pack_uninstaller(pm) -> None:
+    """生产接线（PK4 T1，闭合终审 F5）：网关启动时注入真实回调。
+
+    - registry: pm.pool_registry（iter_candidates/purge_candidates 现有契约）
+    - stop_pack_fn: 模型名 → 先 stop_independent 后 stop_service
+    - is_alive_fn(names): 与 pm.mgr.status()["active_services"] 求交集；
+      status 异常吞掉返回 False（诚实降级：宁可不 drain，不可谎报）
+    - pgid_fn: None — 生产未建 pgid 追踪，drain-only，绝不盲杀
+    - reload_fn: pm.mgr.reload_models()
+    同时挂 pm.pack_manager 供请求路径 503 检查（is_model_disabled）。
+    """
+    mgr = get_pack_manager()
+
+    def stop_pack(name: str) -> None:
+        try:
+            pm.mgr.stop_independent(name)
+        except Exception:
+            pm.mgr.stop_service(name)
+
+    def is_alive(names) -> bool:
+        try:
+            active = set(pm.mgr.status().get("active_services", []))
+        except Exception:
+            return False
+        return bool(active & set(names))
+
+    mgr.attach_uninstaller(
+        registry=getattr(pm, "pool_registry", None),
+        disable_route_fn=lambda name: None,   # 禁用状态在 PackManager 禁用集
+        stop_pack_fn=stop_pack, is_alive_fn=is_alive,
+        pgid_fn=None, reload_fn=lambda: pm.mgr.reload_models())
+    pm.pack_manager = mgr
+
+
 def reconcile_on_boot(store: PackStore, root) -> list[str]:
     from inferfabric.packs.store import reconcile
     fixed = reconcile(store, root)
