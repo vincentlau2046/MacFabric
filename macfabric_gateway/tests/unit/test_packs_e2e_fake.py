@@ -113,7 +113,9 @@ def make_manager(tmp_path):
     mgr = PackManager(
         root=tmp_path / "packs", models_d=tmp_path / "models.d",
         catalog_path=cat, fetcher=LocalFetcher(files),
-        reload_gateway=lambda: reloaded.append(1))
+        reload_gateway=lambda: reloaded.append(1),
+        prepare_runtime=lambda pd, m: None,   # fake 引擎是现成脚本，无需解包
+        run_healthcheck=healthcheck)          # 下方 isolated_healthcheck
     # 池注册表（fake：真实 PoolRegistry 契约 raw_config — PK4 生产冒烟回归）
     class FakeRegistry:
         def __init__(self):

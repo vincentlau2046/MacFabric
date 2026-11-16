@@ -62,7 +62,9 @@ def mgr(tmp_path):
     pmgr = pack_handlers.PackManager(
         root=tmp_path / "packs", models_d=tmp_path / "models.d",
         catalog_path=cat_path, fetcher=SlowFetcher(files),
-        reload_gateway=lambda: None)
+        reload_gateway=lambda: None,
+        prepare_runtime=lambda pd, m: None,       # 单测不发真进程
+        run_healthcheck=lambda pd, m: None)
     return pmgr
 
 

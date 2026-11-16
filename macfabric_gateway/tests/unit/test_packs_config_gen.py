@@ -105,3 +105,40 @@ def test_unknown_template_rejected():
     import pytest as _pytest
     with _pytest.raises(ValueError):
         build_model_config(parse_manifest(d), PACK_DIR, port=1)
+
+
+def test_pack_model_served_name_routes_by_model_id(tmp_path):
+    # 生产取证（2026-11-16 沙箱）：chat qwen3-4b-instruct-2507 → 404
+    # unknown_model — ModelConfig.served_name 对 llama_cpp 返回长配置名
+    # （pack-…-1-0-0），顶层 served_name 键是装饰性的，--alias 只规范引擎
+    # 回显不参与路由。契约：生成的受控 YAML 经 load_models 反序列化后，
+    # served_name 必须 == manifest.model_id（proxy 路由名）。
+    import yaml as yaml_mod
+    from inferfabric.config import load_models
+    from inferfabric.packs.config_gen import (
+        build_model_config, managed_yaml_path, write_managed_yaml)
+
+    manifest = MANIFEST   # 模块级合法 manifest
+    cfg = build_model_config(manifest, tmp_path / "pack" / "1.0.0", 58401)
+    write_managed_yaml(cfg, tmp_path / "models.d", manifest)
+    y = managed_yaml_path(tmp_path / "models.d", manifest)
+    d = yaml_mod.safe_load(y.read_text())
+    assert d["llama_cpp"]["served_name"] == manifest.model_id
+
+    models = load_models(models_dir=tmp_path / "models.d",
+                         include_applied=False)
+    loaded = models[cfg.name]
+    assert loaded.served_name == manifest.model_id, \
+        f"路由名错误: {loaded.served_name!r} != {manifest.model_id!r}"
+
+
+def test_llama_cpp_served_name_falls_back_to_name(tmp_path):
+    # 存量静态配置（无 llama_cpp.served_name）行为不变：回退配置名
+    from inferfabric.config import ModelConfig, LlamaCppConfig
+    c = ModelConfig(name="qwen3-4b", description="d", type="llama_cpp",
+                    llama_cpp=LlamaCppConfig(model_path="/x.gguf"))
+    assert c.served_name == "qwen3-4b"
+    c2 = ModelConfig(name="pack-x", description="d", type="llama_cpp",
+                     llama_cpp=LlamaCppConfig(model_path="/x.gguf",
+                                              served_name="x-4b"))
+    assert c2.served_name == "x-4b"

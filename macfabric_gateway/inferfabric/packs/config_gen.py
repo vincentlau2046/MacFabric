@@ -77,6 +77,7 @@ def _build_llama_cpp(manifest, pack_dir, port: int) -> ModelConfig:
         llama_cpp=LlamaCppConfig(
             model_path=str(model_path),
             binary_path=str(binary_path),
+            served_name=manifest.model_id,   # proxy 路由名（--alias 同值规范回显）
             port=port,
             threads=8,
             context_size=8192,
@@ -101,7 +102,7 @@ def write_managed_yaml(cfg: ModelConfig, models_d, manifest) -> Path:
         "gpu_role": cfg.gpu_role,
         "model_type": cfg.model_type,
         "peak_vram_mb": cfg.mem_baseline_mb,
-        "served_name": manifest.model_id,   # 文档性；模型名规范化走 --alias
+        "served_name": manifest.model_id,   # 文档性；路由名在 llama_cpp.served_name
         "anthropic_native": cfg.anthropic_native,
         "mem_baseline_mb": cfg.mem_baseline_mb,
         "mode": cfg.ledger_mode or "on_demand",
@@ -111,6 +112,7 @@ def write_managed_yaml(cfg: ModelConfig, models_d, manifest) -> Path:
         "llama_cpp": {
             "model_path": cfg.llama_cpp.model_path,
             "binary_path": cfg.llama_cpp.binary_path,
+            "served_name": cfg.llama_cpp.served_name,
             "port": cfg.llama_cpp.port,
             "threads": cfg.llama_cpp.threads,
             "context_size": cfg.llama_cpp.context_size,

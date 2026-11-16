@@ -344,6 +344,8 @@ class OllamaModelConfig:
 class LlamaCppConfig:
     """Llama.cpp / llama.cpp 独立推理进程."""
     model_path: str     # GGUF 文件路径
+    served_name: str = ""  # proxy 路由名；空回退 model name（同 ninfer 契约）。
+    # --alias 只规范引擎回显，不参与 proxy 路由（2026-11-16 沙箱取证）
     port: int = 11435
     threads: int = 8
     context_size: int = 8192
@@ -554,7 +556,7 @@ class ModelConfig:
         if self.ollama:
             return self.ollama.model_ref
         if self.llama_cpp:
-            return self.name
+            return self.llama_cpp.served_name or self.name
         if self.ninfer:
             return self.ninfer.served_name or self.name
         return self.name

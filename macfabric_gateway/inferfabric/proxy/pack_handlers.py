@@ -119,7 +119,8 @@ class HttpArtifactFetcher:
 
 class PackManager:
     def __init__(self, root, models_d, catalog_path=None, fetcher=None,
-                 reload_gateway=None):
+                 reload_gateway=None, prepare_runtime=None,
+                 run_healthcheck=None):
         self.root = Path(root)
         self.models_d = Path(models_d)
         self.catalog = Catalog(load_catalog(catalog_path or BUNDLED_CATALOG))
@@ -129,9 +130,15 @@ class PackManager:
         self._fetcher = fetcher or HttpArtifactFetcher()
         self._in_progress: dict[str, str] = {}   # pack_id -> stage
         self._progress_lock = threading.Lock()
+        from inferfabric.packs.runtime_prep import (
+            healthcheck_llama_cpp as _hc_default,
+            prepare_runtime as _prep_default)
         self.installer = PackInstaller(
             root=self.root, fetcher=self._fetcher, policy=self.policy,
             sandbox_provider=NoopProvider(), catalog_probe=probe_sandbox,
+            # 真实运行时准备/健康检查（2026-11-16 接线，fake 测试可注入替身）
+            prepare_runtime=prepare_runtime or _prep_default,
+            run_healthcheck=run_healthcheck or _hc_default,
             write_model_config=self._write_model_config,
             reload_gateway=self._reload_gateway,
             memory_available_mb=system_available_memory_mb,
