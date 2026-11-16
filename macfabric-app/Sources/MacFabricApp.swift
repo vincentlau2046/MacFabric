@@ -211,7 +211,7 @@ struct PackStatusRec: Codable, Identifiable {
 }
 struct PackStatusPayload: Codable { var packs: [PackStatusRec] }
 struct PackPreviewPayload: Codable { var affected_pools: [PackPoolRef]? }
-struct PackPolicyPayload: Codable { var max_model_parameters_b: Int; var system_reserved_memory_mb: Int }
+struct PackPolicyPayload: Codable, Equatable { var max_model_parameters_b: Int; var system_reserved_memory_mb: Int }
 struct SecurityKeyInfo: Identifiable {
     let id: String
     let name: String
@@ -403,6 +403,9 @@ final class GatewayStore: ObservableObject {
     @Published var packCatalog: PackCatalogPayload?
     @Published var packStatus: PackStatusPayload?
     @Published var packPolicy: PackPolicyPayload?
+    // 设置页策略表单草稿（CLT 无 SwiftUI 宏，视图内 @State 不可用 — 既有约束）
+    @Published var packMaxBDraft = "4"
+    @Published var packReservedMBDraft = "8192"
     // ── API Key 鉴权（设置页接线 — /admin/security/*）──
     @Published var securityEnforced = false
     @Published var securityKeyCount = 0
@@ -3286,6 +3289,8 @@ struct SettingsView: View {
                 }
                 Text("安全").font(.system(size: 11)).foregroundColor(.faint)
                     .padding(.top, 4)
+                // PK4: 能力包策略（4B/8GB 设置项 — spec §9 裁决）
+                packPolicyCard
                 // 开关项（诚实标注：已接线的可交互，未接线的保持禁用并说明）
                 Card {
                     VStack(alignment: .leading, spacing: 0) {
@@ -3388,7 +3393,47 @@ struct SettingsView: View {
                 }
                 Text("开关项按设计稿分批接入：v1.5 网关端点落地后此页改为可交互")
                     .font(.system(size: 11)).foregroundColor(.faint)
-            }.padding(16)
+            }
+            .padding(16)
+            .onAppear { store.fetchPackPolicy() }
+            .onChange(of: store.packPolicy) { p in
+                guard let p else { return }
+                store.packMaxBDraft = "\(p.max_model_parameters_b)"
+                store.packReservedMBDraft = "\(p.system_reserved_memory_mb)"
+            }
+        }
+    }
+
+    // ── PK4: 能力包策略（4B/8GB — 仅影响后续安装，不自动重装）──
+    // 草稿状态在 GatewayStore（CLT 无 SwiftUI 宏，视图内 @State 不可用 — 既有约束）
+    private func savePackPolicy() {
+        guard let b = Int(store.packMaxBDraft), b >= 1,
+              let mb = Int(store.packReservedMBDraft), (1024...65536).contains(mb) else {
+            store.notify(.error, "❌ 输入无效：参数量上限 ≥1；保留内存 1024–65536 MiB")
+            return
+        }
+        store.savePackPolicy(b, mb)
+    }
+
+    @ViewBuilder private var packPolicyCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("能力包策略").font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
+                HStack(spacing: 12) {
+                    Text("模型参数量上限（B）").font(.system(size: 11.5)).foregroundColor(.dim)
+                    TextField("4", text: $store.packMaxBDraft)
+                        .textFieldStyle(.roundedBorder).frame(width: 64)
+                        .font(.system(size: 12, design: .monospaced))
+                    Text("系统保留内存（MiB）").font(.system(size: 11.5)).foregroundColor(.dim)
+                    TextField("8192", text: $store.packReservedMBDraft)
+                        .textFieldStyle(.roundedBorder).frame(width: 80)
+                        .font(.system(size: 12, design: .monospaced))
+                    Spacer()
+                    SmallBtn("保存", primary: true) { savePackPolicy() }
+                }
+                Text("仅作用于能力包安装预检（对话类 LLM/VL 参数量门禁 + 内存预算），不自动重装、不自动启动。")
+                    .font(.system(size: 10.5)).foregroundColor(.faint)
+            }.padding(12)
         }
     }
 
