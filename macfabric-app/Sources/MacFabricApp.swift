@@ -833,7 +833,12 @@ final class GatewayStore: ObservableObject {
         URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/packs/policy")) { [weak self] data, _, _ in
             guard let self, let data,
                   let p = try? JSONDecoder().decode(PackPolicyPayload.self, from: data) else { return }
-            DispatchQueue.main.async { self.packPolicy = p }
+            DispatchQueue.main.async {
+                self.packPolicy = p
+                // 草稿回填（fetch 仅页面 onAppear 触发，不与用户编辑竞争）
+                self.packMaxBDraft = String(p.max_model_parameters_b)
+                self.packReservedMBDraft = String(p.system_reserved_memory_mb)
+            }
         }.resume()
     }
 
@@ -848,7 +853,7 @@ final class GatewayStore: ObservableObject {
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             DispatchQueue.main.async {
                 if (200..<300).contains(code) {
-                    self?.notify(.success, "✅ 能力包策略已保存（仅影响后续安装）")
+                    self?.notify(.success, "✅ 策略已保存（安装预检 + 内存账本即时共用，无需重启）")
                     self?.fetchPackPolicy()
                 } else {
                     self?.notify(.error, "❌ 策略保存失败(\(code)): \(body.prefix(160))")
@@ -3258,7 +3263,6 @@ struct SettingsView: View {
     private var ramGB: Int {
         Int(ProcessInfo.processInfo.physicalMemory / (1024 * 1024 * 1024))
     }
-    private var reserveGB = 8   // MACFABRIC_RESERVE_MB 默认值（D2 裁决：全局唯一公式）
     private var budgetMB: Int? { store.snapshot?.status.gpu_total_mb }
     private var usedMB: Int? { store.snapshot?.status.gpu_used_mb }
     private var osVersion: String {
@@ -3288,7 +3292,21 @@ struct SettingsView: View {
                         Text("内存账本 — B = RAM − 保留（全局唯一公式，无第二道上限）")
                             .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
                         infoRow("物理内存", "\(ramGB) GB")
-                        infoRow("为系统保留", "\(reserveGB) GB（MACFABRIC_RESERVE_MB，改后重启网关生效）")
+                        // 保留内存可设置（2026-11-16）：与能力包策略同一字段
+                        // （/admin/packs/policy system_reserved_memory_mb），
+                        // 账本准入 _admit_memory 每次动态重建 → 保存即时生效
+                        HStack(spacing: 8) {
+                            Text("为系统保留（MiB）").font(.system(size: 12)).foregroundColor(.dim)
+                            Spacer()
+                            TextField("8192", text: $store.packReservedMBDraft)
+                                .textFieldStyle(.roundedBorder).frame(width: 80)
+                                .font(.system(size: 12, design: .monospaced))
+                            SmallBtn("保存", primary: true) { savePackPolicy() }
+                        }
+                        Text(store.packPolicy.map {
+                            "当前生效 \($0.system_reserved_memory_mb) MiB — 账本与安装预检共用（B = RAM − 保留）"
+                        } ?? "策略未读取 — 默认 8192 MiB")
+                            .font(.system(size: 10.5)).foregroundColor(.faint)
                         infoRow("账本预算 B", budgetMB.map { "\($0) MB" } ?? "—（网关离线）")
                         infoRow("当前已用", usedMB.map { "\($0) MB" } ?? "—")
                     }.padding(12)

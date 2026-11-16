@@ -10,6 +10,7 @@ inferfabric/mac_platform.py — MacFabric Apple Silicon 平台层。
 所有探测函数失败时返回保守值，绝不抛异常（上游 health.py 同一纪律）。
 """
 
+import json
 import os
 import re
 import subprocess
@@ -19,8 +20,29 @@ log_label = "macfabric.platform"
 
 IS_MACOS = sys.platform == "darwin"
 
-# D2: 统一内存预算 = RAM − 8G。仅 macOS 生效；环境变量可覆盖（便于测试）。
+# D2: 统一内存预算 = RAM − 保留。仅 macOS 生效。保留值优先级：
+# 显式 env MACFABRIC_RESERVE_MB（开发/测试逃生口）> 设置页保存的
+# packs policy.json system_reserved_memory_mb（用户唯一入口，2026-11-16
+# 落地"保留内存可设置"）> 默认 8192。
 DEFAULT_RESERVE_MB = 8 * 1024  # 8192MB
+
+
+def _policy_reserve_mb():
+    """读设置页（packs policy）的 system_reserved_memory_mb。
+
+    直接读 JSON 不 import packs（避免 packs→config→本模块 环）；
+    缺失/损坏/非法一律 None 回退默认，绝不抛异常（本模块纪律）。
+    """
+    state_dir = os.environ.get(
+        "MACFABRIC_STATE_DIR",
+        os.path.join(os.path.expanduser("~"), ".inferfabric"))
+    path = os.path.join(state_dir, "packs", "policy.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            mb = int(json.load(f)["system_reserved_memory_mb"])
+        return mb if mb >= 1 else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def _run(cmd: list[str], timeout: int = 10) -> subprocess.CompletedProcess:
@@ -107,11 +129,23 @@ def mem_used_mb() -> int | None:
 # ─── 预算 B（内存账本地基）─────────────────────────────────────
 
 def budget_mb() -> int:
-    """统一内存推理预算 B = RAM − 8G（D2）。非 macOS 回退上游（返回 None 语义由调用方处理）。
+    """统一内存推理预算 B = RAM − 保留（D2 全局唯一公式，无第二道上限）。
 
-    这里返回 int；非 macOS 上调用方不应使用本函数（is_macos() 门禁在前）。
+    保留值优先级见 DEFAULT_RESERVE_MB 处注释：env > packs policy（设置页）
+    > 默认 8192。每次调用重读 policy —— 设置页保存后即时生效（账本准入
+    _admit_memory 每次动态重建，无缓存层）。
+    非 macOS 回退上游（返回 None 语义由调用方处理）；非 macOS 上调用方
+    不应使用本函数（is_macos() 门禁在前）。
     """
-    reserve = int(os.environ.get("MACFABRIC_RESERVE_MB", DEFAULT_RESERVE_MB))
+    env = os.environ.get("MACFABRIC_RESERVE_MB", "").strip()
+    reserve = None
+    if env:
+        try:
+            reserve = int(env)
+        except ValueError:
+            reserve = None
+    if reserve is None:
+        reserve = _policy_reserve_mb() or DEFAULT_RESERVE_MB
     total = mem_total_mb()
     if total is None:
         return 0

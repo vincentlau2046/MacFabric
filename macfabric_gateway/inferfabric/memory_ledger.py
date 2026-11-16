@@ -133,7 +133,7 @@ class MemoryLedger:
         return AdmitDecision(
             False,
             f"内存不足：需要 {needed}MB，预算仅剩 {available}MB"
-            f"（B = RAM − 8G = {self.budget_mb}MB，已占用 {accounted}MB）",
+            f"（B = RAM − 保留 = {self.budget_mb}MB，已占用 {accounted}MB）",
             available, needed,
         )
 

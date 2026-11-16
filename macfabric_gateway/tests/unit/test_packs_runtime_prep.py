@@ -123,9 +123,12 @@ def test_healthcheck_spawns_and_kills_engine(tmp_path):
     (tmp_path / "models").mkdir()
     (tmp_path / "models" / "model").write_bytes(b"M")
     healthcheck_llama_cpp(tmp_path, MANIFEST, timeout_s=20)
-    # 引擎进程已被收割：无残留监听（端口池探测的端口不可知，靠进程表验证）
+    # 引擎进程已被收割：无残留监听（端口池探测的端口不可知，靠进程表验证）。
+    # pgrep 模式必须锚定本测试的 tmp_path —— 全局 "runtime/engine" 会误杀
+    # 真生产引擎（2026-11-16 取证：机器上现役 pack 引擎令断言假失败）。
     import subprocess
-    out = subprocess.run(["pgrep", "-f", "runtime/engine"], capture_output=True)
+    out = subprocess.run(["pgrep", "-f", str(tmp_path / "runtime" / "engine")],
+                         capture_output=True)
     assert out.returncode != 0, "healthcheck 后引擎进程未被收割"
 
 
@@ -147,7 +150,8 @@ def test_healthcheck_timeout_raises(tmp_path):
     with pytest.raises(RuntimeError, match="healthcheck"):
         healthcheck_llama_cpp(tmp_path, MANIFEST, timeout_s=3)
     import subprocess
-    out = subprocess.run(["pgrep", "-f", "runtime/engine"], capture_output=True)
+    out = subprocess.run(["pgrep", "-f", str(tmp_path / "runtime" / "engine")],
+                         capture_output=True)
     assert out.returncode != 0, "超时后引擎进程未被收割"
 
 

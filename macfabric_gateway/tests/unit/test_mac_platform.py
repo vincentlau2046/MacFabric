@@ -26,6 +26,50 @@ def test_budget_respect_env_override(monkeypatch):
     assert mp.budget_mb() == 16384
 
 
+# ── 保留内存用户可设置（2026-11-16）：env > packs policy.json > 默认 8192 ──
+
+def _write_policy(state_dir, reserved_mb):
+    packs = state_dir / "packs"
+    packs.mkdir(parents=True, exist_ok=True)
+    (packs / "policy.json").write_text(
+        '{"max_model_parameters_b": 4, "system_reserved_memory_mb": %d}'
+        % reserved_mb, encoding="utf-8")
+
+
+def test_budget_reads_pack_policy_when_env_unset(monkeypatch, tmp_path):
+    """设置页保存的 system_reserved_memory_mb 是账本保留的唯一用户入口（D2 全局唯一公式）。"""
+    monkeypatch.setattr(mp, "mem_total_mb", lambda: 32768)
+    monkeypatch.delenv("MACFABRIC_RESERVE_MB", raising=False)
+    monkeypatch.setenv("MACFABRIC_STATE_DIR", str(tmp_path))
+    _write_policy(tmp_path, 6144)
+    assert mp.budget_mb() == 32768 - 6144
+
+
+def test_env_overrides_pack_policy(monkeypatch, tmp_path):
+    """显式 env 仍是最高优先级覆盖（开发/测试逃生口）。"""
+    monkeypatch.setattr(mp, "mem_total_mb", lambda: 32768)
+    monkeypatch.setenv("MACFABRIC_RESERVE_MB", "16384")
+    monkeypatch.setenv("MACFABRIC_STATE_DIR", str(tmp_path))
+    _write_policy(tmp_path, 6144)
+    assert mp.budget_mb() == 16384
+
+
+def test_budget_falls_back_to_default_on_missing_or_bad_policy(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(mp, "mem_total_mb", lambda: 32768)
+    monkeypatch.delenv("MACFABRIC_RESERVE_MB", raising=False)
+    monkeypatch.setenv("MACFABRIC_STATE_DIR", str(tmp_path))
+    # 缺文件 → 默认 8192
+    assert mp.budget_mb() == 24576
+    # 损坏 JSON → 默认
+    (tmp_path / "packs").mkdir()
+    (tmp_path / "packs" / "policy.json").write_text("{broken", encoding="utf-8")
+    assert mp.budget_mb() == 24576
+    # 非法值（<1）→ 默认
+    _write_policy(tmp_path, 0)
+    assert mp.budget_mb() == 24576
+
+
 def test_mem_total_real_probe_if_macos():
     """在 macOS 上真实探测应成功且数值合理；非 macOS 返回 None。"""
     total = mp.mem_total_mb()
