@@ -34,7 +34,9 @@ log = logging.getLogger("inferfabric.packs")
 
 POLICY_MEM_RANGE = (1024, 65536)
 
-BUNDLED_CATALOG = Path(__file__).resolve().parents[1] / "packs_catalog.yaml"
+# 捆绑目录：pack_handlers.py 在 <repo>/macfabric_gateway/inferfabric/proxy/，
+# 上溯三级到 macfabric_gateway/（生产冒烟回归：parents[1] 曾指错层级）
+BUNDLED_CATALOG = Path(__file__).resolve().parents[2] / "packs_catalog.yaml"
 
 
 def _free_port() -> int:

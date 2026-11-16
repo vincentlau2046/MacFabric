@@ -238,3 +238,11 @@ def test_fetcher_redirect_https_downgrade_refused():
         h.redirect_request(req, None, 302, "found", {}, "http://b/x")
     assert h.redirect_request(req, None, 302, "found", {}, "https://b/x") \
         is not None
+
+
+def test_bundled_catalog_default_path_exists():
+    # 生产冒烟回归：默认捆绑目录路径必须指向真实文件
+    # （pack_handlers.py 位于 inferfabric/proxy/，需上溯三级到 macfabric_gateway/）
+    from inferfabric.proxy.pack_handlers import BUNDLED_CATALOG
+    assert BUNDLED_CATALOG.name == "packs_catalog.yaml"
+    assert BUNDLED_CATALOG.exists(), BUNDLED_CATALOG
