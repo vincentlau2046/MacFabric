@@ -5,8 +5,9 @@
 - load_catalog(path)：每条目内嵌 manifest: 块走 parse_manifest 严格校验；
   任一条目非法 → CatalogError 并指明 pack_id。
 - Catalog.find / list_capability。
-- 捆绑目录首批 5 项（spec §11 冻结）：Qwen3-4B-Instruct-2507 / BGE-M3 /
-  Whisper / Kokoro ONNX / macOS Vision；Gemma 不在目录中（许可证复核前移出）。
+- 捆绑目录首批 4 项（2026-11-16 用户裁决换 ModelScope 源后修订）：Qwen3-4B-Instruct-2507 /
+  BGE-M3 / Kokoro ONNX / macOS Vision；Gemma 不在目录中（许可证复核前移出）；
+  whisper ggml bin 无 ModelScope 源 → 移出。
 """
 
 from pathlib import Path
@@ -18,12 +19,12 @@ from inferfabric.packs.catalog import Catalog, CatalogError, load_catalog
 REPO = Path(__file__).resolve().parents[3]
 
 
-def test_bundled_catalog_loads_five_entries():
+def test_bundled_catalog_loads_four_entries():
     entries = load_catalog(REPO / "macfabric_gateway" / "packs_catalog.yaml")
     ids = {e.manifest.pack_id for e in entries}
     assert ids == {
         "llm.qwen3-4b-instruct-2507", "embedding.bge-m3",
-        "asr.whisper-large-v3-turbo", "tts.kokoro-82m-onnx", "ocr.macos-vision"}
+        "tts.kokoro-82m-onnx", "ocr.macos-vision"}
 
 
 def test_bundled_catalog_first_batch_invariants():
@@ -40,9 +41,8 @@ def test_bundled_catalog_first_batch_invariants():
     vision = by_id["ocr.macos-vision"]
     assert vision.builtin is True
     assert vision.manifest.artifacts == ()
-    # 其余四项非内置，均有 artifact
-    for pid in ("embedding.bge-m3", "asr.whisper-large-v3-turbo",
-                "tts.kokoro-82m-onnx"):
+    # 其余三项非内置，均有 artifact
+    for pid in ("embedding.bge-m3", "tts.kokoro-82m-onnx"):
         e = by_id[pid]
         assert e.builtin is False and e.manifest.artifacts
     # Gemma 许可证复核前不得进入目录（spec §11 裁决）

@@ -201,16 +201,25 @@ def test_install_failure_leaves_store_failed(tmp_path):
 
 
 def test_catalog_first_batch_frozen_hashes():
-    # 首批 5 项 sha256 已冻结为真实 hash（非全零占位），来源为真实 HTTPS
+    # Catalog sha256 冻结真值（非全零占位）。源策略（用户裁决 2026-11-16）：
+    # 模型统一 ModelScope（HF 直连被阻断；hash 经 CDN LFS oid 互证同物）；
+    # whisper ggml bin 无 ModelScope 源 → 移出；引擎留 GitHub（实测可达）。
     REPO = Path(__file__).resolve().parents[3]
     entries = load_catalog(REPO / "macfabric_gateway" / "packs_catalog.yaml")
     by_id = {e.manifest.pack_id: e for e in entries}
-    assert len(by_id) == 5
+    assert len(by_id) == 4
     for e in entries:
         assert e.source_page.startswith("https://")
         for a in e.manifest.artifacts:
             assert a.sha256 != "0" * 64, \
                 f"{e.manifest.pack_id}/{a.id} hash 未冻结"
-            assert a.source.startswith("https://")
+            if a.kind == "model":
+                assert a.source.startswith("https://modelscope.cn/models/"), \
+                    f"{a.id} 模型源不在 ModelScope: {a.source}"
+            else:
+                assert a.source.startswith("https://github.com/"), \
+                    f"{a.id} 引擎源异常: {a.source}"
     # Gemma 不在目录（许可证复核前移出，spec §11 裁决）
     assert not any("gemma" in pid for pid in by_id)
+    # whisper 无 ModelScope 源 → 移出（用户裁决 2026-11-16）
+    assert not any("whisper" in pid for pid in by_id)
