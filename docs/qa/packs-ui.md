@@ -90,6 +90,22 @@ served_name 路由回归、池默认值 3/180000）；App 侧 build.sh 编译门
 - ✅ 测试修复：runtime_prep healthcheck 断言 pgrep 锚定 tmp_path（此前全局模式被
   现役生产引擎误匹配——生产路由在跑的旁证）
 
+## 发布 v7.10.9（统一能力架构整版 — 隔离/端到端原则全链执行）
+
+- ✅ 单测 277/277 绿（新增装配回归钉）→ commit d71dc7b → push（github+gitcode）
+  → tag `gateway-v7.10.9` → `release-install.sh`（codeload → 原子换目录 →
+  models.d 不覆盖 → plist 重写 → bootout/bootstrap → SMOKE OK pid 10978）
+- ✅ /Applications/MacFabric.app 替换为 v7.10.9 构建（能力分类分区 + 自定义包表单 +
+  "包:<id>" 来源标注）
+- ✅ 生产结构冒烟：/models 仅 2 包模型（迁清态保持）；无鉴权 401；catalog/status 200；
+  POST /admin/packs/custom 存在（空 body 400 校验拒绝，非 404）
+- ✅ 生产自定义包卸载链实测：e2e 测试包经 /admin/packs/uninstall 正规链路移除
+  （store/user_custom.json/磁盘零残留，状态归一）——注：沙箱 packs 目录与生产共享
+  （符号链接），沙箱装的自定义包会出现在生产 store；生产可路由性以生产 models.d
+  yaml 为准，App 在生产发起的自定义安装不受影响
+- ⏳ 生产真实 chat 鉴权端到端：key 仅存摘要、我方不可恢复亦不可创建（纪律：严禁直写
+  生产 DB）——由用户客户端（atlascode key）实测 fabric-fast 路由
+
 ## 人工 GUI 取证清单（待用户执行 — App 需重开载入新构建）
 
 - [ ] 模型池页：池逻辑名显示 fabric-* 前缀；添加/替换池的备选列表仅 LLM/VL 模型
