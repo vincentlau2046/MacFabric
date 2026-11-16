@@ -1,6 +1,6 @@
 # QA — 能力包 PK4 全链路验收 + fabric- 命名硬切 + 发布上线（2026-11-16）
 
-自动化：网关侧 **261/261 绿**（含 runtime_prep 7 项、fabric- 前缀钉住、断点续传 3 项、
+自动化：网关侧 **264/264 绿**（含 runtime_prep 7 项、fabric- 前缀钉住、断点续传 3 项、
 served_name 路由回归、池默认值 3/180000）；App 侧 build.sh 编译门禁（fabric- 命名 + 池
 备选 LLM/VL 过滤）。
 生产网关：127.0.0.1:8999（launchd com.macfabric.gateway），**已切发布安装**
@@ -53,6 +53,20 @@ served_name 路由回归、池默认值 3/180000）；App 侧 build.sh 编译门
 - ✅ 生产冒烟：catalog 200（4 项）/ packs status qwen installed / 无鉴权 401 /
   进程确认 `prod/.venv/bin/python -m inferfabric.proxy.handler`
 - 回滚 = `scripts/release-install.sh <旧 tag>`；配置在 `~/.inferfabric` 不受发布影响
+
+## 追加：v7.10.7 — 保留内存用户可设置 + App 安装版更新（2026-11-16）
+
+- ✅ 网关 `budget_mb()`：env（显式覆盖）> 设置页 policy.json system_reserved_memory_mb
+  > 默认 8192；每次调用重读，保存即时生效（账本 `_admit_memory` 动态重建，无缓存）
+  ——D2"全局唯一公式"落地：内存账本与安装预检共用同一设置，不再有第二道公式
+- ✅ App 设置页内存账本卡："为系统保留"可编辑（与能力包策略同一字段同一保存），
+  策略草稿回填；单测 3 项钉住优先级（env 覆盖 / policy 生效 / 缺损回退默认）
+- ✅ 生产 8999 冒烟：policy 8192 → 预算 28672 MB（36G−8G，口径一致）；plist 无
+  env 覆盖，policy 为唯一用户入口
+- ✅ `/Applications/MacFabric.app` 已替换为 v7.10.7 构建（release profile → 8999）——
+  此前用户运行的是旧安装版（8 张静态卡 / 无策略卡），非后端问题
+- ✅ 测试修复：runtime_prep healthcheck 断言 pgrep 锚定 tmp_path（此前全局模式被
+  现役生产引擎误匹配——生产路由在跑的旁证）
 
 ## 人工 GUI 取证清单（待用户执行 — App 需重开载入新构建）
 
