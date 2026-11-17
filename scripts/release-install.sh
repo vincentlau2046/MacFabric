@@ -135,8 +135,15 @@ launchctl bootstrap "gui/$UID_N" "$PLIST"
 sleep 3
 PID=$(launchctl print "gui/$UID_N/$LABEL" 2>/dev/null | awk '/pid =/{print $3; exit}')
 echo "gateway pid: ${PID:-<未拉起>}"
+# 批 1 TOP1 born-token：admin 冒烟从 secrets.env 读 token 注 X-Admin-Token
+# （网关启动即写回该文件；首轮未就绪由重试循环覆盖）
+ADMIN_TOKEN=""
+if [ -f "$HOME/.inferfabric/secrets.env" ]; then
+    ADMIN_TOKEN=$(awk -F= '$1=="MACFABRIC_ADMIN_TOKEN"{print $2; exit}' "$HOME/.inferfabric/secrets.env" | tr -d '"' || true)
+fi
 for i in $(seq 1 20); do
     CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+        -H "X-Admin-Token: $ADMIN_TOKEN" \
         http://127.0.0.1:8999/admin/packs/catalog || true)
     [ "$CODE" = "200" ] && break
     sleep 1

@@ -11,3 +11,6 @@ vendor/
 
 # 能力包装包生成的托管配置（运行时产物；生产在 ~/.inferfabric/models.d）
 macfabric_gateway/models.d/pack-*.yaml
+
+# 契约测试本地编译缓存（运行时产物）
+/build/

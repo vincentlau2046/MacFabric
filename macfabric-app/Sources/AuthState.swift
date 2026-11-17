@@ -92,9 +92,11 @@ enum CredentialStoreError: Error, Equatable {
 }
 
 protocol GatewayCredentialStore {
-    mutating func load(profile: GatewayProfile) throws -> String?
-    mutating func save(_ key: String, profile: GatewayProfile) throws
-    mutating func delete(profile: GatewayProfile) throws
+    // 凭据存取作用于 Keychain 等外部状态，不允许 mutating —
+    // 值类型拷贝后写副本会造成"账目写丢"（批 1 组 24 复盘教训）
+    func load(profile: GatewayProfile) throws -> String?
+    func save(_ key: String, profile: GatewayProfile) throws
+    func delete(profile: GatewayProfile) throws
 }
 
 /// 录入流程结果：失败如实报 failed，绝不声称“已保存”。
@@ -108,8 +110,7 @@ enum CredentialFlow {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failed("empty") }
         do {
-            var s = store
-            try s.save(trimmed, profile: profile)
+            try store.save(trimmed, profile: profile)
             return .saved
         } catch CredentialStoreError.denied { return .failed("denied") }
         catch CredentialStoreError.interactionNotAllowed { return .failed("locked") }

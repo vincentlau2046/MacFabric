@@ -108,7 +108,12 @@ LOCAL_LLM_TYPES = {"llm", "vl", "omni"}
 
 
 def send_json(handler, body_d, status=200, extra_headers=None):
-    """Send JSON response with CORS headers."""
+    """Send JSON response with CORS headers.
+
+    批 1 TOP1 收紧：控制面（/admin/*）不发 Access-Control-Allow-* —
+    浏览器页面没有合法途径拿到 admin token，跨域开放只会扩大探测面。
+    推理面（/v1/* 等）CORS 维持原状。
+    """
     body = json.dumps(body_d, ensure_ascii=False).encode()
     try:
         handler.send_response(status)
@@ -120,9 +125,11 @@ def send_json(handler, body_d, status=200, extra_headers=None):
         handler.send_header("Content-Type", "application/json; charset=utf-8")
         handler.send_header("Content-Length", str(len(body)))
         handler.send_header("Connection", "close")
-        handler.send_header("Access-Control-Allow-Origin", "*")
-        handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+        from urllib.parse import urlparse as _urlparse
+        if not _urlparse(handler.path).path.startswith("/admin/"):
+            handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            handler.send_header("Access-Control-Allow-Headers", "Content-Type")
         handler.end_headers()
         handler.wfile.write(body)
         handler.wfile.flush()

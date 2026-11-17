@@ -118,15 +118,15 @@ genStore.apply(4, .failure(StatusFetchError.http(500)))
 check("oldGenerationIgnored", genStore.state == .loaded(SecuritySnapshot(policy: "all", active: true, enforced: true, fetchedAt: genStore.snapshot?.fetchedAt ?? .distantPast), stale: false))
 
 // 15. 凭据存取：profile 隔离账目；保存失败绝不报“已保存”
-struct RecordingStore: GatewayCredentialStore {
+final class RecordingStore: GatewayCredentialStore {
     var accounts: [String] = []
     var throwOnSave = false
-    mutating func load(profile: GatewayProfile) throws -> String? { nil }
-    mutating func save(_ key: String, profile: GatewayProfile) throws {
+    func load(profile: GatewayProfile) throws -> String? { nil }
+    func save(_ key: String, profile: GatewayProfile) throws {
         accounts.append(profile.keychainAccount)
         if throwOnSave { throw CredentialStoreError.denied }
     }
-    mutating func delete(profile: GatewayProfile) throws {}
+    func delete(profile: GatewayProfile) throws {}
 }
 var rec = RecordingStore()
 _ = try? rec.save("k", profile: .dev)
@@ -249,8 +249,51 @@ let qaXML = GatewayDaemon.plistXML(prodDir: "/p", modelsDir: "/m", logPath: "/l"
 check("daemonPlistQAProgramOverride", qaXML.contains("<string>/bin/sleep</string>")
     && qaXML.contains("<string>3600</string>") && !qaXML.contains("inferfabric.proxy.handler"))
 
+
+// 24. GatewayClient — 批 1 TOP2 统一网络层 + admin token 双账目 + born 迁移
+// （spec docs/superpowers/specs/2026-11-17-batch1-auth-network-state.md）
+final class MemoryAdminTokenStore: GatewayCredentialStore {
+    var items: [String: String] = [:]
+    var throwOnSave = false
+    func load(profile: GatewayProfile) throws -> String? { items[profile.keychainAccount] }
+    func save(_ key: String, profile: GatewayProfile) throws {
+        if throwOnSave { throw CredentialStoreError.denied }
+        items[profile.keychainAccount] = key
+    }
+    func delete(profile: GatewayProfile) throws { items.removeValue(forKey: profile.keychainAccount) }
+}
+check("adminServiceDiffersFromInference", AdminTokenCredentialStore.serviceName != GatewayProfile.keychainService
+    && AdminTokenCredentialStore.serviceName == "io.macfabric.gateway-admin")
+
+func fileReader(_ text: String?) -> (GatewayProfile) -> String? { { _ in text } }
+var migrated = MemoryAdminTokenStore()
+let m1 = AdminTokenBootstrap.migrate(store: migrated, fileReader: fileReader("MACFABRIC_ADMIN_TOKEN=born-tok-1\nOTHER=x"), profile: .dev)
+check("bornMigrateReadsFileSavesKeychain", m1 == .migrated && migrated.items["dev|http://127.0.0.1:8998"] == "born-tok-1")
+let m2 = AdminTokenBootstrap.migrate(store: migrated, fileReader: fileReader("MACFABRIC_ADMIN_TOKEN=born-tok-1\n"), profile: .dev)
+check("bornMigrateIdempotentAlreadyStored", m2 == .alreadyStored)
+let m3 = AdminTokenBootstrap.migrate(store: migrated, fileReader: fileReader(nil), profile: .prod)
+check("bornMigrateAbsentHonest", m3 == .absent && migrated.items["prod|http://127.0.0.1:8999"] == nil)
+var denyingStore = MemoryAdminTokenStore(); denyingStore.throwOnSave = true
+let m4 = AdminTokenBootstrap.migrate(store: denyingStore, fileReader: fileReader("MACFABRIC_ADMIN_TOKEN=t"), profile: .dev)
+check("bornMigrateDeniedHonest", m4 == .failed("denied"))
+
+let adminAttachReq = URLRequest(url: URL(string: "http://127.0.0.1:8999/admin/cloud/providers")!)
+let attached = AdminRequestAuthorizer.attach(adminAttachReq, profile: .prod, token: "tok-9")
+check("adminAttachSameOrigin", attached.value(forHTTPHeaderField: "X-Admin-Token") == "tok-9")
+let v1Req = URLRequest(url: URL(string: "http://127.0.0.1:8999/v1/chat/completions")!)
+check("adminAttachSkipsInference", AdminRequestAuthorizer.attach(v1Req, profile: .prod, token: "tok-9").value(forHTTPHeaderField: "X-Admin-Token") == nil)
+let crossReq = URLRequest(url: URL(string: "http://127.0.0.1:8998/admin/x")!)
+check("adminAttachSkipsCrossProfile", (try? AdminRequestAuthorizer.authorize(crossReq, profile: .prod, token: "tok-9")) == nil)
+
+check("clientErrorHttpMap", GatewayClientError.from(status: 401) == .unauthorized && GatewayClientError.from(status: 503) == .http(503))
+var gen = GenerationGuard()
+gen.bump()
+gen.bump()
+check("generationGuardOldDropped", gen.accept(1) == false && gen.accept(3) == true && gen.accept(2) == false)
+
+// ── 汇总（文件末尾）：任何位置断言失败都能如实报告，杜绝“静默失败 + exit 0”盲区 ──
 if failures.isEmpty {
-    print("CONTRACT_TESTS_OK: 23 组断言全部通过")
+    print("CONTRACT_TESTS_OK: 全部断言通过")
 } else {
     print("CONTRACT_TESTS_FAILED: \(failures.count)")
     failures.forEach { print("  FAIL: \($0)") }

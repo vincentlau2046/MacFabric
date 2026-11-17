@@ -50,6 +50,62 @@ from inferfabric.anomaly_collector import AnomalyEvent
 # If set, requests must include X-Admin-Token header matching this value.
 # If not set (default), all control routes are open (localhost-only binding is the security boundary).
 _ADMIN_TOKEN = os.environ.get("IFF_ADMIN_TOKEN", "")
+
+
+def _ensure_admin_token(secrets_path=None):
+    """批 1 TOP1 born-token — 控制面鉴权令牌的确定性供给。
+
+    优先级：显式 IFF_ADMIN_TOKEN env（运维紧急通道）>
+    secrets.env 的 MACFABRIC_ADMIN_TOKEN（600；缺失则生成写回）。
+    幂等：已有值原样返回，不轮换（轮换语义 = 用户改 secrets.env → 重启生效）。
+    键名单一（用户裁决 2026-11-17）：生产/调试同键名 MACFABRIC_ADMIN_TOKEN，
+    值按状态目录解耦（secrets.env 跟随 MACFABRIC_STATE_DIR）。
+    """
+    env = os.environ.get("IFF_ADMIN_TOKEN", "")
+    if env:
+        return env
+    from pathlib import Path
+    from inferfabric.cloud_discovery import SecretsManager
+    sm = SecretsManager(Path(secrets_path) if secrets_path else None)
+    data = sm.load()
+    token = data.get("MACFABRIC_ADMIN_TOKEN", "")
+    if not token:
+        import secrets as _secrets
+        token = _secrets.token_urlsafe(32)
+        sm.write("MACFABRIC_ADMIN_TOKEN", token)
+    return token
+
+
+def _admin_gate(handler, expected_host, write=False):
+    """批 1 TOP1 控制面统一门禁（纯函数，ProxyHandler._check_admin 委托）。
+
+    1. fail-closed：无 token 配置或不匹配 → 401（born-token 保证正常运行时恒有值；
+       显式空配置 = 拒绝，不再放行）。
+    2. Host 非空时必须 = 本实例预期的 loopback:port（防 DNS rebinding / 转发；
+       空 Host 仅 HTTP/1.0 罕见客户端，回环绑定本身兜底）。
+    3. 携带 Origin 时必须同源回环（原生 App 不发 Origin →
+       放行；浏览器跨站 → 403）。
+    """
+    host = handler.headers.get("Host", "")
+    origin = handler.headers.get("Origin")
+    loopback = ("127.0.0.1", "localhost", "::1")
+    token = handler.headers.get("X-Admin-Token", "")
+    configured = getattr(handler, "_admin_token", "")
+    if not configured or not hmac.compare_digest(token, configured):
+        handler._send_json({"error": "Unauthorized", "status": "unauthorized"}, 401)
+        return False
+    host_ok = (not host) or host == expected_host or host.split(":")[0] in loopback
+    origin_ok = origin is None or (
+        origin in (f"http://{expected_host}", f"https://{expected_host}")
+        or origin.split("//")[-1].split("/")[0].split(":")[0] in loopback)
+    if not host_ok:
+        handler._send_json({"error": "untrusted host"}, 403)
+        return False
+    if write or origin is not None:
+        if not origin_ok:
+            handler._send_json({"error": "untrusted origin"}, 403)
+            return False
+    return True
 from inferfabric.proxy_manager import (
     ProxyManager, PROXY_HOST, PROXY_PORT,
     HEALTH_CHECK_INTERVAL, WATCHDOG_INTERVAL,
@@ -498,10 +554,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         try:
+            from urllib.parse import urlparse
+            path = urlparse(self.path).path
             self.send_response(204)
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            # 批 1 TOP1：控制面不开放跨域（原生 App 不发 preflight；
+            # 浏览器页面无合法途径拿 token，admin 不需要 CORS）
+            if not path.startswith("/admin/"):
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
         except Exception:
             pass
@@ -1670,15 +1731,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     # ─── Admin Auth ─────────────────────────────────────────────
 
     def _check_admin(self) -> bool:
-        """Check admin token for control-plane routes.
-        Returns True if allowed, False if denied (401 sent)."""
-        if not _ADMIN_TOKEN:
-            return True  # No token configured → open (localhost-only binding is security)
-        token = self.headers.get("X-Admin-Token", "")
-        if hmac.compare_digest(token, _ADMIN_TOKEN):
-            return True
-        self._send_json({"error": "Unauthorized", "status": "unauthorized"}, 401)
-        return False
+        """Check admin token for control-plane routes (批 1 TOP1 fail-closed).
+        Returns True if allowed, False if denied (401/403 sent)."""
+        self._admin_token = _ADMIN_TOKEN
+        return _admin_gate(self, f"{PROXY_HOST}:{PROXY_PORT}",
+                           write=self.command not in ("GET", "HEAD", "OPTIONS"))
 
     # ─── MACFABRIC: 能力包 Catalog/事务（Task 8） ─────────────────────
     def _handle_pack_catalog(self, pm):
@@ -3359,22 +3416,15 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 def _validate_admin_token_safety():
     """Validate that admin token configuration is safe before starting.
 
-    - If _ADMIN_TOKEN is empty and PROXY_HOST is not localhost → raise RuntimeError
-    - If _ADMIN_TOKEN is empty and PROXY_HOST is localhost → warn (acceptable)
+    批 1 TOP1 fail-closed：空 token 一律拒绝启动（born-token 已保证正常
+    运行时恒有值；显式清空 = 配置错误，不得静默开放控制面）。
     """
     if not _ADMIN_TOKEN:
-        if PROXY_HOST in ("127.0.0.1", "localhost", "::1"):
-            log.warning(
-                "Admin token is empty — control-plane routes are open. "
-                "This is acceptable for localhost-only binding but insecure for network access. "
-                "Set IFF_ADMIN_TOKEN to a secure value."
-            )
-        else:
-            raise RuntimeError(
-                f"Admin token is empty but PROXY_HOST={PROXY_HOST!r} is not localhost. "
-                "This would expose control-plane routes without authentication. "
-                "Set IFF_ADMIN_TOKEN to a secure value or set PROXY_HOST to 127.0.0.1."
-            )
+        raise RuntimeError(
+            "Admin token is empty — control-plane must fail closed. "
+            " born-token bootstrap should have provisioned MACFABRIC_ADMIN_TOKEN "
+            "in the state-dir secrets.env; set IFF_ADMIN_TOKEN to override."
+        )
 
 
 def _create_server(retries: int = 5, retry_delay: float = 2.0):
@@ -3442,6 +3492,10 @@ def main():
     fh.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s"))
     logging.getLogger("inferfabric").addHandler(fh)
 
+    # 批 1 TOP1 born-token：在安全校验之前确保控制面令牌存在（600 secrets.env）。
+    global _ADMIN_TOKEN
+    _ADMIN_TOKEN = _ensure_admin_token(IFF_DATA_DIR / "secrets.env")
+    os.environ["IFF_ADMIN_TOKEN"] = _ADMIN_TOKEN
     _validate_admin_token_safety()
 
     mgr = ProxyManager()

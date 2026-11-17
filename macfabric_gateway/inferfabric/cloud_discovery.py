@@ -319,7 +319,12 @@ class CloudDiscovery:
     @property
     def secrets(self) -> SecretsManager:
         if not hasattr(self, '_secrets_mgr'):
-            self._secrets_mgr = SecretsManager()
+            # 路径派生随 config 目录（批 1 TOP1 隔离修复）：dev 状态目录
+            # （MACFABRIC_STATE_DIR=~/.inferfabric-dev）的云厂商 key 写到 dev
+            # 自己的 secrets.env，不再漏进生产 ~/.inferfabric。
+            base_dir = self._config_path.parent if self._config_path else None
+            self._secrets_mgr = SecretsManager(
+                (base_dir / "secrets.env") if base_dir else None)
         return self._secrets_mgr
 
     def discover_all(self) -> dict[str, CloudModel]:

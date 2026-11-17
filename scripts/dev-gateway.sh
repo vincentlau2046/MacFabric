@@ -7,6 +7,10 @@
 #   端口          :8999                     :8998 (EDGE_PROXY_PORT)
 #   App          /Applications/MacFabric.app  macfabric-app/build/MacFabric-dev.app
 #
+# 批 1 TOP1：控制面鉴权 token 由网关启动时 born（~/.inferfabric-dev/secrets.env
+# 的 MACFABRIC_ADMIN_TOKEN）；curl 调试 admin 接口时先从该文件读出 token，
+# 再以 -H "X-Admin-Token: <token>" 携带（无值时网关会拒绝 admin 路由）。
+#
 # 配置导入：首次运行把安装版配置**复制**一份到调试目录（一次性快照，之后
 # 两边各改各的互不影响）。用 --fresh 丢弃调试状态重新从安装版导入。
 set -euo pipefail

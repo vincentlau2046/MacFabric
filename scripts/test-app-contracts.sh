@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 OUT="${CLAUDE_JOB_DIR:-$PWD/build}/tmp/app-contracts"
 mkdir -p "$OUT"
 # 参与契约测试的纯逻辑源（不依赖 SwiftUI）；新增共享逻辑文件须在此登记
-SOURCES="macfabric-app/Sources/ProductModels.swift macfabric-app/Sources/AuthState.swift"
+SOURCES="macfabric-app/Sources/ProductModels.swift macfabric-app/Sources/AuthState.swift macfabric-app/Sources/GatewayClient.swift"
 TEST="macfabric-app/Tests/main.swift"
 swiftc -module-cache-path "$OUT/module-cache" $SOURCES "$TEST" -o "$OUT/contract-tests"
 "$OUT/contract-tests"

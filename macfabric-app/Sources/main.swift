@@ -345,22 +345,26 @@ final class GatewayStore: ObservableObject {
     @Published var busy = false
     @Published var models: [ModelItem] = []
     @Published var curve: [CurvePoint] = []
-    /// 操作反馈横幅 — 5s 自动消退（陈旧的 ✅/❌ 长期挂在卡片上误导）
+    /// 操作反馈横幅（批 1 TOP5 状态可信）：错误持久显示 — 新反馈或用户清除才消失，
+    /// 不再 5s 自灭；成功/进行中仍 5s 自动消退（避免陈旧 ✅ 误导）
     func notify(_ kind: FeedbackKind, _ text: String) {
         actionKind = kind
         actionMessage = text
+        msgClear?.cancel(); msgClear = nil
+        guard kind != .error else { return }
+        let work = DispatchWorkItem { [weak self] in self?.actionMessage = "" }
+        msgClear = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
     }
     @Published var actionKind: FeedbackKind = .info
-    @Published var actionMessage = "" {
-        didSet {
-            guard !actionMessage.isEmpty else { return }
-            msgClear?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.actionMessage = "" }
-            msgClear = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
-        }
-    }
+    @Published var actionMessage = ""
     private var msgClear: DispatchWorkItem?
+
+    /// 用户主动清除反馈横幅
+    func clearActionMessage() {
+        msgClear?.cancel(); msgClear = nil
+        actionMessage = ""
+    }
     @Published var hubExpanded = ""
     /// B3：本地推理页选中行（instanceID；CLT 无 @State 宏，存 store）
     @Published var inferenceSelectedID: String? = nil
@@ -443,8 +447,12 @@ final class GatewayStore: ObservableObject {
         let sha = customSHA.trimmingCharacters(in: .whitespaces)
         if !sha.isEmpty { body["sha256"] = sha }
         customBusy = true
-        var req = URLRequest(url: base.appendingPathComponent("/admin/packs/custom"),
-                             timeoutInterval: 15)
+        var req = adminRequest("/admin/packs/custom", timeoutInterval: 15)
+        guard attachAdminToken(&req) else {
+            customBusy = false
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -512,7 +520,7 @@ final class GatewayStore: ObservableObject {
     }()
     private var daemonLabel: String { Self.daemonQALabel ?? GatewayDaemon.defaultLabel }
     private var daemonPlistPath: String {
-        NSString("~/Library/LaunchAgents/\(daemonLabel).plist").expandingTildeInPath
+        NSString(string: "~/Library/LaunchAgents/\(daemonLabel).plist").expandingTildeInPath
     }
 
     /// Settings onAppear / 操作后刷新：plist 存在性 + launchctl print 三态
@@ -549,26 +557,27 @@ final class GatewayStore: ObservableObject {
                 modelsDir = env["MACFABRIC_DAEMON_MODELS_DIR"] ?? "/tmp"
                 logPath = env["MACFABRIC_DAEMON_LOG"] ?? "/tmp/daemon-qa.log"
             } else {
-                prodDir = NSString("~/Library/MacFabric/prod").expandingTildeInPath
-                modelsDir = NSString("~/.inferfabric/models.d").expandingTildeInPath
-                logPath = NSString("~/.inferfabric/logs/gateway.launchd.log").expandingTildeInPath
+                prodDir = NSString(string: "~/Library/MacFabric/prod").expandingTildeInPath
+                modelsDir = NSString(string: "~/.inferfabric/models.d").expandingTildeInPath
+                logPath = NSString(string: "~/.inferfabric/logs/gateway.launchd.log").expandingTildeInPath
             }
             var failure: String? = nil
             if Self.daemonQALabel == nil {
                 let fm = FileManager.default
-                guard fm.fileExists(atPath: "\(prodDir)/.venv/bin/python") else {
+                if !fm.fileExists(atPath: "\(prodDir)/.venv/bin/python") {
                     failure = "未找到生产安装（\(prodDir)/.venv/bin/python 不存在）— 请先执行 scripts/release-install.sh"
                 }
-                guard fm.fileExists(atPath: modelsDir) else {
-                    failure = failure ?? "未找到模型配置目录（\(modelsDir)）— 请先执行 scripts/release-install.sh"
+                if failure == nil, !fm.fileExists(atPath: modelsDir) {
+                    failure = "未找到模型配置目录（\(modelsDir)）— 请先执行 scripts/release-install.sh"
                 }
             }
             if failure == nil {
                 try? FileManager.default.createDirectory(
-                    withIntermediateDirectories: true,
-                    forPath: (daemonPlistPath as NSString).deletingLastPathComponent)
+                    at: URL(fileURLWithPath: (daemonPlistPath as NSString).deletingLastPathComponent),
+                    withIntermediateDirectories: true)
                 try? FileManager.default.createDirectory(
-                    withIntermediateDirectories: true, forPath: (logPath as NSString).deletingLastPathComponent)
+                    at: URL(fileURLWithPath: (logPath as NSString).deletingLastPathComponent),
+                    withIntermediateDirectories: true)
                 let xml = GatewayDaemon.plistXML(prodDir: prodDir, modelsDir: modelsDir, logPath: logPath,
                                                  label: self.daemonLabel, programArgs: Self.daemonQAProgramArgs)
                 do {
@@ -633,11 +642,18 @@ final class GatewayStore: ObservableObject {
     private var base: URL { URL(string: GW_BASE)! }
     private var timer: Timer?
     private var curveTimer: Timer?
+    /// 控制面门禁（批 1 TOP1）：admin/控制路由请求注入 X-Admin-Token
+    /// （双账目：独立 Keychain service；born 迁移读 secrets.env 一次转存）
+    let adminTokens = AdminTokenCredentialStore(
+        backing: KeychainCredentialStore(service: AdminTokenCredentialStore.serviceName))
+    @Published var adminTokenReady = false
+    @Published var adminTokenMissing = false
     /// 主窗口可见性 — 菜单栏常驻应用，窗口关闭后暂停轮询（空转打点无意义；
     /// 菜单栏迷你条是独立 store，打开菜单时刷新一次）
     var windowVisible = true
 
     init() {
+        bootstrapAdminToken()
         refresh(); fetchModels(); fetchCurve(); fetchPools(); fetchCloud(); scanLocalModels(); fetchMetrics(); fetchSecurityStatus(); fetchPackCatalog()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             guard let self, self.windowVisible else { return }
@@ -656,6 +672,47 @@ final class GatewayStore: ObservableObject {
             self.fetchMonitorReport()
             self.fetchPoolRuntime()
         }
+    }
+
+    /// born 迁移：Keychain 无 admin token 时读档位 secrets.env（prod ~/.inferfabric /
+    /// dev ~/.inferfabric-dev）转存；失败如实置 adminTokenMissing（UI 提示，
+    /// 绝不假装已配置）。
+    private func bootstrapAdminToken() {
+        let outcome = AdminTokenBootstrap.migrate(
+            store: adminTokens,
+            fileReader: AdminTokenBootstrap.secretsFileReader,
+            profile: CURRENT_PROFILE)
+        switch outcome {
+        case .migrated, .alreadyStored:
+            adminTokenReady = true; adminTokenMissing = false
+        case .absent, .failed:
+            adminTokenReady = false; adminTokenMissing = true
+        }
+    }
+
+    /// 统一出口（TOP2）：admin 请求就地挂 X-Admin-Token。token 缺失返回 false —
+    /// 轮询静默跳过，用户动作显式报错；绝不静默发无 token 请求。
+    /// 兜底：网关可能晚于 App 首次 born（App 常驻而网关刚装好）— 重试一次迁移。
+    @discardableResult
+    private func attachAdminToken(_ request: inout URLRequest) -> Bool {
+        if let token = adminTokens.load(profile: CURRENT_PROFILE), !token.isEmpty {
+            request = AdminRequestAuthorizer.attach(request, profile: CURRENT_PROFILE, token: token)
+            return true
+        }
+        guard case .migrated = AdminTokenBootstrap.migrate(
+            store: adminTokens,
+            fileReader: AdminTokenBootstrap.secretsFileReader,
+            profile: CURRENT_PROFILE),
+            let token = adminTokens.load(profile: CURRENT_PROFILE), !token.isEmpty else {
+            return false
+        }
+        request = AdminRequestAuthorizer.attach(request, profile: CURRENT_PROFILE, token: token)
+        return true
+    }
+
+    /// admin 请求构造（统一 base/超时口径；inout 挂 token 由 attachAdminToken 负责）
+    private func adminRequest(_ path: String, timeoutInterval: TimeInterval = 30) -> URLRequest {
+        URLRequest(url: base.appendingPathComponent(path), timeoutInterval: timeoutInterval)
     }
 
     func refresh() {
@@ -686,7 +743,12 @@ final class GatewayStore: ObservableObject {
     func fetchPools(completion: (() -> Void)? = nil) {
         poolsFetchGeneration += 1
         let gen = poolsFetchGeneration
-        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/model-pools")) { [weak self] data, _, _ in
+        var req = adminRequest("/admin/model-pools")
+        guard attachAdminToken(&req) else {
+            DispatchQueue.main.async { completion?() }
+            return
+        }
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             guard let self, let data,
                   let pl = try? JSONDecoder().decode(PoolsPayload.self, from: data) else {
                 DispatchQueue.main.async { completion?() }
@@ -737,13 +799,20 @@ final class GatewayStore: ObservableObject {
     private func postPoolsMutation(_ mutate: @escaping (inout [String: Any]) -> Void,
                                    okMsg: String, failPrefix: String, allowRetry: Bool) {
         guard let url = URL(string: "\(GW_BASE)/admin/model-pools") else { poolMutationDone(); return }
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+        URLSession.shared.dataTask(with: url) { [weak self] data, resp, _ in
             guard let self, let data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   var raw = obj["raw"] as? [String: Any],
                   let rev = obj["revision"] as? Int else {
                 DispatchQueue.main.async {
-                    self?.notify(.error, "❌ 池配置读取失败")
+                    // TOP5 状态可信：离线/凭据未就绪/其它 — 不笼统报"读取失败"
+                    if self?.gatewayUp != true {
+                        self?.notify(.error, "❌ 网关离线 — 池配置未读取，网关启动后重试")
+                    } else if (resp as? HTTPURLResponse)?.statusCode == 401 {
+                        self?.notify(.error, "❌ 管理凭据未就绪（401）— 重启 App 重试 born 迁移")
+                    } else {
+                        self?.notify(.error, "❌ 池配置读取失败(\((resp as? HTTPURLResponse)?.statusCode ?? 0))")
+                    }
                     self?.poolMutationDone()
                 }
                 return
@@ -751,6 +820,13 @@ final class GatewayStore: ObservableObject {
             mutate(&raw)
             raw["expected_revision"] = rev
             var req = URLRequest(url: url, timeoutInterval: 30)
+            guard self.attachAdminToken(&req) else {
+                DispatchQueue.main.async {
+                    self.notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+                    self.poolMutationDone()
+                }
+                return
+            }
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try? JSONSerialization.data(withJSONObject: raw)
@@ -930,7 +1006,11 @@ final class GatewayStore: ObservableObject {
     /// 不存在"永久忽略较小 revision"）
     func togglePool(_ name: String, enabled: Bool, retried: Bool = false) {
         guard let rev = pools?.revision else { return }
-        var req = URLRequest(url: base.appendingPathComponent("/admin/model-pools/toggle"), timeoutInterval: 30)
+        var req = adminRequest("/admin/model-pools/toggle", timeoutInterval: 30)
+        guard attachAdminToken(&req) else {
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["pool": name, "enabled": enabled, "expected_revision": rev])
@@ -1016,7 +1096,9 @@ final class GatewayStore: ObservableObject {
     // ── PK4: 能力包 Catalog-only API（App 只提交 pack_id，URL/hash 后端定）──
 
     func fetchPackCatalog() {
-        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/packs/catalog")) { [weak self] data, _, _ in
+        var req = adminRequest("/admin/packs/catalog")
+        guard attachAdminToken(&req) else { return }
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             guard let self, let data,
                   let p = try? JSONDecoder().decode(PackCatalogPayload.self, from: data) else { return }
             DispatchQueue.main.async { self.packCatalog = p }
@@ -1024,7 +1106,9 @@ final class GatewayStore: ObservableObject {
     }
 
     func fetchPackStatus() {
-        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/packs/status")) { [weak self] data, _, _ in
+        var req = adminRequest("/admin/packs/status")
+        guard attachAdminToken(&req) else { return }
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             guard let self, let data,
                   let p = try? JSONDecoder().decode(PackStatusPayload.self, from: data) else { return }
             DispatchQueue.main.async {
@@ -1036,7 +1120,9 @@ final class GatewayStore: ObservableObject {
     }
 
     func fetchPackPolicy() {
-        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/packs/policy")) { [weak self] data, _, _ in
+        var req = adminRequest("/admin/packs/policy")
+        guard attachAdminToken(&req) else { return }
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             guard let self, let data,
                   let p = try? JSONDecoder().decode(PackPolicyPayload.self, from: data) else { return }
             DispatchQueue.main.async {
@@ -1049,7 +1135,11 @@ final class GatewayStore: ObservableObject {
     }
 
     func savePackPolicy(_ maxB: Int, _ reservedMB: Int) {
-        var req = URLRequest(url: base.appendingPathComponent("/admin/packs/policy"), timeoutInterval: 15)
+        var req = adminRequest("/admin/packs/policy", timeoutInterval: 15)
+        guard attachAdminToken(&req) else {
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
@@ -1071,7 +1161,11 @@ final class GatewayStore: ObservableObject {
     /// 安装：只提交 pack_id（Catalog-only 裁决）；进度看卡片阶段文案
     func startPackInstall(_ packId: String, _ label: String) {
         notify(.progress, "\(label) 安装中…")
-        var req = URLRequest(url: base.appendingPathComponent("/admin/packs/install"), timeoutInterval: 15)
+        var req = adminRequest("/admin/packs/install", timeoutInterval: 15)
+        guard attachAdminToken(&req) else {
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["pack_id": packId])
@@ -1093,7 +1187,12 @@ final class GatewayStore: ObservableObject {
     func previewPackUninstall(_ packId: String, _ label: String) {
         var comps = URLComponents(string: "\(GW_BASE)/admin/packs/uninstall-preview")!
         comps.queryItems = [URLQueryItem(name: "pack_id", value: packId)]
-        URLSession.shared.dataTask(with: comps.url!) { [weak self] data, resp, _ in
+        var req = URLRequest(url: comps.url!, timeoutInterval: 30)
+        guard attachAdminToken(&req) else {
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
             DispatchQueue.main.async {
@@ -1114,7 +1213,11 @@ final class GatewayStore: ObservableObject {
 
     func uninstallPackConfirmed(_ packId: String, _ label: String) {
         notify(.progress, "卸载 \(label) 中…")
-        var req = URLRequest(url: base.appendingPathComponent("/admin/packs/uninstall"), timeoutInterval: 60)
+        var req = adminRequest("/admin/packs/uninstall", timeoutInterval: 60)
+        guard attachAdminToken(&req) else {
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["pack_id": packId, "confirmed": true])
@@ -1132,7 +1235,9 @@ final class GatewayStore: ObservableObject {
     }
 
     func fetchCloud() {
-        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/cloud/providers")) { [weak self] data, _, _ in
+        var req = adminRequest("/admin/cloud/providers")
+        guard attachAdminToken(&req) else { return }
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             guard let self, let data,
                   let cp = try? JSONDecoder().decode(CloudPayload.self, from: data) else { return }
             DispatchQueue.main.async { self.cloud = cp }
@@ -1143,7 +1248,9 @@ final class GatewayStore: ObservableObject {
     func fetchSecurityStatus() {
         securityGeneration += 1
         let gen = securityGeneration
-        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/security/status")) { [weak self] data, resp, err in
+        var req = adminRequest("/admin/security/status")
+        guard attachAdminToken(&req) else { return }   // 凭据未就绪：轮询跳过（呈现"状态未知"，不假装）
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
             let outcome: Result<SecuritySnapshot, StatusFetchError> = {
                 if let snap = SecurityGatewayStatus.parse(data: data, response: resp, error: err) { return .success(snap) }
                 if let e = err { return .failure((e as NSError).code == NSURLErrorTimedOut ? .timeout : .transport) }
@@ -1176,7 +1283,12 @@ final class GatewayStore: ObservableObject {
     func createSecurityKey() {
         guard !securityBusy else { notify(.warning, "⚠️ 上一操作进行中，请稍候"); return }
         securityBusy = true
-        var req = URLRequest(url: base.appendingPathComponent("/admin/security/keys"), timeoutInterval: 30)
+        var req = adminRequest("/admin/security/keys", timeoutInterval: 30)
+        guard attachAdminToken(&req) else {
+            securityBusy = false
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": "macfabric-app"])
@@ -1203,7 +1315,12 @@ final class GatewayStore: ObservableObject {
     func revokeSecurityKey(_ id: String) {
         guard !securityBusy else { notify(.warning, "⚠️ 上一操作进行中，请稍候"); return }
         securityBusy = true
-        var req = URLRequest(url: base.appendingPathComponent("/admin/security/keys/revoke"), timeoutInterval: 30)
+        var req = adminRequest("/admin/security/keys/revoke", timeoutInterval: 30)
+        guard attachAdminToken(&req) else {
+            securityBusy = false
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["id": id])
@@ -1225,7 +1342,12 @@ final class GatewayStore: ObservableObject {
     func toggleSecurity(_ enable: Bool) {
         guard !securityBusy else { notify(.warning, "⚠️ 上一操作进行中，请稍候"); return }
         securityBusy = true
-        var req = URLRequest(url: base.appendingPathComponent("/admin/security/enable"), timeoutInterval: 30)
+        var req = adminRequest("/admin/security/enable", timeoutInterval: 30)
+        guard attachAdminToken(&req) else {
+            securityBusy = false
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["enforce": enable])
@@ -1383,7 +1505,11 @@ final class GatewayStore: ObservableObject {
     /// F3: 连通性测试（用已存 key 探测全部 base）
     func cloudTestProvider(_ name: String) {
         notify(.progress, "测试 \(name) 中…")
-        var req = URLRequest(url: base.appendingPathComponent("/admin/cloud/provider-test"), timeoutInterval: 30)
+        var req = adminRequest("/admin/cloud/provider-test", timeoutInterval: 30)
+        guard attachAdminToken(&req) else {
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["provider": name])
@@ -1421,6 +1547,11 @@ final class GatewayStore: ObservableObject {
         }
         cloudBusy = true
         var req = URLRequest(url: base.appendingPathComponent(path), timeoutInterval: timeout)
+        guard attachAdminToken(&req) else {
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            completion?(false)
+            return
+        }
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !body.isEmpty { req.httpBody = try? JSONSerialization.data(withJSONObject: body) }
@@ -1484,7 +1615,9 @@ final class GatewayStore: ObservableObject {
 
     /// Task 6 运行态：冷却原因/半开探测/最近真实尝试（池卡健康的数据源）
     func fetchPoolRuntime() {
-        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/model-pools/runtime")) { [weak self] data, _, _ in
+        var req = adminRequest("/admin/model-pools/runtime")
+        guard attachAdminToken(&req) else { return }
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             guard let self, let data,
                   let rp = try? JSONDecoder().decode(PoolRuntimePayload.self, from: data) else { return }
             DispatchQueue.main.async { self.monitorRuntime = rp }
@@ -1493,7 +1626,11 @@ final class GatewayStore: ObservableObject {
 
     /// 默认启动开关 — 改 models.d YAML autostart 字段（默认 false 不自动启动）
     func setAutostart(_ name: String, _ enabled: Bool) {
-        var req = URLRequest(url: base.appendingPathComponent("/admin/models/set-autostart"), timeoutInterval: 30)
+        var req = adminRequest("/admin/models/set-autostart", timeoutInterval: 30)
+        guard attachAdminToken(&req) else {
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": name, "enabled": enabled])
@@ -1525,7 +1662,11 @@ final class GatewayStore: ObservableObject {
     /// F4: 安装 = 写 models.d YAML + 热重载，不启动（首请求自动唤醒）
     func installLocalModel(_ m: LocalDiscovered) {
         notify(.progress, "安装 \(m.name) 中…")
-        var req = URLRequest(url: base.appendingPathComponent("/admin/packs/install"), timeoutInterval: 30)
+        var req = adminRequest("/admin/packs/install", timeoutInterval: 30)
+        guard attachAdminToken(&req) else {
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": m.name, "type": m.type ?? "llama_cpp"])
@@ -1556,7 +1697,11 @@ final class GatewayStore: ObservableObject {
 
     private func adminAction(_ path: String, model: String,
                              done: @escaping (FeedbackKind, String) -> Void) {
-        var req = URLRequest(url: base.appendingPathComponent(path), timeoutInterval: 180)
+        var req = adminRequest(path, timeoutInterval: 180)
+        guard attachAdminToken(&req) else {
+            done(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model])
@@ -1574,7 +1719,11 @@ final class GatewayStore: ObservableObject {
 
     func switchModel(_ name: String, force: Bool = false) {
         notify(.progress, force ? "已确认超卖，加载 \(name) 中…" : "切换 \(name) 中…（首次加载约 5~10s）")
-        var req = URLRequest(url: base.appendingPathComponent("/switch"), timeoutInterval: 180)
+        var req = adminRequest("/switch", timeoutInterval: 180)
+        guard attachAdminToken(&req) else {
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": name, "force": force])
@@ -1705,6 +1854,14 @@ struct FeedbackBanner: View {
                 Text(store.actionMessage).font(.system(size: 12)).foregroundColor(.ink)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
+                Button {
+                    store.clearActionMessage()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11)).foregroundColor(.faint)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("清除反馈")
             }
             .padding(8).frame(maxWidth: .infinity)
             .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
@@ -1978,10 +2135,19 @@ struct HubView: View {
                 }
                 Group {
                     if allRows.isEmpty {
-                        Text("暂无模型 — 本地模型到「本地推理」加载，云端模型到「云端接入」启用")
-                            .font(.system(size: 12)).foregroundColor(.faint)
+                        if store.gatewayUp {
+                            Text("暂无模型 — 本地模型到「本地推理」加载，云端模型到「云端接入」启用")
+                                .font(.system(size: 12)).foregroundColor(.faint)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                                .padding(.top, 24)
+                        } else {
+                            VStack(spacing: 6) {
+                                Text("网关离线").font(.system(size: 13, weight: .medium)).foregroundColor(.dim)
+                                Text("已加载的模型列表会在网关启动后自动恢复").font(.system(size: 12)).foregroundColor(.faint)
+                            }
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                             .padding(.top, 24)
+                        }
                     } else {
                         // 单张统一表（原生 Table）：本地 + 云端同页，类型/来源成列
                         ModelTable(page: .hub, rows: allRows,
@@ -3264,7 +3430,7 @@ struct PacksView: View {
             if let s = row.sizeText { f.append(ModelDetailField("体积", s, mono: false, copyable: false)) }
             if let ip = rec?.install_path { f.append(ModelDetailField("路径", ip)) }
             // 标签详情栏给全量（表格列至多主+2 修饰；spec 2026-11-17 呈现规则）
-            let allTags = CapabilityTags.displayTags(capability: manifest.capability,
+            let allTags = CapabilityTags.displayTags(capability: entry.manifest.capability,
                                                      tags: entry.tags ?? [], modifierLimit: .max)
             f.append(ModelDetailField("能力", allTags.map(\.label).joined(separator: " / "),
                                       mono: false, copyable: false))

@@ -5,6 +5,14 @@ import Foundation
 import Security
 
 struct KeychainCredentialStore: GatewayCredentialStore {
+    // service 注入支持双账目：推理 key 用默认 service，admin token 用
+    // io.macfabric.gateway-admin（AdminTokenCredentialStore.serviceName）。
+    let service: String
+
+    init(service: String = GatewayProfile.keychainService) {
+        self.service = service
+    }
+
     func load(profile: GatewayProfile) throws -> String? {
         var query = baseQuery(profile)
         query[kSecReturnData as String] = true
@@ -29,7 +37,7 @@ struct KeychainCredentialStore: GatewayCredentialStore {
         SecItemDelete(baseQuery(profile) as CFDictionary)
         let attrs: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: GatewayProfile.keychainService,
+            kSecAttrService as String: service,
             kSecAttrAccount as String: profile.keychainAccount,
             kSecValueData as String: Data(key.utf8),
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
@@ -50,7 +58,7 @@ struct KeychainCredentialStore: GatewayCredentialStore {
     private func baseQuery(_ profile: GatewayProfile) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: GatewayProfile.keychainService,
+            kSecAttrService as String: service,
             kSecAttrAccount as String: profile.keychainAccount,
         ]
     }
