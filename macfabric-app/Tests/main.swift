@@ -291,6 +291,23 @@ gen.bump()
 gen.bump()
 check("generationGuardOldDropped", gen.accept(1) == false && gen.accept(3) == true && gen.accept(2) == false)
 
+// ── 批 3：SSE 解析 / 选模型 / 停止文案（spec 2026-11-17-batch3-stream-chat.md）──
+
+check("sseDeltaContent", SSEParser.parse(line: "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}").delta == "Hello")
+check("sseRoleFirstFrameNil", SSEParser.parse(line: "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}").delta == nil)
+check("sseDoneFrame", SSEParser.parse(line: "data: [DONE]").done == true)
+check("sseCommentIgnored", SSEParser.parse(line: ": keepalive").done == false && SSEParser.parse(line: ": keepalive").delta == nil)
+check("sseMalformedFrameHonest", SSEParser.parse(line: "data: not-json").delta == nil && SSEParser.parse(line: "data: not-json").done == false)
+check("sseUsageTailFrameNil", SSEParser.parse(line: "data: {\\").delta == nil)
+
+check("chatTargetPreferredKept", ChatTargetPicker.pick(activeLLMs: ["a", "b"], preferred: "b") == "b")
+check("chatTargetPreferredGoneFallback", ChatTargetPicker.pick(activeLLMs: ["a", "b"], preferred: "z") == "a")
+check("chatTargetNoPreferredFirst", ChatTargetPicker.pick(activeLLMs: ["a", "b"], preferred: nil) == "a")
+check("chatTargetEmptyNil", ChatTargetPicker.pick(activeLLMs: [], preferred: "a") == nil)
+
+check("chatStopKeepsPartial", ChatStop.finalText("今天天气") == "今天天气\n\n（已停止 — 部分回复）")
+check("chatStopEmptyHonest", ChatStop.finalText("") == "（已停止 — 未收到内容）")
+
 // ── 汇总（文件末尾）：任何位置断言失败都能如实报告，杜绝“静默失败 + exit 0”盲区 ──
 if failures.isEmpty {
     print("CONTRACT_TESTS_OK: 全部断言通过")

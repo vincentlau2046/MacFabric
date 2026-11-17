@@ -132,3 +132,43 @@ struct GenerationGuard {
         return true
     }
 }
+
+// ── 批 3：试聊流式三件套（纯函数，契约测试钉住）────────────────
+
+/// SSE data: 帧增量解析 — 只关心 chat.completions 的 delta.content。
+enum SSEParser {
+    struct Event: Equatable {
+        var delta: String?   // 增量正文（无正文帧为 nil）
+        var done: Bool       // data: [DONE]
+    }
+
+    /// 输入一行原始 SSE 文本（已去行尾换行）；非 data: 行忽略。
+    static func parse(line: String) -> Event {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("data:") else { return Event(delta: nil, done: false) }
+        let payload = trimmed.dropFirst(5).trimmingCharacters(in: .whitespaces)
+        if payload == "[DONE]" { return Event(delta: nil, done: true) }
+        guard let data = payload.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = obj["choices"] as? [[String: Any]] else { return Event(delta: nil, done: false) }
+        // 兼容 role-only 首帧 / delta 缺失 / usage 尾帧
+        guard let delta = choices.first?["delta"] as? [String: Any] else { return Event(delta: nil, done: false) }
+        return Event(delta: delta["content"] as? String, done: false)
+    }
+}
+
+/// 试聊目标模型选择 — 只认活跃 LLM，绝不回退嵌入/首个任意模型。
+enum ChatTargetPicker {
+    static func pick(activeLLMs: [String], preferred: String?) -> String? {
+        if let preferred, activeLLMs.contains(preferred) { return preferred }
+        return activeLLMs.first
+    }
+}
+
+/// 停止收尾 — 已到部分如实保留 + 标注；空则诚实说没收到内容。
+enum ChatStop {
+    static func finalText(_ partial: String) -> String {
+        let trimmed = partial.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "（已停止 — 未收到内容）" : partial + "\n\n（已停止 — 部分回复）"
+    }
+}

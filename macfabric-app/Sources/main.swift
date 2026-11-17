@@ -349,6 +349,8 @@ final class GatewayStore: ObservableObject {
     @Published var prompt = "你好，介绍一下你自己"
     @Published var reply = ""
     @Published var busy = false
+    @Published var chatModelID: String? = nil   // 试聊选中模型（活跃 LLM 菜单）
+    var chatTask: Task<Void, Never>? = nil      // 流式任务句柄（停止用）
     @Published var models: [ModelItem] = []
     @Published var curve: [CurvePoint] = []
     /// 操作反馈横幅（批 1 TOP5 状态可信）：错误持久显示 — 新反馈或用户清除才消失，
@@ -1763,19 +1765,22 @@ final class GatewayStore: ObservableObject {
         adminAction("/wake", model: name) { [weak self] k, msg in self?.notify(k, msg) }
     }
 
+    /// 批 3：SSE 流式试聊 — 逐帧增量、可停止、可选模型（spec 2026-11-17-batch3-stream-chat.md）
     func sendPrompt() {
         busy = true; reply = ""
-        // B2/契约：试聊只认活跃 LLM，绝不回退嵌入/首个模型
-        guard let target = models.first(where: { $0.active == true && $0.model_type == "llm" })?.name else {
+        // B2/契约：试聊只认活跃 LLM，绝不回退嵌入/首个模型；批 3：优先用户选中项
+        let activeLLMs = models.filter { $0.active == true && $0.model_type == "llm" }.map(\.name)
+        guard let target = ChatTargetPicker.pick(activeLLMs: activeLLMs, preferred: chatModelID) else {
             busy = false
             reply = "没有活跃的对话模型 — 到「本地推理」加载一个文本生成模型后再试"
             return
         }
+        chatModelID = target
         var req = URLRequest(url: base.appendingPathComponent("/v1/chat/completions"), timeoutInterval: 180)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "model": target, "max_tokens": 300,
+            "model": target, "max_tokens": 300, "stream": true,
             "chat_template_kwargs": ["enable_thinking": false],
             "messages": [["role": "user", "content": prompt]],
         ])
@@ -1783,29 +1788,62 @@ final class GatewayStore: ObservableObject {
         if let key = currentAPIKey {
             req = (try? InferenceRequestAuthorizer.authorize(req, profile: CURRENT_PROFILE, key: key)) ?? req
         }
-        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
-            defer { DispatchQueue.main.async { self?.busy = false } }
-            guard let self, let data,
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let choices = obj["choices"] as? [[String: Any]],
-                  let msg = choices.first?["message"] as? [String: Any] else {
+        chatTask = Task { [weak self] in
+            guard let self else { return }
+            var partial = ""
+            do {
+                let (bytes, resp) = try await URLSession.shared.bytes(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-                let detail = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-                DispatchQueue.main.async {
-                    // 401/403 是鉴权问题，绝不提示安装模型
-                    let hint = (code == 401 || code == 403)
-                        ? "鉴权失败 — 到设置页录入有效的 API Key（或删除失效密钥）"
-                        : "若模型未装，先到能力包页安装轻量对话包"
-                    self?.reply = "请求失败(\(code)) \(detail.prefix(140)) — \(hint)"
+                guard (200..<300).contains(code) else {
+                    var detail = ""
+                    for try await b in bytes {
+                        detail.append(Character(UnicodeScalar(b)))
+                        if detail.count >= 160 { break }
+                    }
+                    DispatchQueue.main.async {
+                        self.busy = false
+                        // 401/403 是鉴权问题，绝不提示安装模型（批 1 语义）
+                        self.reply = (code == 401 || code == 403)
+                            ? "鉴权失败(\(code)) — 到设置页录入有效的 API Key（或删除失效密钥）"
+                            : "请求失败(\(code)) \(detail.prefix(140)) — 若模型未装，先到能力包页安装轻量对话包"
+                    }
+                    return
                 }
-                return
+                var sawDelta = false
+                for try await line in bytes.lines {
+                    try Task.checkCancellation()
+                    let ev = SSEParser.parse(line: line)
+                    if ev.done { break }
+                    guard let d = ev.delta, !d.isEmpty else { continue }
+                    sawDelta = true
+                    partial += d
+                    DispatchQueue.main.async { self.reply = partial }
+                }
+                try Task.checkCancellation()
+                DispatchQueue.main.async {
+                    self.busy = false
+                    // 思考模型可能吃满 max_tokens 致 content 为空 — 如实提示而非报错
+                    if !sawDelta && partial.isEmpty {
+                        self.reply = "（模型思考占满了输出预算，未产出正文 — 重试或换个模型）"
+                    }
+                }
+            } catch is CancellationError {
+                DispatchQueue.main.async {
+                    self.busy = false
+                    self.reply = ChatStop.finalText(partial)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.busy = false
+                    self.reply = "连接失败 — 检查网关状态后重试（\(error.localizedDescription)）"
+                }
             }
-            let content = (msg["content"] as? String) ?? ""
-            DispatchQueue.main.async {
-                // 思考模型可能吃满 max_tokens 致 content 为空 — 如实提示而非报错
-                self.reply = content.isEmpty ? "（模型思考占满了输出预算，未产出正文 — 重试或换个模型）" : content
-            }
-        }.resume()
+        }
+    }
+
+    /// 批 3：停止当前试聊 — 取消流式任务；部分回复由 CancellationError 分支收尾保留
+    func stopChat() {
+        chatTask?.cancel()
     }
 
     // 织物条数据：预算 B、已用、系统保留 8G
@@ -2458,14 +2496,48 @@ struct SmallBtn: View {
 
 struct ChatStrip: View {
     @ObservedObject var store: GatewayStore
+    // 活跃 LLM 菜单（批 3：选模型）；选中项失活回退首个活跃 LLM
+    private var activeLLMs: [ModelItem] { store.models.filter { $0.active == true && $0.model_type == "llm" } }
+    private var effectiveTarget: String? { ChatTargetPicker.pick(activeLLMs: activeLLMs.map(\.name), preferred: store.chatModelID) }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("试聊 · 经 :\(GW_PORT) 网关").font(.system(size: 11.5)).foregroundColor(.faint)
+            HStack(spacing: 8) {
+                Text("试聊 · 经 :\(GW_PORT) 网关").font(.system(size: 11.5)).foregroundColor(.faint)
+                if !activeLLMs.isEmpty {
+                    Menu {
+                        ForEach(activeLLMs, id: \.name) { m in
+                            Button {
+                                store.chatModelID = m.name
+                            } label: {
+                                if store.chatModelID == m.name || (store.chatModelID == nil && m.name == effectiveTarget) {
+                                    Text(m.name + " ✓")
+                                } else {
+                                    Text(m.name)
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "chevron.down.circle").font(.system(size: 9))
+                            Text(effectiveTarget ?? "选模型").font(.system(size: 11))
+                        }.foregroundColor(.dim)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .accessibilityIdentifier("chat-model-menu")
+                }
+                Spacer()
+            }
             HStack(spacing: 8) {
                 TextField("输入…", text: Binding(get: { store.prompt }, set: { store.prompt = $0 }))
                     .textFieldStyle(.roundedBorder)
-                SmallBtn(store.busy ? "推理中…" : "发送", primary: !store.busy) { store.sendPrompt() }
-                    .disabled(store.busy)
+                    .onSubmit { if !store.busy { store.sendPrompt() } }
+                if store.busy {
+                    SmallBtn("停止", primary: false) { store.stopChat() }
+                        .accessibilityIdentifier("chat-stop")
+                } else {
+                    SmallBtn("发送", primary: true) { store.sendPrompt() }
+                }
             }
             if !store.reply.isEmpty {
                 ScrollView {
@@ -2477,7 +2549,6 @@ struct ChatStrip: View {
         .padding(12)
     }
 }
-
 // ─── 模型池 / 监控台 ────────────────────────────────────────────
 
 /// 模型池：真数据（GET /admin/model-pools）— 角色池 + 竖排候选链 + 优先级可调（CAS PUT）
