@@ -182,8 +182,51 @@ check("installedNotRunning", installedIdle.actionTarget.packID != nil && !instal
 let runningNoPack = ProductModel(id: "i2", displayName: "Y", type: .llm, active: true)
 check("runningNotPackManaged", runningNoPack.active && runningNoPack.actionTarget.packID == nil)
 
+// 21. 能力包标签统一（#45，spec 2026-11-17）：主标签由 capability 映射；修饰标签已知词映射/未知词透传
+struct PackTagCase: Decodable {
+    let name: String; let capability: String; let tags: [String]
+}
+let packCases: [PackTagCase] = {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: "macfabric-app/Tests/Fixtures/pack-tags.json")) else { return [] }
+    return (try? JSONDecoder().decode([PackTagCase].self, from: data)) ?? []
+}()
+func capText(_ tags: [CapabilityTag]) -> String { tags.map(\.label).joined(separator: " / ") }
+check("packTagFixtureLoads", packCases.count == 6, "loaded \(packCases.count)")
+
+let llmFull = packCases.first { $0.name == "llm-full" }
+let llmTags = CapabilityTags.displayTags(capability: llmFull?.capability ?? "", tags: llmFull?.tags ?? [])
+check("packPrimaryFromCapability", llmTags.first == CapabilityTag(id: "llm", label: "对话"), "got \(llmTags.first.map { "\($0.id)|\($0.label)" } ?? "nil")")
+check("packModifierMapped", capText(llmTags).contains("工具调用") && capText(llmTags).contains("多语"), "got \(capText(llmTags))")
+check("packRawTagNotShown", !capText(llmTags).contains("chat") && !capText(llmTags).contains("multilingual"), "got \(capText(llmTags))")
+
+let unk = packCases.first { $0.name == "unknown-tag" }
+check("unknownTagPassthrough", capText(CapabilityTags.displayTags(capability: unk?.capability ?? "", tags: unk?.tags ?? [])).contains("future-cap"))
+
+let cust = packCases.first { $0.name == "custom" }
+check("customTagMapped", capText(CapabilityTags.displayTags(capability: cust?.capability ?? "", tags: cust?.tags ?? [])).contains("自定义"))
+
+let vlCase = packCases.first { $0.name == "vl" }
+let vlTags = CapabilityTags.displayTags(capability: vlCase?.capability ?? "", tags: vlCase?.tags ?? [])
+check("visionPrimaryAnchored", vlTags.first == CapabilityTag(id: "vision", label: "看图"), "got \(vlTags.first.map { "\($0.id)|\($0.label)" } ?? "nil")")
+
+let empty = packCases.first { $0.name == "empty-tags" }
+check("noVisionSynthesized", !CapabilityTags.displayTags(capability: empty?.capability ?? "", tags: empty?.tags ?? [])
+    .contains(where: { $0.id == "vision" || $0.label == "看图" }))
+
+let capped = packCases.first { $0.name == "modifier-cap" }
+let cappedTags = CapabilityTags.displayTags(capability: capped?.capability ?? "", tags: capped?.tags ?? [])
+check("modifiersCappedAtTwo", cappedTags.count == 3 && capText(cappedTags) == "对话 / 工具调用 / 多语", "got \(capText(cappedTags))")
+let fullDetail = CapabilityTags.displayTags(capability: capped?.capability ?? "", tags: capped?.tags ?? [], modifierLimit: .max)
+check("detailShowsAllTags", fullDetail.count == 5, "got \(fullDetail.count)")
+
+// 22. 看图三态呈现（沿用网关 model_specs 口径；禁 bool() 塌缩 — spec 语义红线 2）
+check("visionTriState", VisionPresentation.showsTag(supportsVision: true)
+    && !VisionPresentation.showsTag(supportsVision: nil) && !VisionPresentation.showsTag(supportsVision: false))
+check("visionDetailHonest", VisionPresentation.detailText(supportsVision: false) == "不支持"
+    && VisionPresentation.detailText(supportsVision: nil) == nil && VisionPresentation.detailText(supportsVision: true) == nil)
+
 if failures.isEmpty {
-    print("CONTRACT_TESTS_OK: 20 组断言全部通过")
+    print("CONTRACT_TESTS_OK: 22 组断言全部通过")
 } else {
     print("CONTRACT_TESTS_FAILED: \(failures.count)")
     failures.forEach { print("  FAIL: \($0)") }

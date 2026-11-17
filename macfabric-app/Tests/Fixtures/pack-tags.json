@@ -1,0 +1,8 @@
+[
+  {"name": "llm-full", "capability": "llm", "tags": ["chat", "tools", "multilingual"]},
+  {"name": "unknown-tag", "capability": "llm", "tags": ["future-cap"]},
+  {"name": "custom", "capability": "llm", "tags": ["custom"]},
+  {"name": "vl", "capability": "vl", "tags": []},
+  {"name": "empty-tags", "capability": "llm", "tags": []},
+  {"name": "modifier-cap", "capability": "llm", "tags": ["tools", "multilingual", "retrieval", "low-latency"]}
+]

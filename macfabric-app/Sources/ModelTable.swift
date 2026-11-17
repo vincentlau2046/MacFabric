@@ -162,7 +162,8 @@ struct ModelTable: View {
     }
     private var capsColumn: some TableColumnContent<ModelTableRow, Never> {
         TableColumn("能力") { r in
-            Text(r.capabilities.prefix(2).map { tag in tag.label }.joined(separator: " / "))
+            // 主标签在前 + 至多 2 修饰（#45 呈现规则；上限在 CapabilityTags 出口已保证，此处兜底）
+            Text(r.capabilities.prefix(3).map { tag in tag.label }.joined(separator: " / "))
                 .foregroundStyle(.secondary)
         }
         .width(min: 90, ideal: 150)

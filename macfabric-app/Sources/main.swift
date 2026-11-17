@@ -1907,10 +1907,10 @@ struct HubView: View {
 
     // 云端模型行：上游 ID 原样保留作标题（裁决 2026-11-16）。
     // 类型按服务事实归类：发现载荷均为 openai/anthropic chat 可用 → 文本生成；
-    // supports_vision=true（真实能力标记）追加“看图”能力，不凭名字猜。
+    // 看图三态统一走 VisionPresentation（supports_vision==true 才出标签，nil/false 均不出）。
     private var cloudRows: [ModelTableRow] {
         (store.cloud?.models ?? []).map { cm in
-            let caps: [CapabilityTag] = (cm.capabilities?.supports_vision == true)
+            let caps: [CapabilityTag] = VisionPresentation.showsTag(supportsVision: cm.capabilities?.supports_vision)
                 ? [CapabilityTag(id: "vision", label: "看图")] : []
             return ModelTableRow(
                 id: "cloud|\(cm.id)",
@@ -1953,6 +1953,12 @@ struct HubView: View {
         var f: [ModelDetailField] = []
         f.append(ModelDetailField("Base URL", "\(GW_BASE)/v1", mono: true, copyable: true))
         f.append(ModelDetailField("来源", row.sourceText ?? "本地模型", mono: false, copyable: false))
+        // 看图三态详情（spec 2026-11-17 红线 2）：仅 supports_vision=false 如实标注"不支持"；
+        // 未声明(nil)不提、已支持(true)已有能力标签不重复
+        if let cm = (store.cloud?.models ?? []).first(where: { "cloud|\($0.id)" == row.id }),
+           let note = VisionPresentation.detailText(supportsVision: cm.capabilities?.supports_vision) {
+            f.append(ModelDetailField("看图", note, mono: false, copyable: false))
+        }
         if let ep = APIExamples.endpoint(for: row.type) {
             f.append(ModelDetailField("端点", ep, mono: true, copyable: false))
         }
@@ -3104,7 +3110,7 @@ struct PacksView: View {
                 id: rowID,
                 title: entry.display_name,
                 type: PrimaryType.from(raw: manifest.capability),
-                capabilities: (entry.tags ?? []).map { CapabilityTag(id: $0, label: $0) },
+                capabilities: CapabilityTags.displayTags(capability: manifest.capability, tags: entry.tags ?? []),
                 statusText: installed ? "已安装" : (failed ? "失败" : (inProgress ? "安装中" : nil)),
                 target: ModelActionTarget(instanceID: packId, apiModelID: packId, packID: packId),
                 actions: actions,
@@ -3125,6 +3131,11 @@ struct PacksView: View {
             if let v = row.variantText { f.append(ModelDetailField("变体", v, mono: false, copyable: false)) }
             if let s = row.sizeText { f.append(ModelDetailField("体积", s, mono: false, copyable: false)) }
             if let ip = rec?.install_path { f.append(ModelDetailField("路径", ip)) }
+            // 标签详情栏给全量（表格列至多主+2 修饰；spec 2026-11-17 呈现规则）
+            let allTags = CapabilityTags.displayTags(capability: manifest.capability,
+                                                     tags: entry.tags ?? [], modifierLimit: .max)
+            f.append(ModelDetailField("能力", allTags.map(\.label).joined(separator: " / "),
+                                      mono: false, copyable: false))
             f.append(ModelDetailField("说明", entry.summary, mono: false, copyable: false))
             if rec?.sandbox_degraded == true {
                 f.append(ModelDetailField("注意", "沙箱降级安装", mono: false, copyable: false))

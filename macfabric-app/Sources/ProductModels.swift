@@ -210,6 +210,70 @@ struct ProductModel: Identifiable, Equatable, Decodable {
     }
 }
 
+// ── 能力标签目录（#45，spec 2026-11-17：标签唯一标准词汇出处）──
+// 语义红线：标签纯展示，绝不做门禁；三态沿用网关口径，严禁 bool() 塌缩。
+enum CapabilityTags {
+    /// 主标签（规范，必显示）：capability → 标准词。
+    /// vl 固定 id "vision"（看图图标判定锚点，不得改名）；未知类型诚实原文，不猜。
+    static func primaryTag(capability: String) -> CapabilityTag {
+        switch capability {
+        case "llm": CapabilityTag(id: "llm", label: "对话")
+        case "vl": CapabilityTag(id: "vision", label: "看图")
+        case "embedding": CapabilityTag(id: "embedding", label: "嵌入/检索")
+        case "rerank": CapabilityTag(id: "rerank", label: "重排")
+        case "asr": CapabilityTag(id: "asr", label: "语音转写")
+        case "tts": CapabilityTag(id: "tts", label: "语音合成")
+        case "ocr": CapabilityTag(id: "ocr", label: "文字识别")
+        case "aigc": CapabilityTag(id: "aigc", label: "生图")
+        default: CapabilityTag(id: capability, label: capability)
+        }
+    }
+
+    /// 修饰标签：已知词映射，未知词原样透传（不丢、不猜）。
+    static func modifierTag(_ raw: String) -> CapabilityTag {
+        switch raw {
+        case "chat": CapabilityTag(id: "chat", label: "对话")   // 与 llm 主标签同义 → 展示层去重
+        case "tools": CapabilityTag(id: "tools", label: "工具调用")
+        case "multilingual": CapabilityTag(id: "multilingual", label: "多语")
+        case "retrieval": CapabilityTag(id: "retrieval", label: "检索")
+        case "low-latency": CapabilityTag(id: "low-latency", label: "低延迟")
+        case "builtin": CapabilityTag(id: "builtin", label: "内置")
+        case "zero-download": CapabilityTag(id: "zero-download", label: "零下载")
+        case "custom": CapabilityTag(id: "custom", label: "自定义")
+        default: CapabilityTag(id: raw, label: raw)
+        }
+    }
+
+    /// 呈现：主标签在前 + 修饰标签（表格默认至多 2 个；详情栏传 .max 取全量）。
+    /// chat 与主标签同义时去重；只做展示重排，不增删语义（三态由网关 payload 决定）。
+    static func displayTags(capability: String, tags: [String], modifierLimit: Int = 2) -> [CapabilityTag] {
+        let primary = primaryTag(capability: capability)
+        var out = [primary]
+        var shown = Set([primary.label])
+        var count = 0
+        for raw in tags {
+            guard count < modifierLimit else { break }
+            let tag = modifierTag(raw)
+            if tag.label == primary.label { continue }   // chat 等同义词去重
+            guard !shown.contains(tag.label) else { continue }
+            out.append(tag)
+            shown.insert(tag.label)
+            count += 1
+        }
+        return out
+    }
+}
+
+/// 看图三态呈现（沿用网关 model_specs/routable_caps 口径；禁 bool() 塌缩）：
+/// nil=未声明 → 无标签、详情不提；true → 表格能力标签；false → 表格无标签、详情如实"不支持"。
+enum VisionPresentation {
+    static func showsTag(supportsVision: Bool?) -> Bool { supportsVision == true }
+    static func detailText(supportsVision: Bool?) -> String? {
+        if supportsVision == false { return "不支持" }
+        return nil
+    }
+}
+
 // ── 资源与预算（唯一口径；reserve 只扣一次）─────────────────────
 
 enum MemoryMath {
