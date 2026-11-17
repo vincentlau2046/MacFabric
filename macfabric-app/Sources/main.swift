@@ -498,6 +498,138 @@ final class GatewayStore: ObservableObject {
     private var confirmResetSecKey: DispatchWorkItem?
     var onMemoryInsufficient: ((_ name: String, _ reason: String) -> Void)?
 
+    // ── 网关守护（设置页"开机时启动网关"Toggle — spec 2026-11-17-gateway-daemon-toggle.md）──
+    // 使能语义 = plist 存在（登录自启注册即已使能；进程瞬时波动不影响开关呈现）。
+    // 红线：只按精确 label bootout/bootstrap，严禁全局 pkill proxy.handler。
+    @Published var daemonInstalled = false
+    @Published var daemonRunningPID: String? = nil
+    @Published var daemonBusy = false
+    /// QA 注入（沙箱 e2e 用 env 覆盖 label/program；生产进程不带这些环境变量）
+    static var daemonQALabel: String? = ProcessInfo.processInfo.environment["MACFABRIC_DAEMON_LABEL"]
+    static var daemonQAProgramArgs: [String]? = {
+        guard let raw = ProcessInfo.processInfo.environment["MACFABRIC_DAEMON_PROGRAM_ARGS"] else { return nil }
+        return raw.components(separatedBy: "\u{1f}")
+    }()
+    private var daemonLabel: String { Self.daemonQALabel ?? GatewayDaemon.defaultLabel }
+    private var daemonPlistPath: String {
+        NSString("~/Library/LaunchAgents/\(daemonLabel).plist").expandingTildeInPath
+    }
+
+    /// Settings onAppear / 操作后刷新：plist 存在性 + launchctl print 三态
+    func refreshDaemonState() {
+        let fm = FileManager.default
+        let plistExists = fm.fileExists(atPath: daemonPlistPath)
+        let args = GatewayDaemon.printArgs(uid: String(getuid()), label: daemonLabel)
+        let out = runLaunchctl(args)
+        DispatchQueue.main.async {
+            switch GatewayDaemon.state(plistExists: plistExists, launchctlPrint: out) {
+            case .notInstalled:
+                self.daemonInstalled = false; self.daemonRunningPID = nil
+            case .stopped:
+                self.daemonInstalled = true; self.daemonRunningPID = nil
+            case .running(let pid):
+                self.daemonInstalled = true; self.daemonRunningPID = pid
+            }
+        }
+    }
+
+    /// 开：校验 prod venv → 写 plist → bootstrap（已加载则跳过 bootstrap）
+    func enableDaemon() {
+        guard !daemonBusy else { notify(.warning, "⚠️ 上一操作进行中，请稍候"); return }
+        daemonBusy = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let prodDir: String
+            let modelsDir: String
+            let logPath: String
+            if Self.daemonQALabel != nil {
+                // 沙箱 e2e：目录走 env（不触生产路径）
+                let env = ProcessInfo.processInfo.environment
+                prodDir = env["MACFABRIC_DAEMON_PROD_DIR"] ?? "/tmp"
+                modelsDir = env["MACFABRIC_DAEMON_MODELS_DIR"] ?? "/tmp"
+                logPath = env["MACFABRIC_DAEMON_LOG"] ?? "/tmp/daemon-qa.log"
+            } else {
+                prodDir = NSString("~/Library/MacFabric/prod").expandingTildeInPath
+                modelsDir = NSString("~/.inferfabric/models.d").expandingTildeInPath
+                logPath = NSString("~/.inferfabric/logs/gateway.launchd.log").expandingTildeInPath
+            }
+            var failure: String? = nil
+            if Self.daemonQALabel == nil {
+                let fm = FileManager.default
+                guard fm.fileExists(atPath: "\(prodDir)/.venv/bin/python") else {
+                    failure = "未找到生产安装（\(prodDir)/.venv/bin/python 不存在）— 请先执行 scripts/release-install.sh"
+                }
+                guard fm.fileExists(atPath: modelsDir) else {
+                    failure = failure ?? "未找到模型配置目录（\(modelsDir)）— 请先执行 scripts/release-install.sh"
+                }
+            }
+            if failure == nil {
+                try? FileManager.default.createDirectory(
+                    withIntermediateDirectories: true,
+                    forPath: (daemonPlistPath as NSString).deletingLastPathComponent)
+                try? FileManager.default.createDirectory(
+                    withIntermediateDirectories: true, forPath: (logPath as NSString).deletingLastPathComponent)
+                let xml = GatewayDaemon.plistXML(prodDir: prodDir, modelsDir: modelsDir, logPath: logPath,
+                                                 label: self.daemonLabel, programArgs: Self.daemonQAProgramArgs)
+                do {
+                    try xml.write(toFile: self.daemonPlistPath, atomically: true, encoding: .utf8)
+                } catch {
+                    failure = "写入 plist 失败: \(error.localizedDescription)"
+                }
+            }
+            if failure == nil {
+                // 已加载则跳过 bootstrap（重复 bootstrap 会报 9: Bundle already loaded）
+                if self.runLaunchctl(GatewayDaemon.printArgs(uid: String(getuid()), label: self.daemonLabel)) == nil {
+                    _ = self.runLaunchctl(GatewayDaemon.bootstrapArgs(uid: String(getuid()), plistPath: self.daemonPlistPath))
+                }
+            }
+            DispatchQueue.main.async {
+                self.daemonBusy = false
+                if let failure {
+                    self.notify(.error, "❌ \(failure)")
+                } else {
+                    self.notify(.success, "✅ 网关守护已使能 — 登录时自启、崩溃自愈")
+                }
+                self.refreshDaemonState()
+            }
+        }
+    }
+
+    /// 关：bootout（按精确 label）→ 删 plist。调用方必须先经确认对话框（停生产网关）。
+    func disableDaemon() {
+        guard !daemonBusy else { notify(.warning, "⚠️ 上一操作进行中，请稍候"); return }
+        daemonBusy = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            _ = self.runLaunchctl(GatewayDaemon.bootoutArgs(uid: String(getuid()), label: self.daemonLabel))
+            try? FileManager.default.removeItem(atPath: self.daemonPlistPath)
+            DispatchQueue.main.async {
+                self.daemonBusy = false
+                self.notify(.success, "✅ 网关守护已停用 — 登录不再自启；如需恢复请重新打开开关")
+                self.refreshDaemonState()
+            }
+        }
+    }
+
+    @discardableResult
+    private func runLaunchctl(_ args: [String]) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        do {
+            try p.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            let out = String(data: data, encoding: .utf8) ?? ""
+            return p.terminationStatus == 0 ? out : nil
+        } catch {
+            return nil
+        }
+    }
+
     private var base: URL { URL(string: GW_BASE)! }
     private var timer: Timer?
     private var curveTimer: Timer?
@@ -3626,8 +3758,18 @@ struct SettingsView: View {
                 Card {
                     VStack(alignment: .leading, spacing: 0) {
                         SettingRow(title: "开机时启动网关",
-                                   desc: "需在终端执行 scripts/install-launchd.sh install 批准（v1.5 App 内一键）",
-                                   on: false, disabled: true)
+                                   desc: daemonDesc(store),
+                                   on: store.daemonInstalled,
+                                   disabled: store.daemonBusy,
+                                   onToggle: { enable in
+                                       if enable {
+                                           store.enableDaemon()
+                                       } else {
+                                           // 关闭 = 停生产网关（推理中断）— 必须确认（spec 红线）
+                                           store.confirm("关闭后网关不再开机自启，并会立即停止当前生产网关（:8999），正在进行的推理将中断。确认关闭？",
+                                                         store.disableDaemon)
+                                       }
+                                   })
                         SettingRow(title: "仅本机监听",
                                    desc: "关闭后局域网设备可访问 :\(GW_PORT)（设计稿 v1.5 项，网关端点后接）",
                                    on: true, disabled: true)
@@ -3733,7 +3875,10 @@ struct SettingsView: View {
                     .font(.system(size: 11)).foregroundColor(.faint)
             }
             .padding(16)
-            .onAppear { store.fetchPackPolicy() }
+            .onAppear {
+                store.fetchPackPolicy()
+                store.refreshDaemonState()
+            }
             .onChange(of: store.packPolicy) { p in
                 guard let p else { return }
                 store.packMaxBDraft = "\(p.max_model_parameters_b)"
@@ -3794,6 +3939,7 @@ struct SettingRow: View {
     var path: String? = nil
     var button: String? = nil
     var disabled = false
+    var onToggle: ((Bool) -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 12) {
@@ -3808,13 +3954,28 @@ struct SettingRow: View {
             if let button {
                 SmallBtn(button) {}
             } else if path == nil {
-                Toggle("", isOn: .constant(on)).labelsHidden().toggleStyle(.switch)
+                Toggle("", isOn: Binding(
+                    get: { on },
+                    set: { onToggle?($0) }))
+                    .labelsHidden().toggleStyle(.switch)
                     .controlSize(.small).disabled(disabled).opacity(disabled ? 0.6 : 1)
             }
         }
         .padding(.vertical, 10)
         Divider().overlay(Color.lineC)
     }
+}
+
+/// 守护 Toggle 呈现文案：三态诚实（含运行 pid），操作中显示进行中
+private func daemonDesc(_ store: GatewayStore) -> String {
+    if store.daemonBusy { return "操作进行中…" }
+    if let pid = store.daemonRunningPID {
+        return "已使能 · 运行中 (pid \(pid)) — 登录自启、崩溃自愈"
+    }
+    if store.daemonInstalled {
+        return "已使能 · 当前未运行 — 登录时自启、崩溃自愈"
+    }
+    return "关闭中 — 开启后登录自启、崩溃自愈（服务 :8999）"
 }
 
 // ─── G6: 首启向导（RAM 检测 → 预算确认 → 默认池 → 完成）─────────

@@ -225,8 +225,32 @@ check("visionTriState", VisionPresentation.showsTag(supportsVision: true)
 check("visionDetailHonest", VisionPresentation.detailText(supportsVision: false) == "不支持"
     && VisionPresentation.detailText(supportsVision: nil) == nil && VisionPresentation.detailText(supportsVision: true) == nil)
 
+// 23. 网关守护（设置页"开机时启动网关"，spec 2026-11-17-gateway-daemon-toggle.md）
+check("daemonStateNotInstalled", GatewayDaemon.state(plistExists: false, launchctlPrint: nil) == .notInstalled)
+check("daemonStateStopped", GatewayDaemon.state(plistExists: true, launchctlPrint: nil) == .stopped
+    && GatewayDaemon.state(plistExists: true, launchctlPrint: "state = waiting\nprogram = x") == .stopped)
+check("daemonStateRunning", GatewayDaemon.state(plistExists: true, launchctlPrint: "state = running\npid = 10978") == .running(pid: "10978"))
+let xml = GatewayDaemon.plistXML(prodDir: "/Users/x/Library/MacFabric/prod",
+                                 modelsDir: "/Users/x/.inferfabric/models.d",
+                                 logPath: "/Users/x/.inferfabric/logs/gateway.launchd.log",
+                                 label: "com.macfabric.gateway")
+check("daemonPlistTemplate", xml.contains("com.macfabric.gateway")
+    && xml.contains("/Users/x/Library/MacFabric/prod/.venv/bin/python")
+    && xml.contains("<string>-m</string>") && xml.contains("<string>inferfabric.proxy.handler</string>")
+    && xml.contains("<key>RunAtLoad</key>") && xml.contains("<key>KeepAlive</key>")
+    && xml.contains("WorkingDirectory") && xml.contains("macfabric_gateway")
+    && xml.contains("/Users/x/.inferfabric/models.d")
+    && xml.contains("/Users/x/.inferfabric/logs/gateway.launchd.log"))
+check("daemonBootstrapArgs", GatewayDaemon.bootstrapArgs(uid: "501", plistPath: "/p/x.plist") == ["bootstrap", "gui/501", "/p/x.plist"])
+check("daemonBootoutArgs", GatewayDaemon.bootoutArgs(uid: "501", label: "com.macfabric.gateway") == ["bootout", "gui/501/com.macfabric.gateway"])
+check("daemonPrintArgs", GatewayDaemon.printArgs(uid: "501", label: "com.macfabric.gateway") == ["print", "gui/501/com.macfabric.gateway"])
+let qaXML = GatewayDaemon.plistXML(prodDir: "/p", modelsDir: "/m", logPath: "/l", label: "com.macfabric.gateway.qa",
+                                   programArgs: ["/bin/sleep", "3600"])
+check("daemonPlistQAProgramOverride", qaXML.contains("<string>/bin/sleep</string>")
+    && qaXML.contains("<string>3600</string>") && !qaXML.contains("inferfabric.proxy.handler"))
+
 if failures.isEmpty {
-    print("CONTRACT_TESTS_OK: 22 组断言全部通过")
+    print("CONTRACT_TESTS_OK: 23 组断言全部通过")
 } else {
     print("CONTRACT_TESTS_FAILED: \(failures.count)")
     failures.forEach { print("  FAIL: \($0)") }

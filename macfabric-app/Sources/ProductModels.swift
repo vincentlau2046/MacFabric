@@ -274,6 +274,82 @@ enum VisionPresentation {
     }
 }
 
+// ── 网关守护（设置页"开机时启动网关"，spec 2026-11-17-gateway-daemon-toggle.md）──
+// plist 模板与 scripts/release-install.sh §4 真源逐键一致（prod venv 直启）。
+// 红线：只按精确 label bootout/bootstrap，严禁全局 pkill proxy.handler。
+enum GatewayDaemon {
+    static let defaultLabel = "com.macfabric.gateway"
+
+    enum State: Equatable {
+        case notInstalled              // 无 plist 且未加载
+        case stopped                   // 已注册/已加载但无运行 pid
+        case running(pid: String)
+    }
+
+    /// 使能语义 = plist 存在（登录自启注册即已使能；进程瞬时波动不影响开关呈现）。
+    static func state(plistExists: Bool, launchctlPrint: String?) -> State {
+        if let out = launchctlPrint,
+           let range = out.range(of: #"pid = (\d+)"#, options: .regularExpression) {
+            let pid = out[range].replacingOccurrences(of: "pid = ", with: "")
+            return .running(pid: pid)
+        }
+        if plistExists || launchctlPrint != nil { return .stopped }
+        return .notInstalled
+    }
+
+    static func plistXML(prodDir: String, modelsDir: String, logPath: String, label: String,
+                         programArgs: [String]? = nil) -> String {
+        // 默认生产模板（release-install.sh §4 真源）；programArgs 仅沙箱 e2e 注入
+        let args = programArgs ?? ["\(prodDir)/.venv/bin/python", "-m", "inferfabric.proxy.handler"]
+        let argLines = args.map { "                <string>\($0)</string>" }.joined(separator: "\n")
+        return """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>\(label)</string>
+            <key>ProgramArguments</key>
+            <array>
+        \(argLines)
+            </array>
+            <key>WorkingDirectory</key>
+            <string>\(prodDir)</string>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>KeepAlive</key>
+            <true/>
+            <key>ThrottleInterval</key>
+            <integer>10</integer>
+            <key>StandardOutPath</key>
+            <string>\(logPath)</string>
+            <key>StandardErrorPath</key>
+            <string>\(logPath)</string>
+            <key>EnvironmentVariables</key>
+            <dict>
+                <key>PYTHONPATH</key>
+                <string>\(prodDir)/macfabric_gateway</string>
+                <key>MACFABRIC_MODELS_DIR</key>
+                <string>\(modelsDir)</string>
+                <key>PATH</key>
+                <string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+            </dict>
+        </dict>
+        </plist>
+        """
+    }
+
+    static func bootstrapArgs(uid: String, plistPath: String) -> [String] {
+        ["bootstrap", "gui/\(uid)", plistPath]
+    }
+    static func bootoutArgs(uid: String, label: String) -> [String] {
+        ["bootout", "gui/\(uid)/\(label)"]
+    }
+    static func printArgs(uid: String, label: String) -> [String] {
+        ["print", "gui/\(uid)/\(label)"]
+    }
+}
+
 // ── 资源与预算（唯一口径；reserve 只扣一次）─────────────────────
 
 enum MemoryMath {
