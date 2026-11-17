@@ -264,7 +264,8 @@ def handle_json_response(handler, resp, model_obj, original_model, data, auth_he
 
 
 def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai", original_model=None,
-                     suppress_client_errors: bool = False, timeout: float | None = None):
+                     suppress_client_errors: bool = False, timeout: float | None = None,
+                     upstream_path: str | None = None):
     """双协议透传：OpenAI → cloud OpenAI endpoint, Anthropic → cloud Anthropic endpoint。
 
     IFF 不做协议转换，客户端用什么协议发，就往对应的云端端点转发。
@@ -317,7 +318,8 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
             if not suppress_client_errors:
                 send_json(handler, {"error": err, "hint": hint}, 501)
             return CloudResult(status=501, error=err, committed=False)
-        url = f"{provider_cfg.openai_base.rstrip('/')}/chat/completions"
+        _path = (upstream_path or "chat/completions").lstrip("/")
+        url = f"{provider_cfg.openai_base.rstrip('/')}/{_path}"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {provider_cfg.api_key}",

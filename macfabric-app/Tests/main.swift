@@ -265,17 +265,9 @@ final class MemoryAdminTokenStore: GatewayCredentialStore {
 check("adminServiceDiffersFromInference", AdminTokenCredentialStore.serviceName != GatewayProfile.keychainService
     && AdminTokenCredentialStore.serviceName == "io.macfabric.gateway-admin")
 
-func fileReader(_ text: String?) -> (GatewayProfile) -> String? { { _ in text } }
-var migrated = MemoryAdminTokenStore()
-let m1 = AdminTokenBootstrap.migrate(store: migrated, fileReader: fileReader("MACFABRIC_ADMIN_TOKEN=born-tok-1\nOTHER=x"), profile: .dev)
-check("bornMigrateReadsFileSavesKeychain", m1 == .migrated && migrated.items["dev|http://127.0.0.1:8998"] == "born-tok-1")
-let m2 = AdminTokenBootstrap.migrate(store: migrated, fileReader: fileReader("MACFABRIC_ADMIN_TOKEN=born-tok-1\n"), profile: .dev)
-check("bornMigrateIdempotentAlreadyStored", m2 == .alreadyStored)
-let m3 = AdminTokenBootstrap.migrate(store: migrated, fileReader: fileReader(nil), profile: .prod)
-check("bornMigrateAbsentHonest", m3 == .absent && migrated.items["prod|http://127.0.0.1:8999"] == nil)
-var denyingStore = MemoryAdminTokenStore(); denyingStore.throwOnSave = true
-let m4 = AdminTokenBootstrap.migrate(store: denyingStore, fileReader: fileReader("MACFABRIC_ADMIN_TOKEN=t"), profile: .dev)
-check("bornMigrateDeniedHonest", m4 == .failed("denied"))
+// ── 主动录入契约（用户裁决 2026-11-17）：born 迁移已移除 —
+// Keychain 存取本身即录入/读取路径（AdminTokenCredentialStore.save/load），
+// 契约由 adminServiceDiffersFromInference 与下方 attach 策略测试覆盖。
 
 let adminAttachReq = URLRequest(url: URL(string: "http://127.0.0.1:8999/admin/cloud/providers")!)
 let attached = AdminRequestAuthorizer.attach(adminAttachReq, profile: .prod, token: "tok-9")

@@ -1,6 +1,7 @@
 // GatewayClient — 批 1 TOP2 统一网络层（spec 2026-11-17-batch1-auth-network-state.md）
 // 规则：admin 调用面单一出口；admin token 与推理 key 双账目隔离；
-// born 迁移读一次文件转 Keychain（不每次读盘）；失败如实呈现，绝不假装已配置。
+// 管理凭据仅主动录入（用户裁决 2026-11-17：启动时被动 born 迁移移除 —
+// 读 secrets.env 的动作会被系统拦截；录入作为高级安全功能的使能体现）。
 import Foundation
 
 // ── admin token 双账目（service 与推理 key 分离）────────────────
@@ -26,50 +27,6 @@ extension AdminTokenCredentialStore: GatewayCredentialStore {
     func delete(profile: GatewayProfile) throws { try backing.delete(profile: profile) }
     func save(_ key: String, profile: GatewayProfile) throws {
         do { try backing.save(key, profile: profile) } catch { throw CredentialStoreError.denied }
-    }
-}
-
-// ── born 迁移：读 secrets.env 一次 → 转存凭据库 ────────────────
-
-enum AdminTokenBootstrap: Equatable {
-    case migrated          // 文件读到 → 已转存
-    case alreadyStored     // 凭据库已有 → 不动
-    case absent            // 文件没有 token → 诚实未就绪
-    case failed(String)    // 存储拒绝/锁定等 → 如实报错
-
-    /// fileReader 注入便于契约测试；生产实现读档位对应 secrets.env
-    /// （prod ~/.inferfabric / dev ~/.inferfabric-dev，跟随状态目录隔离）。
-    static func migrate(store: GatewayCredentialStore,
-                        fileReader: (GatewayProfile) -> String?,
-                        profile: GatewayProfile) -> AdminTokenBootstrap {
-        do {
-            if try store.load(profile: profile) != nil { return .alreadyStored }
-        } catch { return .failed("locked") }
-        guard let raw = fileReader(profile), !raw.isEmpty else { return .absent }
-        let token = raw.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
-            .compactMap { line -> String? in
-                let l = line.trimmingCharacters(in: .whitespaces)
-                guard !l.hasPrefix("#"), l.contains("=") else { return nil }
-                let kv = l.split(maxSplits: 1, omittingEmptySubsequences: false,
-                                 whereSeparator: { $0 == "=" })
-                guard kv.count == 2, kv[0].trimmingCharacters(in: .whitespaces) == "MACFABRIC_ADMIN_TOKEN"
-                else { return nil }
-                return kv[1].trimmingCharacters(in: .whitespaces)
-            }.first
-        guard let token, !token.isEmpty else { return .absent }
-        do {
-            try store.save(token, profile: profile)
-            return .migrated
-        } catch CredentialStoreError.denied { return .failed("denied") }
-        catch CredentialStoreError.interactionNotAllowed { return .failed("locked") }
-        catch { return .failed("error") }
-    }
-
-    /// 生产读文件实现：路径随档位（与网关 MACFABRIC_STATE_DIR 口径一致）。
-    static func secretsFileReader(profile: GatewayProfile) -> String? {
-        let dir = profile == .dev ? "~/.inferfabric-dev" : "~/.inferfabric"
-        let path = NSString(string: dir).expandingTildeInPath + "/secrets.env"
-        return try? String(contentsOfFile: path, encoding: .utf8)
     }
 }
 

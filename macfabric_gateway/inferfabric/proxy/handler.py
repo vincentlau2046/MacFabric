@@ -439,6 +439,7 @@ _POST_ROUTES = {
     "/v1/chat/completions":     lambda h, pm: h._handle_chat(pm),
     "/v1/completions":          lambda h, pm: h._handle_chat(pm),
     "/v1/messages":             lambda h, pm: h._handle_messages(pm),
+    "/v1/responses":            lambda h, pm: h._handle_responses(pm),
     "/switch":                  _admin(lambda h, pm: h._handle_switch(pm)),
     "/stop":                    _admin(lambda h, pm: h._handle_stop(pm)),
     "/sleep":                   _admin(lambda h, pm: h._handle_sleep(pm)),
@@ -716,6 +717,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if data is None:
             return
         handle_chat(self, pm, data)
+
+    # ─── OpenAI Responses API handler（Issue #1，codex CLI 兼容） ──
+
+    def _handle_responses(self, pm):
+        from inferfabric.proxy.responses_bridge import (
+            handle_pool_responses, handle_responses_direct,
+        )
+        data = self._read_body()
+        if data is None:
+            return
+        model = data.get("model", "")
+        if handle_pool_responses(self, pm, data, model):
+            return
+        handle_responses_direct(self, pm, data, model)
 
     # ─── Anthropic Messages handler ───────────────────────────────
 

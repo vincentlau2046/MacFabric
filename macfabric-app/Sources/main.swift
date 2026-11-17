@@ -599,6 +599,8 @@ final class GatewayStore: ObservableObject {
     // 设置页策略表单草稿（CLT 无 SwiftUI 宏，视图内 @State 不可用 — 既有约束）
     @Published var packMaxBDraft = "4"
     @Published var packReservedMBDraft = "8192"
+    /// 设置页 Admin Token 录入草稿（SecureField 绑定；保存后清空）
+    @Published var adminTokenDraft = ""
     // ── 用户扩展能力包（统一架构 2026-11-16：填链接 → 网关校验链）──
     @Published var customName = ""
     @Published var customURL = ""
@@ -811,7 +813,7 @@ final class GatewayStore: ObservableObject {
     private var timer: Timer?
     private var curveTimer: Timer?
     /// 控制面门禁（批 1 TOP1）：admin/控制路由请求注入 X-Admin-Token
-    /// （双账目：独立 Keychain service；born 迁移读 secrets.env 一次转存）
+    /// （双账目：独立 Keychain service；凭据仅主动录入 — 设置页入口）
     let adminTokens = AdminTokenCredentialStore(
         backing: KeychainCredentialStore(service: AdminTokenCredentialStore.serviceName))
     @Published var adminTokenReady = false
@@ -821,7 +823,7 @@ final class GatewayStore: ObservableObject {
     var windowVisible = true
 
     init() {
-        bootstrapAdminToken()
+        refreshAdminTokenState()
         refresh(); fetchModels(); fetchCurve(); fetchPools(); fetchCloud(); scanLocalModels(); fetchMetrics(); fetchSecurityStatus(); fetchPackCatalog()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             guard let self, self.windowVisible else { return }
@@ -842,42 +844,49 @@ final class GatewayStore: ObservableObject {
         }
     }
 
-    /// born 迁移：Keychain 无 admin token 时读档位 secrets.env（prod ~/.inferfabric /
-    /// dev ~/.inferfabric-dev）转存；失败如实置 adminTokenMissing（UI 提示，
-    /// 绝不假装已配置）。
-    private func bootstrapAdminToken() {
-        let outcome = AdminTokenBootstrap.migrate(
-            store: adminTokens,
-            fileReader: AdminTokenBootstrap.secretsFileReader,
-            profile: CURRENT_PROFILE)
-        switch outcome {
-        case .migrated, .alreadyStored:
-            adminTokenReady = true; adminTokenMissing = false
-        case .absent, .failed:
-            adminTokenReady = false; adminTokenMissing = true
-        }
-    }
-
     /// 统一出口（TOP2）：admin 请求就地挂 X-Admin-Token。token 缺失返回 false —
     /// 严格模式（MACFABRIC_ADMIN_REQUIRED=1）下用户动作显式报错；默认模式
     /// 无 token 也返回 true（网关门禁关闭，功能零门槛，绝不因凭据拦功能）。
-    /// 兜底：网关可能晚于 App 首次 born（App 常驻而网关刚装好）— 重试一次迁移。
+    /// 主动录入原则（用户裁决 2026-11-17）：无任何启动时读文件迁移路径。
     @discardableResult
     private func attachAdminToken(_ request: inout URLRequest) -> Bool {
         if let token = adminTokens.load(profile: CURRENT_PROFILE), !token.isEmpty {
             request = AdminRequestAuthorizer.attach(request, profile: CURRENT_PROFILE, token: token)
             return true
         }
-        guard case .migrated = AdminTokenBootstrap.migrate(
-            store: adminTokens,
-            fileReader: AdminTokenBootstrap.secretsFileReader,
-            profile: CURRENT_PROFILE),
-            let token = adminTokens.load(profile: CURRENT_PROFILE), !token.isEmpty else {
-            if AdminAuthPolicy.strictMode { return false }
-            return true
-        }
-        request = AdminRequestAuthorizer.attach(request, profile: CURRENT_PROFILE, token: token)
+        if AdminAuthPolicy.strictMode { return false }
         return true
+    }
+
+    /// 凭据状态刷新（设置页显示 + 主动录入后同步）：只读 Keychain，不读文件。
+    func refreshAdminTokenState() {
+        let stored = adminTokens.load(profile: CURRENT_PROFILE)
+        let ready = stored != nil && !(stored ?? "").isEmpty
+        adminTokenReady = ready
+        adminTokenMissing = !ready
+    }
+
+    /// 设置页主动录入（高级安全功能使能的体现）：存 Keychain 后立即生效。
+    func saveAdminToken(_ token: String) {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            notify(.error, "❌ Token 为空 — 请粘贴完整的管理 Token")
+            return
+        }
+        if adminTokens.save(trimmed, profile: CURRENT_PROFILE) {
+            notify(.success, "✅ 管理 Token 已保存到钥匙串（同档位管理请求自动携带）")
+            refreshAdminTokenState()
+            adminTokenDraft = ""
+        } else {
+            notify(.error, "❌ 钥匙串保存被拒 — 请在系统设置中允许 MacFabric 访问钥匙串")
+        }
+    }
+
+    /// 清除已录入凭据（换 token / 撤销授权用）。
+    func clearAdminToken() {
+        try? adminTokens.delete(profile: CURRENT_PROFILE)
+        notify(.info, "管理 Token 已清除")
+        refreshAdminTokenState()
     }
 
     /// admin 请求构造（统一 base/超时口径；inout 挂 token 由 attachAdminToken 负责）
@@ -4223,6 +4232,34 @@ struct SettingsView: View {
                             Text("客户端调用示例：Authorization: Bearer sk-iff-…")
                                 .font(.system(size: 10.5)).foregroundColor(.faint)
                             Spacer()
+                        }
+                        .padding(.vertical, 4)
+                        // ── Admin Token 主动录入（高级安全功能使能的体现；
+                        // 用户裁决 2026-11-17：唯一路径，无启动时被动迁移）──
+                        Divider().padding(.vertical, 4)
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 8) {
+                                Text("Admin Token").font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
+                                Text(store.adminTokenReady
+                                     ? "已录入（管理请求自动携带）"
+                                     : "未录入（默认开放模式不需要；严格模式需要）")
+                                    .font(.system(size: 10.5)).foregroundColor(.faint)
+                                Spacer()
+                            }
+                            HStack(spacing: 8) {
+                                SecureField("粘贴 X-Admin-Token / MACFABRIC_ADMIN_TOKEN",
+                                            text: Binding(
+                                                get: { store.adminTokenDraft },
+                                                set: { store.adminTokenDraft = $0 }))
+                                    .textFieldStyle(.roundedBorder).font(.system(size: 11, design: .monospaced))
+                                SmallBtn("保存", primary: true) { store.saveAdminToken(store.adminTokenDraft) }
+                                    .disabled(store.adminTokenDraft.trimmingCharacters(in: .whitespaces).isEmpty)
+                                if store.adminTokenReady {
+                                    SmallBtn("清除") { store.clearAdminToken() }
+                                }
+                            }
+                            Text("仅当网关开启严格模式（MACFABRIC_ADMIN_REQUIRED=1）时，管理动作才校验此 Token；默认开放模式本机免凭据。保存进 macOS 钥匙串，按档位隔离，不落盘明文。")
+                                .font(.system(size: 10)).foregroundColor(.faint)
                         }
                         .padding(.vertical, 4)
                         if let key = store.oneTimeKey {
