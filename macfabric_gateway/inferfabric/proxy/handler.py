@@ -56,6 +56,18 @@ from inferfabric.anomaly_collector import AnomalyEvent
 _ADMIN_TOKEN = os.environ.get("IFF_ADMIN_TOKEN", "")
 
 
+def _admin_auth_enabled():
+    """批 1 语义修订（用户裁决 2026-11-17）：控制面鉴权默认关闭、配置即启用。
+
+    本地回环网关的首次安装体验优先 — API key 是云厂商请求层的认证路径，
+    不应成为使用本机软件功能的门槛。显式 MACFABRIC_ADMIN_REQUIRED=1（或
+    =true/yes/on，大小写不敏感）启用严格模式；未配置或 =0 关闭。
+    """
+    return os.environ.get("MACFABRIC_ADMIN_REQUIRED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def _ensure_admin_token(secrets_path=None):
     """批 1 TOP1 born-token — 控制面鉴权令牌的确定性供给。
 
@@ -83,13 +95,34 @@ def _ensure_admin_token(secrets_path=None):
 def _admin_gate(handler, expected_host, write=False):
     """批 1 TOP1 控制面统一门禁（纯函数，ProxyHandler._check_admin 委托）。
 
-    1. fail-closed：无 token 配置或不匹配 → 401（born-token 保证正常运行时恒有值；
-       显式空配置 = 拒绝，不再放行）。
+    语义（用户裁决 2026-11-17 修订）：默认关闭 token 校验（本地回环首次
+    安装零门槛），显式 MACFABRIC_ADMIN_REQUIRED=1 启用严格模式后：
+    1. fail-closed：无 token 配置或不匹配 → 401（born-token 保证严格模式下
+       恒有值；显式空配置 = 拒绝，不放行）。
     2. Host 非空时必须 = 本实例预期的 loopback:port（防 DNS rebinding / 转发；
        空 Host 仅 HTTP/1.0 罕见客户端，回环绑定本身兜底）。
     3. 携带 Origin 时必须同源回环（原生 App 不发 Origin →
        放行；浏览器跨站 → 403）。
+    Host/Origin 校验与开关无关，恒生效 — 挡的是浏览器跨站与 DNS rebinding，
+    不构成使用门槛。
     """
+    if not _admin_auth_enabled():
+        host = handler.headers.get("Host", "")
+        origin = handler.headers.get("Origin")
+        loopback = ("127.0.0.1", "localhost", "::1")
+        host_ok = (not host) or host == expected_host or host.split(":")[0] in loopback
+        origin_ok = origin is None or (
+            origin in (f"http://{expected_host}", f"https://{expected_host}")
+            or origin.split("//")[-1].split("/")[0].split(":")[0] in loopback)
+        if not host_ok:
+            handler._send_json({"error": "untrusted host"}, 403)
+            return False
+        if write or origin is not None:
+            if not origin_ok:
+                handler._send_json({"error": "untrusted origin"}, 403)
+                return False
+        return True
+    # 严格模式（MACFABRIC_ADMIN_REQUIRED=1）
     host = handler.headers.get("Host", "")
     origin = handler.headers.get("Origin")
     loopback = ("127.0.0.1", "localhost", "::1")
@@ -3489,14 +3522,21 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 def _validate_admin_token_safety():
     """Validate that admin token configuration is safe before starting.
 
-    批 1 TOP1 fail-closed：空 token 一律拒绝启动（born-token 已保证正常
-    运行时恒有值；显式清空 = 配置错误，不得静默开放控制面）。
+    语义随用户裁决 2026-11-17 修订：默认模式空 token 不再拒绝启动（鉴权
+    关闭，born-token 仍会生成备用值）；严格模式（MACFABRIC_ADMIN_REQUIRED=1）
+    空 token 一律拒绝启动（fail-closed 双保险保留）。
     """
     if not _ADMIN_TOKEN:
-        raise RuntimeError(
-            "Admin token is empty — control-plane must fail closed. "
-            " born-token bootstrap should have provisioned MACFABRIC_ADMIN_TOKEN "
-            "in the state-dir secrets.env; set IFF_ADMIN_TOKEN to override."
+        if _admin_auth_enabled():
+            raise RuntimeError(
+                "Admin token is empty — control-plane must fail closed. "
+                " born-token bootstrap should have provisioned MACFABRIC_ADMIN_TOKEN "
+                "in the state-dir secrets.env; set IFF_ADMIN_TOKEN to override."
+            )
+        log.warning(
+            "MACFABRIC_ADMIN_TOKEN is empty and admin auth is disabled — "
+            "control plane open on loopback. Set MACFABRIC_ADMIN_REQUIRED=1 "
+            "to enforce token auth."
         )
 
 

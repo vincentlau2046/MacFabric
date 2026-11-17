@@ -156,7 +156,7 @@ def local_rc(model_name="qwen3-4b"):
 def attempt_local(pm, data, cand=None):
     cand = cand or local_rc()
     return dispatch._attempt_local_openai(
-        FakeHandler(), pm, data, model="fabric-fast", pool="fast", cand=cand,
+        FakeHandler(), pm, data, model="fabric-flash", pool="flash", cand=cand,
         remaining=10.0)
 
 
@@ -185,7 +185,7 @@ class TestNon2xxIsNotSuccess:
         # committed 错误在动作表中终止：仅 1 次调用，不重试不切换，
         # dispatch 层只结束当前响应（不写第二信封由 _finish_outcome 分支锁定）
         from inferfabric.model_pool.config import PoolConfig
-        pool = PoolConfig(name="fast", enabled=True,
+        pool = PoolConfig(name="flash", enabled=True,
                           allowed_locations=("local",), accept_declared=True,
                           max_attempts=3, deadline_ms=5000,
                           candidates=(local_cand(),))
@@ -250,8 +250,8 @@ class TestStreamTerminal:
         h = FakeHandler()
         h._client_gone = True  # 模拟写失败（生产 _safe_write 置位语义）
         res = dispatch._attempt_local_openai(
-            h, pm, {"messages": [], "stream": True}, model="fabric-fast",
-            pool="fast", cand=local_rc(), remaining=10.0)
+            h, pm, {"messages": [], "stream": True}, model="fabric-flash",
+            pool="flash", cand=local_rc(), remaining=10.0)
         assert res.ok is False and res.committed is True
         assert res.stream_state == "client_disconnect"
 
@@ -293,7 +293,7 @@ class TestMacAnthropicPoolPaths:
         rc = ResolvedCandidate(candidate=cand, endpoint_fingerprint="fp",
                                evidence=ev, route={})
         from inferfabric.model_pool.config import PoolConfig
-        pool = PoolConfig(name="fast", enabled=True,
+        pool = PoolConfig(name="flash", enabled=True,
                           allowed_locations=("local",), accept_declared=True,
                           candidates=(cand,))
         snap = PoolSnapshot(revision=1, pool=pool, candidates=(rc,), issues=())
@@ -334,7 +334,7 @@ class TestObservationParity:
                                         "completion_tokens": 5},
                                  ttft_ms=120.0, stream_state="completed")
         from inferfabric.model_pool.config import PoolConfig
-        pool = PoolConfig(name="fast", enabled=True,
+        pool = PoolConfig(name="flash", enabled=True,
                           allowed_locations=("local",), accept_declared=True,
                           max_attempts=3, deadline_ms=60000,
                           candidates=(local_cand(),))
@@ -346,9 +346,9 @@ class TestObservationParity:
             return seq.pop(0)(cand, remaining)
 
         outcome = run_attempts(pool, [rc], pick, monotonic=mono)
-        summary = build_pool_summary(outcome, pool_name="fast",
+        summary = build_pool_summary(outcome, pool_name="flash",
                                      protocol="openai", config_revision=1,
-                                     requested_model="fabric-fast",
+                                     requested_model="fabric-flash",
                                      candidates=[rc])
         a1, a2 = summary["attempts"]
         assert a1["duration_ms"] == pytest.approx(2000.0)
@@ -361,7 +361,7 @@ class TestObservationParity:
     def test_usage_missing_is_unknown_not_zero(self):
         mono, _ = self._clock()
         from inferfabric.model_pool.config import PoolConfig
-        pool = PoolConfig(name="fast", enabled=True,
+        pool = PoolConfig(name="flash", enabled=True,
                           allowed_locations=("local",), accept_declared=True,
                           candidates=(local_cand(),))
         rc = ResolvedCandidate(candidate=local_cand(), endpoint_fingerprint="fp",
@@ -371,9 +371,9 @@ class TestObservationParity:
                                    ok=True, committed=True, status=200,
                                    usage={}, ttft_ms=None),
                                monotonic=mono)
-        summary = build_pool_summary(outcome, pool_name="fast",
+        summary = build_pool_summary(outcome, pool_name="flash",
                                      protocol="openai", config_revision=1,
-                                     requested_model="fabric-fast", candidates=[rc])
+                                     requested_model="fabric-flash", candidates=[rc])
         a = summary["attempts"][0]
         assert a["usage_known"] is False
         assert a["tokens_in"] is None and a["tokens_out"] is None
@@ -430,7 +430,7 @@ class TestLocalSuppressActionableStatuses:
         h = FakeHandler()
         dispatch._attempt_local_openai(
             h, pm, {"messages": [{"role": "user", "content": "hi"}]},
-            model="fabric-fast", pool="fast", cand=local_rc(), remaining=10.0)
+            model="fabric-flash", pool="flash", cand=local_rc(), remaining=10.0)
         assert h.status_line is None   # 未 send_response
         assert h.written == b""        # 未写任何字节
 
@@ -450,9 +450,9 @@ class TestAttemptErrorSanitized:
                               candidate_id="c1", attempts=[rec])
 
     def test_summary_attempts_error_fixed_code(self):
-        s = build_pool_summary(self._outcome(), pool_name="fast",
+        s = build_pool_summary(self._outcome(), pool_name="flash",
                                protocol="openai", config_revision=1,
-                               requested_model="fabric-fast", candidates=(local_rc(),))
+                               requested_model="fabric-flash", candidates=(local_rc(),))
         import json as _json
         assert self.SECRET not in _json.dumps(s)
         assert s["attempts"][0]["error"] == "upstream_http_502"
@@ -462,6 +462,6 @@ class TestAttemptErrorSanitized:
         from inferfabric.model_pool.dispatch import _log_failed_attempts
         with caplog.at_level(logging.WARNING):
             _log_failed_attempts(None, None, self._outcome(), req_id="r1",
-                                 key_name="k", model="fabric-fast")
+                                 key_name="k", model="fabric-flash")
         assert self.SECRET not in caplog.text
         assert "upstream_http_502" in caplog.text

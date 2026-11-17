@@ -390,7 +390,7 @@ final class GatewayStore: ObservableObject {
         }
         var req = adminRequest(path, timeoutInterval: 15)
         guard attachAdminToken(&req) else {
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             return
         }
         req.httpMethod = "POST"
@@ -618,7 +618,7 @@ final class GatewayStore: ObservableObject {
         var req = adminRequest("/admin/packs/custom", timeoutInterval: 15)
         guard attachAdminToken(&req) else {
             customBusy = false
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             return
         }
         req.httpMethod = "POST"
@@ -859,7 +859,8 @@ final class GatewayStore: ObservableObject {
     }
 
     /// 统一出口（TOP2）：admin 请求就地挂 X-Admin-Token。token 缺失返回 false —
-    /// 轮询静默跳过，用户动作显式报错；绝不静默发无 token 请求。
+    /// 严格模式（MACFABRIC_ADMIN_REQUIRED=1）下用户动作显式报错；默认模式
+    /// 无 token 也返回 true（网关门禁关闭，功能零门槛，绝不因凭据拦功能）。
     /// 兜底：网关可能晚于 App 首次 born（App 常驻而网关刚装好）— 重试一次迁移。
     @discardableResult
     private func attachAdminToken(_ request: inout URLRequest) -> Bool {
@@ -872,7 +873,8 @@ final class GatewayStore: ObservableObject {
             fileReader: AdminTokenBootstrap.secretsFileReader,
             profile: CURRENT_PROFILE),
             let token = adminTokens.load(profile: CURRENT_PROFILE), !token.isEmpty else {
-            return false
+            if AdminAuthPolicy.strictMode { return false }
+            return true
         }
         request = AdminRequestAuthorizer.attach(request, profile: CURRENT_PROFILE, token: token)
         return true
@@ -977,7 +979,7 @@ final class GatewayStore: ObservableObject {
                     if self?.gatewayUp != true {
                         self?.notify(.error, "❌ 网关离线 — 池配置未读取，网关启动后重试")
                     } else if (resp as? HTTPURLResponse)?.statusCode == 401 {
-                        self?.notify(.error, "❌ 管理凭据未就绪（401）— 重启 App 重试 born 迁移")
+                        self?.notify(.error, "❌ 管理凭据未就绪（401）— 严格模式下需与网关 secrets.env 的 Admin Token 一致")
                     } else {
                         self?.notify(.error, "❌ 池配置读取失败(\((resp as? HTTPURLResponse)?.statusCode ?? 0))")
                     }
@@ -990,7 +992,7 @@ final class GatewayStore: ObservableObject {
             var req = URLRequest(url: url, timeoutInterval: 30)
             guard self.attachAdminToken(&req) else {
                 DispatchQueue.main.async {
-                    self.notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+                    self.notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
                     self.poolMutationDone()
                 }
                 return
@@ -1176,7 +1178,7 @@ final class GatewayStore: ObservableObject {
         guard let rev = pools?.revision else { return }
         var req = adminRequest("/admin/model-pools/toggle", timeoutInterval: 30)
         guard attachAdminToken(&req) else {
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             return
         }
         req.httpMethod = "POST"
@@ -1305,7 +1307,7 @@ final class GatewayStore: ObservableObject {
     func savePackPolicy(_ maxB: Int, _ reservedMB: Int) {
         var req = adminRequest("/admin/packs/policy", timeoutInterval: 15)
         guard attachAdminToken(&req) else {
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             return
         }
         req.httpMethod = "POST"
@@ -1331,7 +1333,7 @@ final class GatewayStore: ObservableObject {
         notify(.progress, "\(label) 安装中…")
         var req = adminRequest("/admin/packs/install", timeoutInterval: 15)
         guard attachAdminToken(&req) else {
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             return
         }
         req.httpMethod = "POST"
@@ -1357,7 +1359,7 @@ final class GatewayStore: ObservableObject {
         comps.queryItems = [URLQueryItem(name: "pack_id", value: packId)]
         var req = URLRequest(url: comps.url!, timeoutInterval: 30)
         guard attachAdminToken(&req) else {
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             return
         }
         URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
@@ -1383,7 +1385,7 @@ final class GatewayStore: ObservableObject {
         notify(.progress, "卸载 \(label) 中…")
         var req = adminRequest("/admin/packs/uninstall", timeoutInterval: 60)
         guard attachAdminToken(&req) else {
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             return
         }
         req.httpMethod = "POST"
@@ -1454,7 +1456,7 @@ final class GatewayStore: ObservableObject {
         var req = adminRequest("/admin/security/keys", timeoutInterval: 30)
         guard attachAdminToken(&req) else {
             securityBusy = false
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             return
         }
         req.httpMethod = "POST"
@@ -1486,7 +1488,7 @@ final class GatewayStore: ObservableObject {
         var req = adminRequest("/admin/security/keys/revoke", timeoutInterval: 30)
         guard attachAdminToken(&req) else {
             securityBusy = false
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             return
         }
         req.httpMethod = "POST"
@@ -1513,7 +1515,7 @@ final class GatewayStore: ObservableObject {
         var req = adminRequest("/admin/security/enable", timeoutInterval: 30)
         guard attachAdminToken(&req) else {
             securityBusy = false
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             return
         }
         req.httpMethod = "POST"
@@ -1676,7 +1678,7 @@ final class GatewayStore: ObservableObject {
         notify(.progress, "测试 \(name) 中…")
         var req = adminRequest("/admin/cloud/provider-test", timeoutInterval: 30)
         guard attachAdminToken(&req) else {
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             return
         }
         req.httpMethod = "POST"
@@ -1717,7 +1719,7 @@ final class GatewayStore: ObservableObject {
         cloudBusy = true
         var req = URLRequest(url: base.appendingPathComponent(path), timeoutInterval: timeout)
         guard attachAdminToken(&req) else {
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             completion?(false)
             return
         }
@@ -1797,7 +1799,7 @@ final class GatewayStore: ObservableObject {
     func setAutostart(_ name: String, _ enabled: Bool) {
         var req = adminRequest("/admin/models/set-autostart", timeoutInterval: 30)
         guard attachAdminToken(&req) else {
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             return
         }
         req.httpMethod = "POST"
@@ -1833,7 +1835,7 @@ final class GatewayStore: ObservableObject {
         notify(.progress, "安装 \(m.name) 中…")
         var req = adminRequest("/admin/packs/install", timeoutInterval: 30)
         guard attachAdminToken(&req) else {
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            notify(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             return
         }
         req.httpMethod = "POST"
@@ -1868,7 +1870,7 @@ final class GatewayStore: ObservableObject {
                              done: @escaping (FeedbackKind, String) -> Void) {
         var req = adminRequest(path, timeoutInterval: 180)
         guard attachAdminToken(&req) else {
-            done(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            done(.error, "❌ 管理凭据未就绪 — 严格模式需要 Admin Token（设置 MACFABRIC_ADMIN_REQUIRED=1 时生效）")
             return
         }
         req.httpMethod = "POST"
@@ -2698,9 +2700,9 @@ struct ChatStrip: View {
 
 /// 模型池：真数据（GET /admin/model-pools）— 角色池 + 竖排候选链 + 优先级可调（CAS PUT）
 let poolUseLabels: [String: String] = [
-    "fast": "快速对话 · 低延迟优先",
-    "small": "轻量任务 · 意图分类",
-    "premium": "高质量长文 · 云端兜底",
+    "flash": "快速对话 · 低延迟优先",
+    "lite": "轻量任务 · 意图分类",
+    "max": "高质量长文 · 云端兜底",
 ]
 
 struct PoolsView: View {
@@ -2709,7 +2711,7 @@ struct PoolsView: View {
     static let usageSnippet = """
     curl http://127.0.0.1:\(GW_PORT)/v1/chat/completions \\
       -H "Authorization: Bearer $MACFABRIC_API_KEY" -H "Content-Type: application/json" \\
-      -d '{"model":"fabric-fast","messages":[{"role":"user","content":"你好"}]}'
+      -d '{"model":"fabric-flash","messages":[{"role":"user","content":"你好"}]}'
     """
 
     static func copyUsageSnippet() {
@@ -2717,7 +2719,7 @@ struct PoolsView: View {
         # MacFabric 池调用（OpenAI 方言；Anthropic 方言把 URL 换成 http://127.0.0.1:\(GW_PORT) 即可）
         export OPENAI_BASE_URL=http://127.0.0.1:\(GW_PORT)/v1
         export OPENAI_API_KEY=$MACFABRIC_API_KEY   # 设置页「API Key 鉴权」新建后填入真实 key
-        # model 填池名：fabric-fast · fabric-small · fabric-premium（按池内优先级自动调度）
+        # model 填池名：fabric-flash · fabric-lite · fabric-max（按池内优先级自动调度）
         \(usageSnippet)
         """
         NSPasteboard.general.clearContents()
@@ -2737,8 +2739,8 @@ struct PoolsView: View {
             VStack(alignment: .leading, spacing: 12) {
                 FeedbackBanner(store: store)
                 if let pools = store.pools, let cfg = pools.pools, !cfg.isEmpty {
-                    // 固定角色序：fast → small → premium，其余追加
-                    let order = ["fast", "small", "premium"]
+                    // 固定角色序：flash → lite → max，其余追加
+                    let order = ["flash", "lite", "max"]
                     let names = cfg.keys.sorted { (a, b) in
                         let ia = order.firstIndex(of: a) ?? 99
                         let ib = order.firstIndex(of: b) ?? 99
@@ -2758,7 +2760,7 @@ struct PoolsView: View {
                             guideRow("① 服务地址（Base URL）",
                                      "OpenAI 方言 \(GW_BASE)/v1 · Anthropic 方言 \(GW_BASE)")
                             guideRow("② 模型名（model）",
-                                     "直接填池名：fabric-fast · fabric-small · fabric-premium — 网关按池内优先级自动选候选，失败自动换下一个，无需改客户端")
+                                     "直接填池名：fabric-flash · fabric-lite · fabric-max — 网关按池内优先级自动选候选，失败自动换下一个，无需改客户端")
                             // B2：真实状态派生 — 网关不可达/未取到 = 状态未知，绝不说“未开启”
                             let keyGuide: String = {
                                 switch store.authPresentation {
@@ -4446,9 +4448,9 @@ struct WizardView: View {
             Text("池按模型角色定义，本地失败自动落到云端，候选优先级随时可调：")
                 .font(.system(size: 13)).foregroundColor(.dim)
             VStack(alignment: .leading, spacing: 8) {
-                poolRow("fabric-fast", "快速对话 · 低延迟优先", "qwen3-4b → glm-5")
-                poolRow("fabric-small", "轻量任务 · 意图分类", "qwen3-4b → glm-5-flash")
-                poolRow("fabric-premium", "高质量长文", "glm-5（云端）")
+                poolRow("fabric-flash", "快速对话 · 低延迟优先", "qwen3-4b → glm-5")
+                poolRow("fabric-lite", "轻量任务 · 意图分类", "qwen3-4b → glm-5-flash")
+                poolRow("fabric-max", "高质量长文", "glm-5（云端）")
             }
         }
     }

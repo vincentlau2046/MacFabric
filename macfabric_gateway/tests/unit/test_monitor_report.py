@@ -79,7 +79,7 @@ class TestScopeIdentityAndPercentiles:
             row("l1", SINCE_24H + 10, route="local:qwen"),
             row("c1", SINCE_24H + 20, route="cloud:prov_a/gpt-x",
                 provider="prov_a"),
-            row("u1", SINCE_24H + 30, route="pool:fast"),  # 未归属（无上游）
+            row("u1", SINCE_24H + 30, route="pool:flash"),  # 未归属（无上游）
             row("c2", SINCE_24H + 40, route="cloud:prov_b/gpt-x",
                 provider="prov_b"),
         ]
@@ -118,7 +118,7 @@ class TestScopeIdentityAndPercentiles:
         rows = [
             row("n1", SINCE_24H + 10, ttft=None),               # 无 TTFT
             row("n2", SINCE_24H + 20,                            # 有 TTFT
-                metadata={"pool_summary": {"v": 1, "pool": "fast",
+                metadata={"pool_summary": {"v": 1, "pool": "flash",
                                            "attempt_count": 1,
                                            "attempts": [{"usage_known": False}]}}),
             row("n3", SINCE_24H + 30, route="pool:x", ttft=None),  # unknown 组零样本
@@ -144,16 +144,16 @@ class TestPoolSummaryCoverage:
         db = make_db(tmp_path)
         rows = [
             # 有摘要：fast 池成功，最终承接 c1
-            row("s1", SINCE_24H + 10, route="pool:fast/local:qwen",
+            row("s1", SINCE_24H + 10, route="pool:flash/local:qwen",
                 metadata={"pool_summary": {
-                    "v": 1, "pool": "fast", "outcome": "ok",
+                    "v": 1, "pool": "flash", "outcome": "ok",
                     "attempt_count": 2, "retry_count": 1, "fallback_count": 0,
                     "final_target": {"candidate_id": "c1", "provider": None,
                                      "requested_model_id": "qwen",
                                      "actual_model_id": "qwen"},
                     "attempts": []}}),
             # 无摘要的早期失败：仍入分母
-            row("f1", SINCE_24H + 20, status=404, route="pool:fast",
+            row("f1", SINCE_24H + 20, status=404, route="pool:flash",
                 error="unknown_pool"),
             # 已删除池 legacy：历史仍可查
             row("h1", SINCE_24H + 30, route="pool:legacy/cloud:prov_a/gpt-x",
@@ -169,8 +169,8 @@ class TestPoolSummaryCoverage:
         insert_all(db, rows)
         report = build_monitor_report(db, window="24h", until=T0)
         pools = {p["pool"]: p for p in report["pools"]}
-        assert set(pools) == {"fast", "legacy"}
-        fast = pools["fast"]
+        assert set(pools) == {"flash", "legacy"}
+        fast = pools["flash"]
         assert fast["requests"] == 2                 # 早期失败入分母
         assert fast["success"] == 1
         assert fast["final_targets"] == {"c1": 1}
@@ -281,7 +281,7 @@ class TestReviewFixPass:
         local_models = {m["model"] for m in report["models"]
                         if m["location"] == "local"}
         assert "qwen3-4b" in local_models
-        assert "fabric-fast" not in local_models
+        assert "fabric-flash" not in local_models
 
     def test_cost_uses_price_table_yuan_per_1m(self, tmp_path):
         """I5：复用 cost_of_row 唯一计价入口（¥/1M tokens），字段名 cost_estimate。"""

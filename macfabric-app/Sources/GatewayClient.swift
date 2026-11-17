@@ -107,6 +107,17 @@ enum AdminRequestAuthorizer {
     }
 }
 
+// ── Admin 门禁模式（批 1 语义修订，用户裁决 2026-11-17）──────────
+
+/// 网关控制面鉴权默认关闭、配置即启用（网关侧 MACFABRIC_ADMIN_REQUIRED=1
+/// 为严格模式）。App 侧镜像该语义：有 token 就带上（严格模式需要），没有也
+/// 放行本机管理动作（默认模式）— API key 是云厂商请求认证，不是软件功能门槛。
+enum AdminAuthPolicy {
+    static var strictMode: Bool {
+        ProcessInfo.processInfo.environment["MACFABRIC_ADMIN_REQUIRED"] != nil
+    }
+}
+
 // ── 错误分类 + 代际防乱序 ───────────────────────────────────────
 
 enum GatewayClientError: Equatable {

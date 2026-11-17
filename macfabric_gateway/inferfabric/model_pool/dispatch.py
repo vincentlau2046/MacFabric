@@ -38,6 +38,21 @@ log = logging.getLogger("inferfabric.model_pool.dispatch")
 
 POOL_PREFIX = "fabric-"   # 硬切 fabric-（用户裁决 2026-11-16：slash 命名客户端兼容差，不留别名）
 
+# 池名 v2（用户裁决 2026-11-17）：对外逻辑名与池键升级为 flash/lite/max，
+# 更贴合中国模型档位命名。旧名 fast/small/premium 保留只读入站别名 —
+# 已分发客户端（AtlasCode 等）仍用 fabric-fast 等旧名，网关解析到新池，
+# 日志/摘要按解析后的新名记录（池身份单一，便于统计聚合）。
+POOL_ALIASES = {
+    "fast": "flash",
+    "small": "lite",
+    "premium": "max",
+}
+
+
+def canonical_pool_name(name: str) -> str:
+    """历史池名 → 当前池名；非别名原样返回。"""
+    return POOL_ALIASES.get(name, name)
+
 # 错误码 → (HTTP status, 是否带 Retry-After)
 _ERROR_CONTRACT = {
     "unknown_pool": (404, False),
@@ -60,7 +75,7 @@ def is_pool_name(model: str) -> bool:
 
 
 def pool_name_of(model: str) -> str:
-    return model[len(POOL_PREFIX):]
+    return canonical_pool_name(model[len(POOL_PREFIX):])
 
 
 # ── 请求能力提取 ──

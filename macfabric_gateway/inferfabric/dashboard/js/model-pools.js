@@ -65,11 +65,11 @@
    * 缺失组无创建入口。重构为单一形态 — 顶部调用树（端口→角色→模型，
    * 链路态 = 有没有被真实调用）+ 四角色常驻配置卡（未配置即待建）。
    * 四角色固定序与描述表（原向导 _ROLE_DEFS 上移 — 树与卡共用）。 */
-  var _ROLE_ORDER = ['fast', 'premium', 'small', 'classifier'];
+  var _ROLE_ORDER = ['flash', 'max', 'lite', 'classifier'];
   var _ROLE_DEFS = [
-    { name: 'fast', desc: '快速响应 — 日常对话与轻任务' },
-    { name: 'premium', desc: '旗舰质量 — 复杂推理与长文' },
-    { name: 'small', desc: '小模型 — 分类/抽取/批量任务' },
+    { name: 'flash', desc: '快速响应 — 日常对话与轻任务' },
+    { name: 'max', desc: '旗舰质量 — 复杂推理与长文' },
+    { name: 'lite', desc: '轻量任务 — 分类/抽取/批量任务' },
     { name: 'classifier', desc: '分类判别 — 路由/打标/判别' },
   ];
   // 树链路流动窗：真实 ok 交换在此窗内 = flowing。比卡片光带窗
@@ -183,8 +183,8 @@
   }
 
   // 未配置卡下拉默认值（原初始化引导的预填启发式按角色吸收；仅建议值）：
-  // fast=活跃最小 / premium=最大上下文本地（无本地则首个云）/
-  // small=最小 / classifier=首个活跃。目录条目需含 active/context_window
+  // flash=活跃最小 / max=最大上下文本地（无本地则首个云）/
+  // lite=最小 / classifier=首个活跃。目录条目需含 active/context_window
   // （fetchCatalog 完整形态）。额外池无启发式。
   function cardDefault(roleName, catalog) {
     var cat = catalog || {};
@@ -208,12 +208,12 @@
       }
       return 'local:' + sorted[0].name;
     }
-    // premium/small 同 fast/classifier 优先 active — L2a 把 VL 纳入目录后，
+  // max/lite 同 flash/classifier 优先 active — L2a 把 VL 纳入目录后，
     // 全量按上下文选会选中平时不激活、需 iff switch 的独占 VL 模型；
     // active 优先让文本池默认建议落在「当前可用」的模型上
-    if (roleName === 'fast') return pick(act.length ? act : llms, false);
-    if (roleName === 'premium') return pick(act.length ? act : llms, true);
-    if (roleName === 'small') return pick(act.length ? act : llms, false);
+    if (roleName === 'flash') return pick(act.length ? act : llms, false);
+    if (roleName === 'max') return pick(act.length ? act : llms, true);
+    if (roleName === 'lite') return pick(act.length ? act : llms, false);
     if (roleName === 'classifier') {
       return act.length ? 'local:' + act[0].name : pick(llms, false);
     }

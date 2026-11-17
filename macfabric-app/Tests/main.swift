@@ -75,7 +75,7 @@ check("authTextHonest", AuthPresentation.text(for: .unknown) == "状态未知" &
 check("monitorRowsNotMergedByName", MonitorIdentity.key(location: "local", provider: "-", model: "glm-5") != MonitorIdentity.key(location: "cloud", provider: "AtlasWork", model: "glm-5"))
 
 // 12. 调用 ID 规范（本地）：小写连字符、保留前缀拒绝
-check("apiModelIDValidation", APIIdentity.validate("bge-m3") != nil && APIIdentity.validate("BGE-M3") == nil && APIIdentity.validate("pack-x") == nil && APIIdentity.validate("fabric-fast") == nil && APIIdentity.validate("-x") == nil && APIIdentity.validate("x-") == nil && APIIdentity.validate("q--x") == nil && APIIdentity.validate("qwen3-4b-instruct-2507") != nil)
+check("apiModelIDValidation", APIIdentity.validate("bge-m3") != nil && APIIdentity.validate("BGE-M3") == nil && APIIdentity.validate("pack-x") == nil && APIIdentity.validate("fabric-flash") == nil && APIIdentity.validate("-x") == nil && APIIdentity.validate("x-") == nil && APIIdentity.validate("q--x") == nil && APIIdentity.validate("qwen3-4b-instruct-2507") != nil)
 
 // 13. 固定 fixture 解码（A2 DTO 同源合同）：蛇形字段、未知类型/资源、云端来源、重复名变体
 let fixtureURL = URL(fileURLWithPath: "macfabric-app/Tests/Fixtures/product-models.json")
@@ -290,6 +290,11 @@ var gen = GenerationGuard()
 gen.bump()
 gen.bump()
 check("generationGuardOldDropped", gen.accept(1) == false && gen.accept(3) == true && gen.accept(2) == false)
+
+// ── 批 1 语义修订：Admin 门禁默认关闭、配置即启用（用户裁决 2026-11-17）──
+// attachAdminToken 的策略分支在 GatewayStore 私有，这里钉住策略契约：
+// 默认（无环境变量）= 非严格模式，App 侧不拦截本机管理动作。
+check("adminAuthPolicyDefaultOff", AdminAuthPolicy.strictMode == false)
 
 // ── 批 3：SSE 解析 / 选模型 / 停止文案（spec 2026-11-17-batch3-stream-chat.md）──
 

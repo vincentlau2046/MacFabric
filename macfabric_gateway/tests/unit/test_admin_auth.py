@@ -4,8 +4,9 @@
 - SecretsManager 路径派生随 CloudDiscovery config_path.parent（dev 状态目录隔离）
 - _ensure_admin_token：secrets.env 缺 MACFABRIC_ADMIN_TOKEN 时生成写回（600）；
   已有则原样读取（重启轮换语义 = 用户改文件 → 重启生效）
-- _check_admin/_admin_gate：无 token 配置 → 401 fail-closed（不再放行）；
-  token 匹配 → 放行；不匹配 → 401
+- _admin_gate 语义（用户裁决 2026-11-17 修订）：默认关闭 token 校验
+  （本地回环零门槛）；MACFABRIC_ADMIN_REQUIRED=1 严格模式下无 token 配置 →
+  401 fail-closed；token 匹配 → 放行；不匹配 → 401
 - Host/Origin：Host 非回环 → 403；写请求带跨站 Origin → 403；
   原生 App（无 Origin）→ 放行
 - _validate_admin_token_safety：空 token 一律 RuntimeError（双保险）
@@ -83,38 +84,60 @@ class _FakeHandler:
         self.replied = (data, status)
 
 
-def test_admin_gate_fail_closed_without_token():
+def test_admin_gate_default_open_without_token(monkeypatch):
+    """默认模式：无 token 配置 → 放行（Host/Origin 校验仍生效）。"""
+    monkeypatch.delenv("MACFABRIC_ADMIN_REQUIRED", raising=False)
+    h = _FakeHandler({}, admin_token="")
+    assert proxy_handler._admin_gate(h, "127.0.0.1:8999") is True
+    assert h.replied is None
+
+
+def test_admin_gate_strict_mode_fail_closed(monkeypatch):
+    """严格模式：无 token 配置 → 401 fail-closed。"""
+    monkeypatch.setenv("MACFABRIC_ADMIN_REQUIRED", "1")
     h = _FakeHandler({}, admin_token="")
     assert proxy_handler._admin_gate(h, "127.0.0.1:8999") is False
     assert h.replied[1] == 401
 
 
-def test_admin_gate_accepts_matching_token():
+def test_admin_gate_strict_mode_accepts_matching_token(monkeypatch):
+    monkeypatch.setenv("MACFABRIC_ADMIN_REQUIRED", "1")
     h = _FakeHandler({"X-Admin-Token": "tok-abc"}, admin_token="tok-abc")
     assert proxy_handler._admin_gate(h, "127.0.0.1:8999") is True
     assert h.replied is None
 
 
-def test_admin_gate_rejects_wrong_token():
+def test_admin_gate_default_mode_wrong_token_still_open(monkeypatch):
+    """默认模式：不校验 token（严格模式专属）。"""
+    monkeypatch.delenv("MACFABRIC_ADMIN_REQUIRED", raising=False)
+    h = _FakeHandler({"X-Admin-Token": "wrong"}, admin_token="tok-abc")
+    assert proxy_handler._admin_gate(h, "127.0.0.1:8999") is True
+
+
+def test_admin_gate_strict_mode_rejects_wrong_token(monkeypatch):
+    monkeypatch.setenv("MACFABRIC_ADMIN_REQUIRED", "1")
     h = _FakeHandler({"X-Admin-Token": "wrong"}, admin_token="tok-abc")
     assert proxy_handler._admin_gate(h, "127.0.0.1:8999") is False
     assert h.replied[1] == 401
 
 
-def test_admin_gate_rejects_non_loopback_host():
+def test_admin_gate_rejects_non_loopback_host(monkeypatch):
+    monkeypatch.delenv("MACFABRIC_ADMIN_REQUIRED", raising=False)
     h = _FakeHandler({"X-Admin-Token": "tok-abc", "Host": "0.0.0.0:8999"}, admin_token="tok-abc")
     assert proxy_handler._admin_gate(h, "127.0.0.1:8999") is False
     assert h.replied[1] == 403
 
 
-def test_admin_gate_rejects_cross_site_origin_on_write():
+def test_admin_gate_rejects_cross_site_origin_on_write(monkeypatch):
+    monkeypatch.delenv("MACFABRIC_ADMIN_REQUIRED", raising=False)
     h = _FakeHandler({"X-Admin-Token": "tok-abc", "Origin": "http://evil.example"},
                      admin_token="tok-abc")
     assert proxy_handler._admin_gate(h, "127.0.0.1:8999", write=True) is False
     assert h.replied[1] == 403
 
 
-def test_admin_gate_allows_native_app_no_origin():
+def test_admin_gate_allows_native_app_no_origin(monkeypatch):
+    monkeypatch.delenv("MACFABRIC_ADMIN_REQUIRED", raising=False)
     h = _FakeHandler({"X-Admin-Token": "tok-abc"}, admin_token="tok-abc")
     assert proxy_handler._admin_gate(h, "127.0.0.1:8999", write=True) is True
 
@@ -125,7 +148,16 @@ def test_admin_gate_allows_loopback_origin():
     assert proxy_handler._admin_gate(h, "127.0.0.1:8999", write=True) is True
 
 
-def test_validate_admin_token_safety_raises_on_empty(monkeypatch):
+def test_validate_admin_token_safety_strict_mode_raises_on_empty(monkeypatch):
+    """严格模式空 token 仍 fail-closed（双保险保留）。"""
+    monkeypatch.setenv("MACFABRIC_ADMIN_REQUIRED", "1")
     monkeypatch.setattr(proxy_handler, "_ADMIN_TOKEN", "")
     with pytest.raises(RuntimeError):
         proxy_handler._validate_admin_token_safety()
+
+
+def test_validate_admin_token_safety_default_mode_warns_only(monkeypatch, caplog):
+    """默认模式空 token 不阻断启动，降级为显式警告。"""
+    monkeypatch.delenv("MACFABRIC_ADMIN_REQUIRED", raising=False)
+    monkeypatch.setattr(proxy_handler, "_ADMIN_TOKEN", "")
+    proxy_handler._validate_admin_token_safety()

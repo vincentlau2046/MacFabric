@@ -98,7 +98,7 @@ def resolved(cand: CandidateConfig) -> ResolvedCandidate:
         evidence=ev, route={"openai_base": "http://x", "anthropic_base": "http://x"})
 
 
-def local_pool(name="fast", cands=None):
+def local_pool(name="flash", cands=None):
     if cands is None:
         cands = [CandidateConfig(
             id="c1", priority=10, kind="local", model_name="qwen3-4b",
@@ -126,7 +126,7 @@ def tmp_env(tmp_path):
 class TestPoolErrorsPersist:
 
     def test_unknown_pool(self, tmp_env):
-        pm = make_pm(tmp_env, pools=[local_pool("fast")])
+        pm = make_pm(tmp_env, pools=[local_pool("flash")])
         h = FakeHandler()
         assert dispatch.handle_pool_chat(h, pm, {}, "fabric-nope") is True
         rs = rows(tmp_env, pm)
@@ -137,14 +137,14 @@ class TestPoolErrorsPersist:
         assert (r.get("metadata") or {}).get("pool_summary", {}).get("outcome") == "unknown_pool"
 
     def test_auth_rejected(self, tmp_env):
-        pm = make_pm(tmp_env, pools=[local_pool("fast")], auth=FailingAuth())
+        pm = make_pm(tmp_env, pools=[local_pool("flash")], auth=FailingAuth())
         h = FakeHandler()
-        assert dispatch.handle_pool_chat(h, pm, {}, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, {}, "fabric-flash") is True
         rs = rows(tmp_env, pm)
         assert len(rs) == 1
         r = rs[0]
         assert r["status"] == 401
-        assert r["route"] == "pool:fast"
+        assert r["route"] == "pool:flash"
         assert (r.get("metadata") or {}).get("pool_summary", {}).get("outcome") == "auth_rejected"
 
     def test_no_candidates(self, tmp_env):
@@ -159,18 +159,18 @@ class TestPoolErrorsPersist:
         assert (r.get("metadata") or {}).get("pool_summary", {}).get("outcome") == r["error"]
 
     def test_gate_rejected(self, tmp_env):
-        pm = make_pm(tmp_env, pools=[local_pool("fast")],
+        pm = make_pm(tmp_env, pools=[local_pool("flash")],
                      gate=FakeGate(ok=False))
         h = FakeHandler()
-        assert dispatch.handle_pool_chat(h, pm, {}, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, {}, "fabric-flash") is True
         rs = rows(tmp_env, pm)
         assert len(rs) == 1
         r = rs[0]
-        assert r["status"] == 429 and r["route"] == "pool:fast"
+        assert r["status"] == 429 and r["route"] == "pool:flash"
         assert (r.get("metadata") or {}).get("pool_summary", {}).get("outcome") == "rate_limited"
 
     def test_budget_exhausted(self, tmp_env, monkeypatch):
-        pm = make_pm(tmp_env, pools=[local_pool("fast")])
+        pm = make_pm(tmp_env, pools=[local_pool("flash")])
         calls = []
 
         def fake_transport(handler, pm_, data, *, model, pool, cand, remaining=None):
@@ -181,12 +181,12 @@ class TestPoolErrorsPersist:
 
         monkeypatch.setattr(dispatch, "_attempt_local_openai", fake_transport)
         h = FakeHandler()
-        assert dispatch.handle_pool_chat(h, pm, {}, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, {}, "fabric-flash") is True
         rs = rows(tmp_env, pm)
         assert len(rs) == 1  # 终态一行，attempt 不单独成行
         r = rs[0]
         assert r["status"] == 503 and r["error"] == "pool_unavailable"
-        assert r["route"] == "pool:fast"
+        assert r["route"] == "pool:flash"
         meta = r.get("metadata") or {}
         ps = meta.get("pool_summary") or {}
         assert ps.get("attempt_count") == len(calls) and ps["attempt_count"] >= 1
@@ -198,7 +198,7 @@ class TestPoolErrorsPersist:
 class TestAttemptSummaryRoundtrip:
 
     def _run(self, tmp_env, monkeypatch, results, cands=None):
-        pm = make_pm(tmp_env, pools=[local_pool("fast", cands=cands)])
+        pm = make_pm(tmp_env, pools=[local_pool("flash", cands=cands)])
         seq = list(results)
 
         def fake_transport(handler, pm_, data, *, model, pool, cand, remaining=None):
@@ -209,7 +209,7 @@ class TestAttemptSummaryRoundtrip:
 
         monkeypatch.setattr(dispatch, "_attempt_local_openai", fake_transport)
         h = FakeHandler()
-        assert dispatch.handle_pool_chat(h, pm, {}, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, {}, "fabric-flash") is True
         rs = rows(tmp_env, pm)
         assert len(rs) == 1
         return rs[0]
@@ -227,7 +227,7 @@ class TestAttemptSummaryRoundtrip:
         assert ps["retry_count"] == 1
         assert ps["fallback_count"] == 0
         assert ps["final_target"]["candidate_id"] == "c1"
-        assert ps["requested_model"] == "fabric-fast"
+        assert ps["requested_model"] == "fabric-flash"
         assert ps["config_revision"] == 7
         assert len(ps["attempts"]) == 2
 
@@ -272,7 +272,7 @@ class TestAttemptSummaryRoundtrip:
 
     def test_legacy_row_metadata_unknown(self, tmp_env):
         # 旧调用方直接插入（无 metadata 键）→ 回读保持未知，不补造
-        pm = make_pm(tmp_env, pools=[local_pool("fast")])
+        pm = make_pm(tmp_env, pools=[local_pool("flash")])
         pm.logger._db.insert_request_log([{
             "req_id": "legacy-1", "key_name": "k", "model": "m",
             "status": 200, "tokens_in": 1, "tokens_out": 1,

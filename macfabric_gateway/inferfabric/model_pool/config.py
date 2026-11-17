@@ -3,7 +3,7 @@
 配置文件 IFF_DATA_DIR/model_pools.yaml：
   schema_version: 1
   pools:
-    fast:
+    flash:
       enabled: true
       strategy: priority_failover
       allowed_locations: [cloud]        # 空或缺省 = 不启用任何位置
@@ -12,7 +12,7 @@
       max_attempts: 3
       deadline_ms: 180000
       candidates:
-        - id: fast_primary
+        - id: flash_primary
           priority: 10                  # 越小越优先，池内唯一
           kind: cloud                   # local | cloud
           provider: provider_a          # cloud 必填
@@ -317,7 +317,7 @@ def load_pools_dict(raw: dict, current_revision: int,
             pools[pool.name] = pool
 
     # 候选 id 只要求**池内唯一**（_parse_pool 兜底）。跨池同 id 合法且常见 —
-    # 同一模型可同时服务多个角色池（fast/small 复用同一云模型是标准用法）；
+    # 同一模型可同时服务多个角色池（flash/lite 复用同一云模型是标准用法）；
     # 决策/事件/日志记录均按 (pool, id) 或 provider:model_id 键控，不存在
     # 归属歧义。历史版本曾强制跨池全局唯一，属过度校验（用户裁决移除）。
 
