@@ -327,7 +327,7 @@ class CloudDiscovery:
                 (base_dir / "secrets.env") if base_dir else None)
         return self._secrets_mgr
 
-    def discover_all(self) -> dict[str, CloudModel]:
+    def discover_all(self, should_cancel=None) -> dict[str, CloudModel]:
         """对所有 enabled provider 执行模型发现。返回合并后的模型注册表（= 可路由集）。
 
         v6.1 Phase 1 白名单制：上游 /models 结果先进 candidates 快照（面板勾选用），
@@ -346,6 +346,12 @@ class CloudDiscovery:
             old = dict(self._cloud_models)
         merged: dict[str, CloudModel] = {}
         for name, cfg in self._providers.items():
+            # TOP3b 协作式取消检查点（每 provider 一个）：请求取消 → 早退且
+            # 不发布（注册表保持取消前的状态，floor 7.9.1 语义不动）。
+            # 既有调用方（每小时轮询/proxy_manager）不传参，行为零变化。
+            if should_cancel is not None and should_cancel():
+                log.info("Discovery cancelled by request — aborting before publish")
+                return dict(old)
             if not cfg.enabled or not cfg.discovery_enabled:
                 continue
             try:

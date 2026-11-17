@@ -38,6 +38,10 @@ from inferfabric.agent_stats import AGENT_GRAN, aggregate_agent_stats
 from inferfabric.metrics_aggregator import cost_of_row
 from inferfabric.proxy.request_logger import RequestLog
 from inferfabric.proxy import pack_handlers
+from inferfabric.jobs import JobRegistry
+
+# 控制面长任务注册表（批 4 TOP3b）：discover/switch 任务化共用
+_JOB_REGISTRY = JobRegistry()
 from inferfabric.monitor_report import (
     DEFAULT_WINDOW,
     VALID_SCOPES,
@@ -376,7 +380,18 @@ _GET_ROUTES = {
     "/api/openapi.json":        _serve_api_spec,
     "/admin/keys":              _admin(lambda h, pm: key_admin.handle(h, pm, "list")),
     "/admin/security/status":   _admin(lambda h, pm: h._handle_security_status(pm)),
+    # 控制面长任务轮询（批 4 TOP3b）：真实查询走 do_GET 动态段 /admin/jobs/{id}
+    "/admin/jobs":              _admin(lambda h, pm: h._send_json({"error": "job_id required"}, 400)),
 }
+
+def _job_route(h, pm):
+    path = urlparse(h.path).path
+    job_id = path.rsplit("/", 1)[-1]
+    job = _JOB_REGISTRY.get(job_id)
+    if job is None:
+        h._send_json({"error": "unknown job"}, 404)
+    else:
+        h._send_json(job)
 
 _POST_ROUTES = {
     "/admin/keys/login":        _admin(lambda h, pm: key_admin.handle(h, pm, "login")),
@@ -418,6 +433,8 @@ _POST_ROUTES = {
     # ─── Admin: Cloud Provider Management (PR-D) ─────────────────
     "/admin/cloud/reload":      _admin(lambda h, pm: h._handle_cloud_reload(pm)),
     "/admin/cloud/discover":    _admin(lambda h, pm: h._handle_cloud_discover(pm)),
+    # 控制面长任务取消（批 4 TOP3b）：POST /admin/jobs/{id}/cancel
+    "/admin/jobs/cancel":       _admin(lambda h, pm: h._handle_job_cancel(pm)),
     "/admin/cloud/test":        _admin(lambda h, pm: h._handle_cloud_test(pm)),
     "/admin/cloud/providers":   _admin(lambda h, pm: h._handle_cloud_providers(pm)),
     "/admin/cloud/provider-models": _admin(lambda h, pm: h._handle_cloud_provider_models(pm)),
@@ -573,6 +590,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             from urllib.parse import urlparse
             path = urlparse(self.path).path
             if path not in _GET_ROUTES:
+                # 控制面长任务动态段（批 4 TOP3b）：GET /admin/jobs/{job_id}
+                if path.startswith("/admin/jobs/"):
+                    _admin(_job_route)(self, pm)
+                    return
                 self._send_json({"error": "not found"}, 404)
                 return
             _GET_ROUTES[path](self, pm)
@@ -587,6 +608,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             from urllib.parse import urlparse
             path = urlparse(self.path).path
             if path not in _POST_ROUTES:
+                # 控制面长任务取消（批 4 TOP3b）：POST /admin/jobs/{id}/cancel
+                if path.startswith("/admin/jobs/") and path.endswith("/cancel"):
+                    _admin(lambda h, pm2: h._handle_job_cancel(pm2))(self, pm)
+                    return
                 self._send_json({"error": "not found"}, 404)
                 return
             _POST_ROUTES[path](self, pm)
@@ -2154,12 +2179,23 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._send_json(result, code)
 
     def _handle_switch(self, pm):
+        """POST /switch — GPU 切换任务化（批 4 TOP3b）。
+
+        默认 202 + job_id：switching gate（409）保留同步立即返回，App 弹窗
+        memory_insufficient 链路照旧；切换本体线程跑 mgr.switch()（内部
+        锁/回滚/switching_target 管理完整，不抛异常），结果落 job 由 App
+        轮询。body sync=true 保留旧同步语义（CLI/scripts 兼容）。
+        """
         data = self._read_body()
         if data is None:
             return
         target = data.get("model") or data.get("profile")
         if not target:
             self._send_json({"error": "Missing model"}, 400)
+            return
+        if data.get("sync"):
+            result = self._run_switch(pm, target, bool(data.get("force", False)))
+            self._send_json(result[0], result[1])
             return
 
         # Gate: respect switching_target (idle is always allowed as escape hatch)
@@ -2171,18 +2207,39 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
+        force_flag = bool(data.get("force", False))
+        job = _JOB_REGISTRY.create("switch", target)
+
+        def _switch_job(should_cancel):
+            # 取消 = 停止等待：模型加载无法安全中断，网关侧照常执行完毕并
+            # 如实落账（result 已产出则如实 done — 假装取消是撒谎）。
+            result = self._run_switch_body(pm, target, force_flag)
+            return "done", result
+
+        _JOB_REGISTRY.run_async(job, _switch_job,
+                                on_error_result=lambda exc: {
+                                    "status": "error", "message": str(exc)})
+        self._send_json(job, 202)
+
+    def _run_switch(self, pm, target, force):
+        """同步路径（sync=true）：返回 (payload, http_code)。
+        与任务化前完全一致：memory_insufficient → 409，其余（含 error
+        状态负载）→ 200，CLI/scripts 依赖此合同。"""
+        result = self._run_switch_body(pm, target, force)
+        if result.get("status") == "memory_insufficient":
+            return result, 409
+        return result, 200
+
+    def _run_switch_body(self, pm, target, force):
+        """switch 本体：gate 已过后的执行段（同步/任务化两路共用）。"""
+
         if target == "idle":
             for svc in list(pm.mgr.active_services):
                 pm.mgr.state.record_manual_stop(svc)
         elif target != "idle":
             pm.mgr.state.clear_manual_stop(target)
         # MACFABRIC G1: force=内存不足弹窗里用户点「仍然加载」
-        result = pm.mgr.switch(target, force=bool(data.get("force", False)))
-        if result.get("status") == "memory_insufficient":
-            self._send_json(result, 409)
-            return
-        pm.mgr.state.set("switching_target", "")
-        self._send_json(result)
+        return pm.mgr.switch(target, force=force)
 
     def _handle_stop(self, pm):
         data = self._read_body()
@@ -2348,26 +2405,42 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             "cloud_models": unique,
         })
 
+    def _handle_job_cancel(self, pm):
+        """POST /admin/jobs/{job_id}/cancel — 协作式取消（批 4 TOP3b）。"""
+        path = urlparse(self.path).path
+        job_id = path[len("/admin/jobs/"):-len("/cancel")]
+        if not job_id:
+            self._send_json({"error": "job_id required"}, 400)
+            return
+        payload, code = _JOB_REGISTRY.request_cancel(job_id)
+        self._send_json(payload, code)
+
     def _handle_cloud_discover(self, pm):
-        """POST /admin/cloud/discover — 手动触发模型发现。"""
-        models = pm.cloud.discover_all()
-        pm._cloud_discovered = True
-        # 注册表是双键（短名 + provider/ 前缀）——只数短名键，避免把 4 个模型报成 8
-        unique = {k: m for k, m in models.items() if "/" not in k}
-        self._send_json({
-            "status": "discovered",
-            "cloud_models": len(unique),
-            "models": [
-                {
-                    "id": m.model_id,
-                    "provider": m.provider,
-                    "openai": m.openai_available,
-                    "anthropic": m.anthropic_available,
-                    "discovered_at": m.discovered_at,
-                }
-                for m in unique.values()
-            ],
-        })
+        """POST /admin/cloud/discover - trigger full discovery.
+        TOP3b: default 202 + job_id (App polls /admin/jobs/{id});
+        body sync=true keeps legacy synchronous semantics (scripts/debug).
+        """
+        data = self._read_body() or {}
+        if data.get('sync'):
+            models = pm.cloud.discover_all()
+            pm._cloud_discovered = True
+            unique = {k: m for k, m in models.items() if '/' not in k}
+            self._send_json({
+                'status': 'discovered',
+                'cloud_models': len(unique),
+            })
+            return
+        job = _JOB_REGISTRY.create('discover', 'full-discovery')
+
+        def _discover_job(should_cancel):
+            models = pm.cloud.discover_all(should_cancel=should_cancel)
+            pm._cloud_discovered = True
+            unique = {k: m for k, m in models.items() if '/' not in k}
+            return 'done', {'status': 'discovered', 'cloud_models': len(unique)}
+
+        _JOB_REGISTRY.run_async(job, _discover_job,
+                                on_error_result=lambda exc: {'error': str(exc)})
+        self._send_json(job, 202)
 
     def _validate_cloud_test_url(self, url: str, pm) -> tuple:
         """Validate a cloud provider test URL (v6.6 relaxed policy).

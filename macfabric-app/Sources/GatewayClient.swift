@@ -172,3 +172,23 @@ enum ChatStop {
         return trimmed.isEmpty ? "（已停止 — 未收到内容）" : partial + "\n\n（已停止 — 部分回复）"
     }
 }
+
+// ── 批 4：控制面长任务轮询纯函数（spec 2026-11-17-batch4-jobs-infra.md）──
+
+/// job 轮询终态判定：未知/未终态继续轮询；终态如实分类；超时独立成档
+/// （网关侧可能仍在跑 — App 停止轮询但不谎报失败）。
+enum JobCompletion: Equatable {
+    case keepPolling, succeeded, failed, cancelled, timedOut
+
+    static func evaluate(_ job: [String: Any]?, elapsed: TimeInterval, timeout: TimeInterval) -> JobCompletion {
+        guard let status = job?["status"] as? String, !status.isEmpty else {
+            return .keepPolling
+        }
+        switch status {
+        case "done": return .succeeded
+        case "failed": return .failed
+        case "cancelled": return .cancelled
+        default: return elapsed >= timeout ? .timedOut : .keepPolling
+        }
+    }
+}

@@ -308,6 +308,17 @@ check("chatTargetEmptyNil", ChatTargetPicker.pick(activeLLMs: [], preferred: "a"
 check("chatStopKeepsPartial", ChatStop.finalText("今天天气") == "今天天气\n\n（已停止 — 部分回复）")
 check("chatStopEmptyHonest", ChatStop.finalText("") == "（已停止 — 未收到内容）")
 
+// ── 批 4：job 轮询终态判定（spec 2026-11-17-batch4-jobs-infra.md）──
+
+check("jobRunningKeepsPolling", JobCompletion.evaluate(["status": "running"], elapsed: 10, timeout: 300) == .keepPolling)
+check("jobQueuedKeepsPolling", JobCompletion.evaluate(["status": "queued"], elapsed: 10, timeout: 300) == .keepPolling)
+check("jobUnknownKeepsPolling", JobCompletion.evaluate(["status": "weird"], elapsed: 10, timeout: 300) == .keepPolling)
+check("jobNilKeepsPolling", JobCompletion.evaluate(nil, elapsed: 10, timeout: 300) == .keepPolling)
+check("jobDoneSucceeds", JobCompletion.evaluate(["status": "done"], elapsed: 400, timeout: 300) == .succeeded, "终态结果优先于超时")
+check("jobFailedDetected", JobCompletion.evaluate(["status": "failed"], elapsed: 10, timeout: 300) == .failed)
+check("jobCancelledDetected", JobCompletion.evaluate(["status": "cancelled"], elapsed: 10, timeout: 300) == .cancelled)
+check("jobRunningTimesOut", JobCompletion.evaluate(["status": "running"], elapsed: 301, timeout: 300) == .timedOut, "App 停止轮询但不谎报失败")
+
 // ── 汇总（文件末尾）：任何位置断言失败都能如实报告，杜绝“静默失败 + exit 0”盲区 ──
 if failures.isEmpty {
     print("CONTRACT_TESTS_OK: 全部断言通过")

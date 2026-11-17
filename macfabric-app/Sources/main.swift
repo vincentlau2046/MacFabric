@@ -374,6 +374,166 @@ final class GatewayStore: ObservableObject {
         actionMessage = ""
     }
     @Published var hubExpanded = ""
+    // ── 批 4 TOP3b：控制面长任务（发现/切换）— 202 + 轮询 + 可取消 ──
+    /// 进行中的 job（kind = discover/switch；label = 目标模型或全部服务商）
+    @Published var activeJobKind: String? = nil
+    @Published var activeJobLabel = ""
+    var jobTask: Task<Void, Never>? = nil
+
+    /// 发起控制面 job（POST → 202 {job_id}）并后台轮询到终态。
+    /// memory_insufficient 等结果负载经 job.result 原样回传 — 弹窗链路不破坏。
+    private func startControlJob(path: String, body: [String: Any], kind: String,
+                                 progressMsg: String, timeout: TimeInterval = 300) {
+        guard jobTask == nil || jobTask?.isCancelled == true else {
+            notify(.warning, "⚠️ 上一任务进行中，可先取消")
+            return
+        }
+        var req = adminRequest(path, timeoutInterval: 15)
+        guard attachAdminToken(&req) else {
+            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
+            return
+        }
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        activeJobKind = kind
+        activeJobLabel = (body["model"] as? String) ?? "全部服务商"
+        notify(.progress, progressMsg)
+        let started = Date()
+        jobTask = Task { [weak self] in
+            guard let self else { return }
+            // 首发请求：非 202 → 同步失败语义（401/409/5xx 原样处理）
+            var jobID: String? = nil
+            do {
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                if code == 202, let jid = obj?["job_id"] as? String {
+                    jobID = jid
+                } else if code == 409, let obj, obj["status"] as? String == "memory_insufficient" {
+                    await MainActor.run { self.finishControlJobUI(cancelled: false) }
+                    self.onMemoryInsufficient?(obj["model"] as? String ?? kind,
+                                               obj["message"] as? String ?? "内存不足")
+                    return
+                } else {
+                    let detail = String(data: data, encoding: .utf8) ?? ""
+                    await MainActor.run {
+                        self.finishControlJobUI(cancelled: false)
+                        self.notify(.error, "❌ 失败(\(code)): \(detail.prefix(120))")
+                    }
+                    return
+                }
+            } catch {
+                await MainActor.run {
+                    self.finishControlJobUI(cancelled: false)
+                    self.notify(.error, "❌ 连接失败 — 检查网关状态后重试")
+                }
+                return
+            }
+            // 轮询循环：JobCompletion.evaluate 终态判定（契约测试钉住）
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                let elapsed = Date().timeIntervalSince(started)
+                let verdict = await self.pollJobOnce(jobID: jobID ?? "", elapsed: elapsed, timeout: timeout)
+                switch verdict {
+                case .keepPolling:
+                    continue
+                case .succeeded:
+                    await MainActor.run {
+                        self.finishControlJobUI(cancelled: false)
+                        self.notify(.success, "✅ 完成 — 列表已更新")
+                        self.refresh(); self.fetchModels(); self.fetchCloud()
+                    }
+                case .failed:
+                    await MainActor.run { self.failControlJobWithResult(jobID: jobID ?? "", kind: kind) }
+                case .cancelled:
+                    await MainActor.run {
+                        self.finishControlJobUI(cancelled: true)
+                        self.notify(.info, "已取消（网关侧安全收尾中，未生效的部分保持原状）")
+                    }
+                case .timedOut:
+                    await MainActor.run {
+                        self.finishControlJobUI(cancelled: false)
+                        self.notify(.warning, "⏱ 等待超时 — 网关侧仍在执行，稍后刷新查看结果")
+                        self.refresh(); self.fetchModels(); self.fetchCloud()
+                    }
+                }
+                if verdict != .keepPolling { break }
+            }
+        }
+    }
+
+    /// 单次 job 轮询：404（记录被裁剪/网关重启）视为失联终态，如实报。
+    private func pollJobOnce(jobID: String, elapsed: TimeInterval, timeout: TimeInterval) async -> JobCompletion {
+        var req = adminRequest("/admin/jobs/\(jobID)", timeoutInterval: 10)
+        guard attachAdminToken(&req) else { return .failed }
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              let code = (resp as? HTTPURLResponse)?.statusCode else { return .keepPolling }
+        if code == 404 { return .failed }
+        guard code == 200, let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return .keepPolling
+        }
+        return JobCompletion.evaluate(obj, elapsed: elapsed, timeout: timeout)
+    }
+
+    /// 收尾：清 UI 进行态 + 句柄
+    private func finishControlJobUI(cancelled: Bool) {
+        activeJobKind = nil
+        activeJobLabel = ""
+        if !cancelled { jobTask = nil }
+    }
+
+    /// 终态 failed：result 负载原样回传（memory_insufficient → 弹窗链路）
+    private func failControlJobWithResult(jobID: String, kind: String) {
+        var req = adminRequest("/admin/jobs/\(jobID)", timeoutInterval: 10)
+        guard attachAdminToken(&req) else {
+            finishControlJobUI(cancelled: false)
+            notify(.error, "❌ 任务失败（凭据丢失，无法读取详情）")
+            return
+        }
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let obj = (code == 200 ? data : nil).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let result = obj?["result"] as? [String: Any]
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.finishControlJobUI(cancelled: false)
+                if result?["status"] as? String == "memory_insufficient" {
+                    self.onMemoryInsufficient?(result?["model"] as? String ?? kind,
+                                               result?["message"] as? String ?? "内存不足")
+                } else {
+                    let msg = result?["message"] as? String ?? "任务失败"
+                    self.notify(.error, "❌ \(msg)")
+                }
+            }
+        }.resume()
+    }
+
+    /// 用户点取消：请求网关协作式取消 + 本地停轮询（诚实文案：未到检查点则网关侧继续）
+    func cancelControlJob() {
+        guard activeJobKind != nil else { return }
+        jobTask?.cancel()
+        var req = adminRequest("/admin/jobs/cancel", timeoutInterval: 10)
+        guard attachAdminToken(&req) else {
+            finishControlJobUI(cancelled: true)
+            notify(.warning, "已停止等待（凭据丢失，未发送网关侧取消）")
+            return
+        }
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        URLSession.shared.dataTask(with: req) { [weak self] _, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            DispatchQueue.main.async {
+                self?.finishControlJobUI(cancelled: true)
+                self?.notify(.info, code == 200
+                    ? "已请求取消 — 网关将在下一个安全检查点收尾"
+                    : "已停止等待（任务可能已完成或不存在）")
+            }
+        }.resume()
+    }
+
+    /// job 进行中（横幅取消按钮 + 发现按钮防抖共用）
+    var controlJobActive: Bool { activeJobKind != nil }
     /// B3：本地推理页选中行（instanceID；CLT 无 @State 宏，存 store）
     @Published var inferenceSelectedID: String? = nil
     /// B3：模型服务页选中行（id = instanceID 或 cloud|<upstream-id>）
@@ -1410,8 +1570,9 @@ final class GatewayStore: ObservableObject {
     /// F3: 触发全量模型发现（provider 侧 /models 端点；服务端串行抓取可达
     /// 分钟级 — App 超时须放宽，否则显示失败但服务端仍在跑）
     func cloudDiscover() {
-        cloudRequest(path: "/admin/cloud/discover", method: "POST", body: [:],
-                     okMsg: "✅ 发现完成 — 列表已更新", failPrefix: "发现失败", timeout: 150)
+        // 批 4 TOP3b：任务化 — 202 + 轮询 + 可取消（分钟级抓取不再占死同步请求）
+        startControlJob(path: "/admin/cloud/discover", body: [:], kind: "discover",
+                        progressMsg: "发现中 — 服务商 /models 抓取可达分钟级，可随时取消", timeout: 420)
     }
 
     /// F3: 模型策展 — enable/disable（勾选）/add（手填）/remove/tag（VL 打标）
@@ -1726,31 +1887,11 @@ final class GatewayStore: ObservableObject {
     }
 
     func switchModel(_ name: String, force: Bool = false) {
-        notify(.progress, force ? "已确认超卖，加载 \(name) 中…" : "切换 \(name) 中…（首次加载约 5~10s）")
-        var req = adminRequest("/switch", timeoutInterval: 180)
-        guard attachAdminToken(&req) else {
-            notify(.error, "❌ 管理凭据未就绪 — 重启 App 重试 born 迁移")
-            return
-        }
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": name, "force": force])
-        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            let body = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if code == 409, let obj = try? JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any],
-                   obj["status"] as? String == "memory_insufficient" {
-                    self.notify(.info, "")
-                    self.onMemoryInsufficient?(name, obj["message"] as? String ?? "内存不足")
-                    return
-                }
-                self.notify((200..<300).contains(code) ? .success : .error,
-                    (200..<300).contains(code) ? "✅ \(name) 完成" : "❌ \(name) 失败(\(code)): \(body.prefix(120))")
-                self.refresh(); self.fetchModels()
-            }
-        }.resume()
+        // 批 4 TOP3b：任务化 — 202 + 轮询；409 gate 同步返回走 startControlJob
+        // 非 202 分支 → memory_insufficient 弹窗链路保持
+        startControlJob(path: "/switch", body: ["model": name, "force": force], kind: name,
+                        progressMsg: force ? "已确认超卖，加载 \(name) 中…" : "切换 \(name) 中…（首次加载约 5~10s）",
+                        timeout: 240)
     }
     func stopService(_ name: String) {
         notify(.progress, "停止 \(name) 中…")
@@ -1898,6 +2039,10 @@ struct FeedbackBanner: View {
                 Text(store.actionMessage).font(.system(size: 12)).foregroundColor(.ink)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
+                if store.controlJobActive {
+                    SmallBtn("取消任务", primary: false) { store.cancelControlJob() }
+                        .accessibilityIdentifier("job-cancel")
+                }
                 Button {
                     store.clearActionMessage()
                 } label: {
@@ -3611,7 +3756,7 @@ struct CloudView: View {
                 // 添加服务商表单
                 CloudAddCard(store: store)
                 HStack {
-                    SmallBtn("重新发现全部模型") { store.cloudDiscover() }
+                    SmallBtn("重新发现全部模型", disabled: store.controlJobActive) { store.cloudDiscover() }
                     if let total = store.cloud?.total_cloud_models {
                         Text("云端模型 \(total) 个").font(.system(size: 11)).foregroundColor(.faint)
                     }
