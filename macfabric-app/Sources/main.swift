@@ -124,6 +124,8 @@ struct CurvePoint: Codable {
 let IS_DEV_PROFILE = Bundle.main.url(forResource: "DEV_PROFILE", withExtension: nil) != nil
 let GW_PORT = IS_DEV_PROFILE ? 8998 : 8999
 let GW_BASE = "http://127.0.0.1:\(GW_PORT)"
+/// B2：凭据账目/请求注入按档位隔离（dev|8998 / prod|8999）
+let CURRENT_PROFILE: GatewayProfile = IS_DEV_PROFILE ? .dev : .prod
 
 struct PoolCandidate: Codable {
     var id: String
@@ -175,6 +177,11 @@ struct CloudModelInfo: Codable {
     var provider: String?
     var openai_available: Bool?
     var anthropic_available: Bool?
+    /// 真实能力标记（/models 发现载荷 capabilities.supports_vision）
+    var capabilities: CloudModelCaps?
+}
+struct CloudModelCaps: Codable {
+    var supports_vision: Bool?
 }
 struct LocalDiscovered: Codable {
     var name: String
@@ -355,6 +362,16 @@ final class GatewayStore: ObservableObject {
     }
     private var msgClear: DispatchWorkItem?
     @Published var hubExpanded = ""
+    /// B3：本地推理页选中行（instanceID；CLT 无 @State 宏，存 store）
+    @Published var inferenceSelectedID: String? = nil
+    /// B3：模型服务页选中行（id = instanceID 或 cloud|<upstream-id>）
+    @Published var hubSelectedID: String? = nil
+    /// B3：能力包页选中行（id = packID|variant）
+    @Published var packSelectedID: String? = nil
+    /// 能力包页类型筛选（""=全部；值为 PrimaryType.displayName）
+    @Published var packTypeFilter: String = ""
+    /// B3：页面实测宽度（WidthReader 上报；CLT 无 @State 宏，状态集中 store）
+    @Published var contentWidths: [String: CGFloat] = [:]
     @Published var pools: PoolsPayload?
     // 全局确认弹窗（SwiftUI confirmationDialog；action 在用户确认后执行）
     @Published var confirmText: String? = nil
@@ -448,6 +465,23 @@ final class GatewayStore: ObservableObject {
     }
     // ── API Key 鉴权（设置页接线 — /admin/security/*）──
     @Published var securityEnforced = false
+    /// B2 真实鉴权状态机：loading/loaded(stale)/unavailable — 5xx/超时/畸形 ≠ 未启用
+    @Published var securityState: SecurityState = .loading
+    private var securityStatusStore = SecurityStatusStore()
+    private var securityGeneration = 0
+    /// 凭据：会话 key 优先，其次 Keychain（按档位隔离账目）；不静默建 key
+    var credentialStore: GatewayCredentialStore = KeychainCredentialStore()
+    @Published var sessionAPIKey: String? = nil
+    var currentAPIKey: String? {
+        if let sessionAPIKey, !sessionAPIKey.isEmpty { return sessionAPIKey }
+        return (try? credentialStore.load(profile: CURRENT_PROFILE)) ?? nil
+    }
+    var authPresentation: AuthPresentation {
+        switch securityState {
+        case .loaded(let snap, _): snap.presentation
+        case .loading, .unavailable: .unknown
+        }
+    }
     @Published var securityKeyCount = 0
     @Published var securityBusy = false
     @Published var oneTimeKey: String? = nil   // 首次启用/新建返回的明文 key（仅此一次，库内只存摘要）
@@ -472,7 +506,7 @@ final class GatewayStore: ObservableObject {
     var windowVisible = true
 
     init() {
-        refresh(); fetchModels(); fetchCurve(); fetchPools(); fetchCloud(); scanLocalModels(); fetchMetrics(); fetchSecurityStatus()
+        refresh(); fetchModels(); fetchCurve(); fetchPools(); fetchCloud(); scanLocalModels(); fetchMetrics(); fetchSecurityStatus(); fetchPackCatalog()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             guard let self, self.windowVisible else { return }
             self.refresh(); self.fetchModels(); self.fetchSecurityStatus()
@@ -973,13 +1007,27 @@ final class GatewayStore: ObservableObject {
         }.resume()
     }
 
-    /// 设置页：鉴权开关状态（30s 轮询 + 操作后即时刷新）
+    /// 设置页：鉴权开关状态（30s 轮询 + 操作后即时刷新；B2：代际 + 状态机，失败 ≠ 未启用）
     func fetchSecurityStatus() {
-        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/security/status")) { [weak self] data, _, _ in
-            guard let self, let data,
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        securityGeneration += 1
+        let gen = securityGeneration
+        URLSession.shared.dataTask(with: base.appendingPathComponent("/admin/security/status")) { [weak self] data, resp, err in
+            let outcome: Result<SecuritySnapshot, StatusFetchError> = {
+                if let snap = SecurityGatewayStatus.parse(data: data, response: resp, error: err) { return .success(snap) }
+                if let e = err { return .failure((e as NSError).code == NSURLErrorTimedOut ? .timeout : .transport) }
+                if let code = (resp as? HTTPURLResponse)?.statusCode { return .failure(.http(code)) }
+                return .failure(.malformed)
+            }()
             DispatchQueue.main.async {
-                self.securityEnforced = obj["enforced"] as? Bool ?? false
+                guard let self else { return }
+                self.securityStatusStore.apply(gen, outcome)
+                self.securityState = self.securityStatusStore.state
+                if case .success(let snap) = outcome {
+                    self.securityEnforced = snap.enforced
+                }
+                // 密钥清单仅在 2xx 成功响应时刷新（失败不清理旧清单）
+                guard case .success = outcome, let data,
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
                 let keys = (obj["keys"] as? [[String: Any]] ?? []).compactMap {
                     SecurityKeyInfo(id: $0["id"] as? String ?? "",
                                     name: $0["name"] as? String ?? "?",
@@ -1430,9 +1478,12 @@ final class GatewayStore: ObservableObject {
 
     func sendPrompt() {
         busy = true; reply = ""
-        // 试聊模型动态解析：首个活跃 LLM → 兜底 qwen3-4b（轻量对话包卸载后不哑）
-        let target = models.first { $0.active == true && $0.model_type == "llm" }?.name
-            ?? (models.contains { $0.name == "qwen3-4b" } ? "qwen3-4b" : (models.first?.name ?? "qwen3-4b"))
+        // B2/契约：试聊只认活跃 LLM，绝不回退嵌入/首个模型
+        guard let target = models.first(where: { $0.active == true && $0.model_type == "llm" })?.name else {
+            busy = false
+            reply = "没有活跃的对话模型 — 到「本地推理」加载一个文本生成模型后再试"
+            return
+        }
         var req = URLRequest(url: base.appendingPathComponent("/v1/chat/completions"), timeoutInterval: 180)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1441,6 +1492,10 @@ final class GatewayStore: ObservableObject {
             "chat_template_kwargs": ["enable_thinking": false],
             "messages": [["role": "user", "content": prompt]],
         ])
+        // 有凭据则注入 Bearer（仅匹配档位的 loopback 推理 origin）
+        if let key = currentAPIKey {
+            req = (try? InferenceRequestAuthorizer.authorize(req, profile: CURRENT_PROFILE, key: key)) ?? req
+        }
         URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
             defer { DispatchQueue.main.async { self?.busy = false } }
             guard let self, let data,
@@ -1450,7 +1505,11 @@ final class GatewayStore: ObservableObject {
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 let detail = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
                 DispatchQueue.main.async {
-                    self?.reply = "请求失败(\(code)) \(detail.prefix(140)) — 若模型未装，先到能力包页安装轻量对话包"
+                    // 401/403 是鉴权问题，绝不提示安装模型
+                    let hint = (code == 401 || code == 403)
+                        ? "鉴权失败 — 到设置页录入有效的 API Key（或删除失效密钥）"
+                        : "若模型未装，先到能力包页安装轻量对话包"
+                    self?.reply = "请求失败(\(code)) \(detail.prefix(140)) — \(hint)"
                 }
                 return
             }
@@ -1465,7 +1524,15 @@ final class GatewayStore: ObservableObject {
     // 织物条数据：预算 B、已用、系统保留 8G
     var budgetMB: Int { snapshot?.status.gpu_total_mb ?? 0 }
     var usedMB: Int { snapshot?.status.gpu_used_mb ?? 0 }
-    var reserveMB: Int { 8192 }
+    /// 织物条 reserve（D7 唯一公式 B = RAM − reserve，单次扣减）：
+    /// env MACFABRIC_RESERVE_MB > 能力包策略 system_reserved_memory_mb > 默认 8192；
+    /// env 覆盖需可见（设置页已显示策略值；env 覆盖时此处如实生效）
+    var reserveMB: Int {
+        if let env = ProcessInfo.processInfo.environment["MACFABRIC_RESERVE_MB"], let v = Int(env), v >= 0 {
+            return v
+        }
+        return packPolicy?.system_reserved_memory_mb ?? 8192
+    }
     var freeRatio: Double {
         guard budgetMB > 0 else { return 0 }
         return max(Double(budgetMB - usedMB - reserveMB) / Double(budgetMB), 0)
@@ -1755,72 +1822,154 @@ struct CapabilityCard: View {
 
 struct HubView: View {
     @ObservedObject var store: GatewayStore
+    // B3 样稿契约：本地 + 云端同页单张统一表（原生 Table，类型/来源成列）；
+    // 模型池是独立服务概念（表格下方脚注卡片）；云端行原样保留上游 ID；
+    // 每模型按类型给出真实端点示例，密钥只用占位符。
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
+        let allRows = localRows + cloudRows
+        let sel = allRows.first(where: { $0.id == store.hubSelectedID })
+        let w = store.contentWidths["hub"] ?? 900
+        HStack(spacing: 0) {
+            // 原生布局：表格不套 ScrollView（Table 在 ScrollView 里高度塌缩为 0），
+            // 表格占满剩余空间自行滚动；接入条固定顶部、模型池脚注固定底部
+            VStack(alignment: .leading, spacing: 14) {
+                // 接入条（唯一地址 + 真实鉴权状态）
                 Card {
                     HStack(spacing: 10) {
                         Chip("接入地址")
                         Text(GW_BASE).font(.system(size: 12, design: .monospaced)).foregroundColor(.ink)
-                        Chip("鉴权未启用")
+                        Chip(store.authPresentation.text)   // B2：真实状态 — 未知 ≠ 未启用
                         Spacer()
                         CopyButton("复制 Base URL", text: GW_BASE, small: true)
                     }.padding(.horizontal, 12).padding(.vertical, 8)
                 }
-                ForEach(store.models, id: \.name) { m in
-                    HubRow(model: m,
-                           sleeping: store.snapshot?.status.sleep_states?[m.name] != nil,
-                           expanded: Binding(get: { store.hubExpanded == m.name },
-                                             set: { store.hubExpanded = $0 ? m.name : "" }))
-                }
-            }.padding(16)
-        }
-    }
-}
-
-struct HubRow: View {
-    let model: ModelItem
-    var sleeping: Bool
-    @Binding var expanded: Bool
-
-    var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 0) {
-                Button { expanded.toggle() } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 9, weight: .bold)).foregroundColor(.faint)
-                        RoundedRectangle(cornerRadius: 3).fill(threadColor(model.model_type))
-                            .frame(width: 9, height: 9)
-                        Text(model.name).font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
-                        Chip("本机 · \(humanName(model.model_type))")
-                        if sleeping { Pill(kind: .sleep) } else { Pill.make(active: model.active, health: nil) }
-                        Spacer()
-                        CopyButton("复制配置", text: configJSON, small: true)
-                        CopyButton("cURL", text: curlFor, small: true)
+                Group {
+                    if allRows.isEmpty {
+                        Text("暂无模型 — 本地模型到「本地推理」加载，云端模型到「云端接入」启用")
+                            .font(.system(size: 12)).foregroundColor(.faint)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                            .padding(.top, 24)
+                    } else {
+                        // 单张统一表（原生 Table）：本地 + 云端同页，类型/来源成列
+                        ModelTable(page: .hub, rows: allRows,
+                                   selectedID: store.hubSelectedID,
+                                   onSelect: { store.hubSelectedID = $0.isEmpty ? nil : $0 },
+                                   availableWidth: w)
+                            .frame(maxWidth: .infinity, minHeight: 200, maxHeight: .infinity)
                     }
-                    .contentShape(Rectangle())
-                }.buttonStyle(.plain)
-                .padding(.horizontal, 12).padding(.vertical, 7)
-
-                if expanded {
-                    VStack(alignment: .leading, spacing: 5) {
-                        FieldRow(k: "OpenAI", v: "\(GW_BASE)/v1 · 模型 ID: \(model.name)")
-                        FieldRow(k: "Anthropic", v: "\(GW_BASE) · ANTHROPIC_MODEL=\(model.name)")
-                        CopyButton("复制环境变量", text: "export ANTHROPIC_BASE_URL=\(GW_BASE)\nexport ANTHROPIC_MODEL=\(model.name)", small: true)
-                        Text("已停止的按需模型照样能调 — 首请求自动唤醒，约 2s")
-                            .font(.system(size: 10.5)).foregroundColor(.faint)
-                    }
-                    .padding(.leading, 12).padding(.bottom, 10).padding(.trailing, 12)
                 }
+                // 宽度测在表格本体上（不含页面 padding），断点才与真实列宽一致
+                .background(WidthReader(key: "hub", store: store))
+                // 模型池：独立路由服务（轻量脚注，不与模型表混排）
+                poolsFootnote
+            }
+            .padding(16)
+            // 详情：右侧并行栏（样稿契约），不混入滚动流
+            if let sel {
+                Divider().overlay(Color.lineC)
+                ModelDetails(row: sel,
+                             fields: hubDetailFields(sel),
+                             onClose: { store.hubSelectedID = nil })
+                    .frame(width: DS.Table.detailWidth)
             }
         }
     }
-    var configJSON: String {
-        "{\"base_url\": \"\(GW_BASE)/v1\", \"model\": \"\(model.name)\", \"api_key\": \"未启用鉴权\"}"
+
+    // 本地模型行：调用地始终是网关公开调用 ID（现阶段 = instance name）
+    private var localRows: [ModelTableRow] {
+        store.models.map { m in
+            ModelTableRow(
+                id: m.name,
+                title: inferenceDisplayName(m),
+                type: PrimaryType.from(raw: m.model_type ?? m.type),
+                runState: store.snapshot?.status.sleep_states?[m.name] != nil
+                    ? .sleeping : (m.active == true ? .available : .notLoaded),
+                sourceText: "本地模型",
+                target: ModelActionTarget(instanceID: m.name, apiModelID: m.name,
+                                          packID: m.managed_by_pack?.pack_id),
+                actions: [ModelTableAction(label: "接入配置") { store.hubSelectedID = m.name }])
+        }
     }
-    var curlFor: String {
-        "curl \(GW_BASE)/v1/chat/completions -H \"Content-Type: application/json\" -d '{\"model\":\"\(model.name)\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}'"
+
+    /// 官方真名：能力包目录 display_name 优先；"capability pack …" 描述串不算名字
+    private func inferenceDisplayName(_ m: ModelItem) -> String? {
+        if let pid = m.managed_by_pack?.pack_id,
+           let entry = store.packCatalog?.packs.first(where: { $0.pack_id == pid }),
+           !entry.display_name.isEmpty {
+            return entry.display_name
+        }
+        if let d = m.description, !d.isEmpty, !d.hasPrefix("capability pack") {
+            return d
+        }
+        return nil
+    }
+
+    // 云端模型行：上游 ID 原样保留作标题（裁决 2026-11-16）。
+    // 类型按服务事实归类：发现载荷均为 openai/anthropic chat 可用 → 文本生成；
+    // supports_vision=true（真实能力标记）追加“看图”能力，不凭名字猜。
+    private var cloudRows: [ModelTableRow] {
+        (store.cloud?.models ?? []).map { cm in
+            let caps: [CapabilityTag] = (cm.capabilities?.supports_vision == true)
+                ? [CapabilityTag(id: "vision", label: "看图")] : []
+            return ModelTableRow(
+                id: "cloud|\(cm.id)",
+                title: cm.id,
+                type: .llm,
+                capabilities: caps,
+                subtitle: caps.isEmpty ? nil : caps.map(\.label).joined(separator: " / "),
+                runState: .available,
+                sourceText: "云端 · \(cm.provider ?? "未知来源")",
+                target: ModelActionTarget(instanceID: cm.id, apiModelID: cm.id, packID: nil),
+                actions: [ModelTableAction(label: "接入配置") { store.hubSelectedID = "cloud|\(cm.id)" }])
+        }
+    }
+
+    // 模型池轻量脚注（样稿 footnote 语义）：一行说明 + 池速览 + 管理入口，无卡片底
+    private var poolsFootnote: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider().overlay(Color.lineC)
+            HStack(spacing: 8) {
+                Image(systemName: "square.stack.3d.up").font(.system(size: 11)).foregroundColor(DS.accent)
+                Text("模型池").font(.system(size: 12, weight: .semibold)).foregroundColor(.ink)
+                Text("独立路由服务 · 同类能力聚合，一处调整对多 Agent 生效")
+                    .font(.system(size: 11)).foregroundColor(.faint)
+                let pools = store.pools?.pools ?? [:]
+                ForEach(pools.keys.sorted(), id: \.self) { name in
+                    HStack(spacing: 3) {
+                        Circle().fill(pools[name]?.enabled == true ? DS.okC : DS.faint).frame(width: 6, height: 6)
+                        Text(name).font(DS.mono(11)).foregroundColor(.dim)
+                        Text("\((pools[name]?.candidates ?? []).count)")
+                            .font(.system(size: 10, design: .monospaced)).foregroundColor(.faint)
+                    }
+                }
+                Spacer()
+                SmallBtn("管理模型池") { store.tab = 3 }
+            }
+        }
+    }
+
+    private func hubDetailFields(_ row: ModelTableRow) -> [ModelDetailField] {
+        var f: [ModelDetailField] = []
+        f.append(ModelDetailField("Base URL", "\(GW_BASE)/v1", mono: true, copyable: true))
+        f.append(ModelDetailField("来源", row.sourceText ?? "本地模型", mono: false, copyable: false))
+        if let ep = APIExamples.endpoint(for: row.type) {
+            f.append(ModelDetailField("端点", ep, mono: true, copyable: false))
+        }
+        // 按类型即拷配置（密钥只用占位符；未知类型无端点 → 不生成伪有效示例）
+        if let curl = APIExamples.make(modelID: row.target.apiModelID, type: row.type,
+                                       baseURL: GW_BASE, format: .curl) {
+            f.append(ModelDetailField("cURL", curl, mono: true, copyable: true, multiline: true))
+        }
+        if let json = APIExamples.make(modelID: row.target.apiModelID, type: row.type,
+                                       baseURL: GW_BASE, format: .json) {
+            f.append(ModelDetailField("JSON", json, mono: true, copyable: true, multiline: true))
+        }
+        if let env = APIExamples.make(modelID: row.target.apiModelID, type: row.type,
+                                      baseURL: GW_BASE, format: .env) {
+            f.append(ModelDetailField("环境变量", env, mono: true, copyable: true, multiline: true))
+        }
+        return f
     }
 }
 
@@ -1875,90 +2024,105 @@ struct CopyButton: View {
 
 struct InferenceView: View {
     @ObservedObject var store: GatewayStore
+    // B3：共享表格 + 详情栏。选中按 instanceID 保持（存 store，规避 CLT 无 @State 宏）；
+    // 行刷新后选中项已不存在则视为无选中（选择保持语义由 SelectionKeeper 契约测试钉住）。
+    private var selection: String? {
+        get { store.inferenceSelectedID }
+        nonmutating set { store.inferenceSelectedID = newValue }
+    }
 
     var body: some View {
+        let rows = store.models.map { m in
+            inferenceRow(store: store, m: m,
+                         sleeping: store.snapshot?.status.sleep_states?[m.name] != nil)
+        }
+        let sel = rows.contains(where: { $0.id == selection }) ? selection : nil
+        let w = store.contentWidths["inference"] ?? 900
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: 8) {
-                    ForEach(store.models, id: \.name) { m in
-                        ModelRowView(store: store, m: m,
-                                     sleeping: store.snapshot?.status.sleep_states?[m.name] != nil)
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    if rows.isEmpty {
+                        Text("网关未返回模型 — 检查网关状态或到能力包页安装")
+                            .font(.system(size: 12)).foregroundColor(.faint)
+                            .frame(maxWidth: .infinity).padding(.vertical, 24)
+                    } else {
+                        ModelTable(page: .localInference, rows: rows,
+                                   selectedID: sel,
+                                   onSelect: { store.inferenceSelectedID = $0 },
+                                   availableWidth: w)
+                            .frame(maxWidth: .infinity, minHeight: 200)
                     }
-                }.padding(16)
+                }
+                .background(WidthReader(key: "inference", store: store))
+                if let sel, let row = rows.first(where: { $0.id == sel }) {
+                    Divider().overlay(Color.lineC)
+                    ModelDetails(row: row,
+                                 fields: detailFields(for: row),
+                                 autostart: Binding(
+                                    get: { store.models.first(where: { $0.name == sel })?.autostart ?? false },
+                                    set: { store.setAutostart(sel, $0) }),
+                                 onClose: { store.inferenceSelectedID = nil })
+                        .frame(width: DS.Table.detailWidth)
+                        .accessibilityIdentifier("model-details:\(sel)")
+                }
             }
             Divider().overlay(Color.lineC)
             ChatStrip(store: store)
         }
     }
+
+    private func inferenceRow(store: GatewayStore, m: ModelItem, sleeping: Bool) -> ModelTableRow {
+        let target = ModelActionTarget(instanceID: m.name, apiModelID: m.name,
+                                       packID: m.managed_by_pack?.pack_id)
+        var actions: [ModelTableAction] = []
+        if sleeping {
+            actions.append(ModelTableAction(label: "唤醒", primary: true) { store.wakeModel(m.name) })
+        } else if m.active == true {
+            actions.append(ModelTableAction(label: "睡眠", primary: false) { store.sleepModel(m.name) })
+            actions.append(ModelTableAction(label: "停止", primary: false) { store.stopService(m.name) })
+        } else {
+            actions.append(ModelTableAction(label: "加载", primary: true) { store.switchModel(m.name) })
+        }
+        let runState: RunState = sleeping ? .sleeping : (m.active == true ? .available : .notLoaded)
+        return ModelTableRow(
+            id: m.name,
+            title: displayName(for: m),
+            type: PrimaryType.from(raw: m.model_type ?? m.type),
+            runState: runState,
+            memoryText: MemoryMath.baselineText(mb: m.peak_vram_mb),   // nil → 未知，不是 0
+            target: target,
+            actions: actions)
+    }
+
+    /// 官方真名解析：能力包目录 display_name 优先（真实资料源）；
+    /// 网关 description 若是 "capability pack …" 描述串则视为无名字，诚实回退。
+    private func displayName(for m: ModelItem) -> String? {
+        if let pid = m.managed_by_pack?.pack_id,
+           let entry = store.packCatalog?.packs.first(where: { $0.pack_id == pid }),
+           !entry.display_name.isEmpty {
+            return entry.display_name
+        }
+        if let d = m.description, !d.isEmpty, !d.hasPrefix("capability pack") {
+            return d
+        }
+        return nil
+    }
+
+    private func detailFields(for row: ModelTableRow) -> [ModelDetailField] {
+        guard let m = store.models.first(where: { $0.name == row.id }) else { return [] }
+        var f: [ModelDetailField] = []
+        f.append(ModelDetailField("引擎", m.type == "llama_cpp" ? "llama.cpp" : (m.type ?? "未知")))
+        let port = store.snapshot?.status.services_info?[m.name]?.port.map(String.init) ?? "未知"
+        f.append(ModelDetailField("端口", port, mono: true, copyable: false))
+        f.append(ModelDetailField("装载", m.ledgerMode == "resident" ? "常驻" : "按需", mono: false, copyable: false))
+        if let pid = m.managed_by_pack?.pack_id {
+            f.append(ModelDetailField("来源", "能力包 · \(pid)", mono: false, copyable: false))
+        }
+        return f
+    }
 }
 
 /// 设计稿 .mrow：一行一模型 — 状态、装载模式、内存账、三个动作
-struct ModelRowView: View {
-    @ObservedObject var store: GatewayStore
-    let m: ModelItem
-    var sleeping: Bool
-
-    var body: some View {
-        Card {
-            HStack(spacing: 10) {
-                RoundedRectangle(cornerRadius: 4).fill(threadColor(m.model_type))
-                    .frame(width: 10, height: 10)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(m.name).font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
-                    Text("\(engineLabel) · :\(portText)")
-                        .font(.system(size: 11, design: .monospaced)).foregroundColor(.faint)
-                }
-                if sleeping { Pill(kind: .sleep) } else { Pill.make(active: m.active, health: nil) }
-                // 统一架构：标注所属能力包（本地推理 = 已安装能力的运行视图）
-                if let pid = m.managed_by_pack?.pack_id {
-                    Chip("包:\(pid)", color: Color.thLlm)
-                        .help("由能力包 \(pid) 装入生成 — 卸载请到能力包页")
-                }
-                // F5: VL 能力徽章（model_type == vl）
-                if m.model_type == "vl" { Chip("VL", color: Color.thVl) }
-                Chip(loadChip)                       // 装载模式 chip
-                // 默认启动开关（用户裁决：默认 false 不自动启动）
-                HStack(spacing: 4) {
-                    Text("默认启动").font(.system(size: 10.5)).foregroundColor(.faint)
-                    Toggle("", isOn: Binding(
-                        get: { m.autostart ?? false },
-                        set: { store.setAutostart(m.name, $0) }))
-                        .labelsHidden().toggleStyle(.switch).controlSize(.mini)
-                        .help("开启后网关启动时自动拉起该模型；默认关闭 — 首个请求才唤醒")
-                }
-                Text("基线 \(baselineGB)")
-                    .font(.system(size: 11, design: .monospaced)).foregroundColor(.dim)
-                Spacer()
-                HStack(spacing: 6) {
-                    if sleeping {
-                        SmallBtn("唤醒", primary: true) { store.wakeModel(m.name) }
-                    } else if m.active == true {
-                        SmallBtn("睡眠") { store.sleepModel(m.name) }
-                        SmallBtn("停止") { store.stopService(m.name) }
-                    } else {
-                        SmallBtn("启动", primary: true) { store.switchModel(m.name) }
-                    }
-                }
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-        }
-    }
-
-    var engineLabel: String {
-        m.type == "llama_cpp" ? "llama.cpp" : (m.type ?? "")
-    }
-    var portText: String {
-        store.snapshot?.status.services_info?[m.name]?.port.map(String.init) ?? "—"
-    }
-    var loadChip: String {
-        (m.ledgerMode == "resident") ? "常驻" : "按需 · 空闲30min卸载"
-    }
-    var baselineGB: String {
-        let mb = m.peak_vram_mb ?? 0
-        return mb > 0 ? String(format: "%.1f GB", Double(mb) / 1024) : "—"
-    }
-}
-
 struct SmallBtn: View {
     var title: String
     var primary = false
@@ -2018,7 +2182,7 @@ struct PoolsView: View {
 
     static let usageSnippet = """
     curl http://127.0.0.1:\(GW_PORT)/v1/chat/completions \\
-      -H "Authorization: Bearer sk-iff-…" -H "Content-Type: application/json" \\
+      -H "Authorization: Bearer $MACFABRIC_API_KEY" -H "Content-Type: application/json" \\
       -d '{"model":"fabric-fast","messages":[{"role":"user","content":"你好"}]}'
     """
 
@@ -2026,7 +2190,7 @@ struct PoolsView: View {
         let text = """
         # MacFabric 池调用（OpenAI 方言；Anthropic 方言把 URL 换成 http://127.0.0.1:\(GW_PORT) 即可）
         export OPENAI_BASE_URL=http://127.0.0.1:\(GW_PORT)/v1
-        export OPENAI_API_KEY=sk-iff-…   # 设置页「API Key 鉴权」新建
+        export OPENAI_API_KEY=$MACFABRIC_API_KEY   # 设置页「API Key 鉴权」新建后填入真实 key
         # model 填池名：fabric-fast · fabric-small · fabric-premium（按池内优先级自动调度）
         \(usageSnippet)
         """
@@ -2069,10 +2233,20 @@ struct PoolsView: View {
                                      "OpenAI 方言 \(GW_BASE)/v1 · Anthropic 方言 \(GW_BASE)")
                             guideRow("② 模型名（model）",
                                      "直接填池名：fabric-fast · fabric-small · fabric-premium — 网关按池内优先级自动选候选，失败自动换下一个，无需改客户端")
-                            guideRow("③ API Key",
-                                     store.securityEnforced
-                                        ? "鉴权已开启 — 用设置页「API Key 鉴权 → ＋ 新建密钥」生成的 sk-iff-…，请求头 Authorization: Bearer <key>"
-                                        : "鉴权未开启 — 本机调用免 key；开启鉴权后在设置页新建")
+                            // B2：真实状态派生 — 网关不可达/未取到 = 状态未知，绝不说“未开启”
+                            let keyGuide: String = {
+                                switch store.authPresentation {
+                                case .enabledAll:
+                                    return "鉴权已启用 · 全部请求 — 用设置页「API Key 鉴权 → ＋ 新建密钥」生成的 key，请求头 Authorization: Bearer <key>"
+                                case .enabledPools:
+                                    return "仅模型池请求需要 key — 设置页「API Key 鉴权」可录入"
+                                case .disabled:
+                                    return "鉴权未开启 — 本机调用免 key；开启鉴权后在设置页新建"
+                                case .unknown:
+                                    return "鉴权状态未知 — 网关不可达或未返回状态；本机调用可先免 key 试，失败再看设置页"
+                                }
+                            }()
+                            guideRow("③ API Key", keyGuide)
                             Text("示例（终端可直接粘贴）")
                                 .font(.system(size: 10.5)).foregroundColor(.dim)
                             Text(Self.usageSnippet)
@@ -2813,9 +2987,9 @@ func packStageLabel(_ s: String?) -> String {
 
 struct PacksView: View {
     @ObservedObject var store: GatewayStore
+    // B3：能力分类分区（用户裁决）+ 共享目录表（行键 packID:variant；
+    // 验证列诚实显示“待验证”——risk_level 不是验证记录；包 ID/变体/路径进详情）
 
-    // 能力分类（2026-11-16 用户裁决：按能力分区，拒绝平铺卡墙）；
-    // 未知类型按字典序排在末尾，空分类不显示
     private static let capOrder = ["llm", "vl", "embedding", "rerank", "tts", "asr", "ocr", "aigc"]
     private static let capSection: [String: String] = [
         "llm": "对话（LLM）", "vl": "看图（VL）", "embedding": "嵌入 / 检索",
@@ -2835,26 +3009,45 @@ struct PacksView: View {
     }
 
     var body: some View {
-        ScrollView {
+        let allRows = groups.flatMap { packRows($0.entries) }
+        let shown = allRows.filter { store.packTypeFilter.isEmpty || $0.type.displayName == store.packTypeFilter }
+        let presentTypes = allRows.map(\.type.displayName)
+            .reduce(into: [String: Int]()) { $0[$1, default: 0] += 1 }
+        let sel = allRows.first(where: { $0.id == store.packSelectedID })
+        let w = store.contentWidths["packs"] ?? 900
+        HStack(spacing: 0) {
+            // 原生布局：表格不套 ScrollView（Table 在 ScrollView 里高度塌缩为 0）
             VStack(alignment: .leading, spacing: 14) {
                 FeedbackBanner(store: store)
-                ForEach(groups, id: \.cap) { g in
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 6) {
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(threadColor(g.cap)).frame(width: 9, height: 9)
-                            Text(Self.capSection[g.cap] ?? g.cap)
-                                .font(.system(size: 12.5, weight: .semibold)).foregroundColor(.ink)
-                            Text("\(g.entries.count)")
-                                .font(.system(size: 10.5, design: .monospaced)).foregroundColor(.faint)
-                        }
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
-                            ForEach(g.entries) { entry in
-                                PackCard(store: store, entry: entry)
-                            }
+                // 类型筛选（原生分段控件；空目录不显示）
+                if !presentTypes.isEmpty {
+                    Picker("类型", selection: $store.packTypeFilter) {
+                        Text("全部").tag("")
+                        ForEach(presentTypes.keys.sorted(), id: \.self) { t in
+                            Text("\(t) (\(presentTypes[t] ?? 0))").tag(t)
                         }
                     }
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    .labelsHidden()
                 }
+                Group {
+                    if allRows.isEmpty {
+                        Text("目录为空 — 检查网关 Catalog 服务")
+                            .font(.system(size: 12)).foregroundColor(.faint)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                            .padding(.top, 24)
+                    } else {
+                        // 单张统一目录表（原生 Table）：类型成列
+                        ModelTable(page: .catalog, rows: shown,
+                                   selectedID: store.packSelectedID,
+                                   onSelect: { store.packSelectedID = $0.isEmpty ? nil : $0 },
+                                   availableWidth: w)
+                            .frame(maxWidth: .infinity, minHeight: 200, maxHeight: .infinity)
+                    }
+                }
+                // 宽度测在表格本体上（不含页面 padding），断点才与真实列宽一致
+                .background(WidthReader(key: "packs", store: store))
                 // 用户扩展能力包（统一架构 2026-11-16）：填链接 → 校验链
                 CustomPackCard(store: store)
                 // F4: 本机模型发现/安装（用户导入流，收进折叠区不抢主视线）
@@ -2865,12 +3058,79 @@ struct PacksView: View {
                 }
             }
             .padding(16)
+            // 详情：右侧并行栏
+            if let sel {
+                Divider().overlay(Color.lineC)
+                ModelDetails(row: sel,
+                             fields: packDetailFields(sel),
+                             onClose: { store.packSelectedID = nil })
+                    .frame(width: DS.Table.detailWidth)
+            }
         }
         .onAppear {
             store.fetchPackCatalog()
             store.fetchPackStatus()
             store.fetchPackPolicy()
         }
+    }
+
+    // 目录行：行键 packID:variant；验证列诚实（无真实验证记录 → 待验证）
+    private func packRows(_ entries: [PackCatalogEntry]) -> [ModelTableRow] {
+        entries.map { entry in
+            let packId = entry.pack_id
+            let manifest = entry.manifest
+            let templateReady = manifest.execution?.model_config_template == "llama_cpp_chat_v1"
+            let rec = store.packStatus?.packs.first { $0.pack_id == packId }
+            let installed = rec?.status == "installed"
+            let failed = rec?.status == "failed"
+            let inProgress = rec != nil && !installed && !failed
+            let variant = manifest.model?.quantization
+            let rowID = "\(packId)|\(variant ?? "-")"
+            let sizeText: String? = {
+                guard let mb = manifest.resources?.disk_mb, mb > 1 else { return nil }
+                return String(format: "%.1f GB", Double(mb) / 1024.0)
+            }()
+            var actions: [ModelTableAction] = []
+            if installed {
+                actions.append(ModelTableAction(label: "卸载") { store.previewPackUninstall(packId, entry.display_name) })
+            } else if inProgress {
+                actions.append(ModelTableAction(label: packStageLabel(rec?.stage), disabled: true) {})
+            } else if failed {
+                actions.append(ModelTableAction(label: "重试", primary: true) { store.startPackInstall(packId, entry.display_name) })
+            } else if templateReady {
+                actions.append(ModelTableAction(label: "安装", primary: true) { store.startPackInstall(packId, entry.display_name) })
+            }
+            return ModelTableRow(
+                id: rowID,
+                title: entry.display_name,
+                type: PrimaryType.from(raw: manifest.capability),
+                capabilities: (entry.tags ?? []).map { CapabilityTag(id: $0, label: $0) },
+                statusText: installed ? "已安装" : (failed ? "失败" : (inProgress ? "安装中" : nil)),
+                target: ModelActionTarget(instanceID: packId, apiModelID: packId, packID: packId),
+                actions: actions,
+                variantText: variant,
+                sizeText: sizeText,
+                compatText: templateReady ? "llama.cpp" : "待接入",
+                verificationText: nil,           // 无真实验证记录 → 共享组件显示“待验证”
+                installText: installed ? "已安装" : (templateReady ? "可安装" : (inProgress ? "安装中" : (failed ? "失败" : "待接入"))))
+        }
+    }
+
+    private func packDetailFields(_ row: ModelTableRow) -> [ModelDetailField] {
+        var f: [ModelDetailField] = []
+        if let entry = store.packCatalog?.packs.first(where: { row.id.hasPrefix("\($0.pack_id)|") }) {
+            let rec = store.packStatus?.packs.first { $0.pack_id == entry.pack_id }
+            f.append(ModelDetailField("包 ID", entry.pack_id))
+            f.append(ModelDetailField("版本", entry.manifest.pack_version, mono: false, copyable: false))
+            if let v = row.variantText { f.append(ModelDetailField("变体", v, mono: false, copyable: false)) }
+            if let s = row.sizeText { f.append(ModelDetailField("体积", s, mono: false, copyable: false)) }
+            if let ip = rec?.install_path { f.append(ModelDetailField("路径", ip)) }
+            f.append(ModelDetailField("说明", entry.summary, mono: false, copyable: false))
+            if rec?.sandbox_degraded == true {
+                f.append(ModelDetailField("注意", "沙箱降级安装", mono: false, copyable: false))
+            }
+        }
+        return f
     }
 }
 
@@ -2951,84 +3211,6 @@ struct CustomPackCard: View {
 
 /// PK4 v2：Catalog 驱动卡 — 状态机（未安装/进行中[阶段文案]/已安装/失败[重试]/
 /// 待接入[运行时模板未实现，后端 preflight 亦拒]）
-struct PackCard: View {
-    @ObservedObject var store: GatewayStore
-    let entry: PackCatalogEntry
-
-    var packId: String { entry.pack_id }
-    var label: String { entry.display_name }
-    var manifest: PackManifest { entry.manifest }
-    /// 后端 KNOWN_TEMPLATES 单一事实源的 App 侧镜像：仅 llama_cpp_chat_v1 可装
-    var templateReady: Bool { manifest.execution?.model_config_template == "llama_cpp_chat_v1" }
-    var statusRec: PackStatusRec? { store.packStatus?.packs.first { $0.pack_id == packId } }
-    var installed: Bool { statusRec?.status == "installed" }
-    var failed: Bool { statusRec?.status == "failed" }
-    var inProgress: Bool { statusRec != nil && !installed && !failed }
-    var diskGB: String? {
-        guard let mb = manifest.resources?.disk_mb, mb > 1 else { return nil }   // 1MB=内置占位
-        return String(format: "%.1f GB", Double(mb) / 1024.0)
-    }
-
-    var body: some View {
-        Card {
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 8) {
-                    RoundedRectangle(cornerRadius: 4).fill(threadColor(manifest.capability))
-                        .frame(width: 10, height: 10)
-                    Text(label).font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
-                    Spacer()
-                    if entry.risk_level == "verified" { Chip("已验证") }
-                }
-                Text(entry.summary).font(.system(size: 11.5)).foregroundColor(.dim).lineLimit(2)
-                // 预设安装路径（2026-11-16 用户裁决：已装包展示真实位置）
-                if installed, let ip = statusRec?.install_path {
-                    Text(ip).font(.system(size: 9.5, design: .monospaced))
-                        .foregroundColor(.faint).lineLimit(1).truncationMode(.head)
-                        .help(ip)
-                }
-                HStack {
-                    Text(diskGB ?? "内置").font(.system(size: 11.5, design: .monospaced)).foregroundColor(.faint)
-                    if let q = manifest.model?.quantization, diskGB != nil {
-                        Text(q).font(.system(size: 11, design: .monospaced)).foregroundColor(.faint)
-                    }
-                    if statusRec?.sandbox_degraded == true {
-                        Text("沙箱降级").font(.system(size: 10.5)).foregroundColor(.warnC)
-                            .help("SBPL 沙箱不可用时降级安装（官方已验证包允许）")
-                    }
-                    Spacer()
-                    footerControls
-                }
-                if failed, let err = statusRec?.error {
-                    Text(err).font(.system(size: 10.5, design: .monospaced))
-                        .foregroundColor(.warnC).lineLimit(2)
-                        .help(err)
-                }
-            }
-            .padding(12)
-        }
-    }
-
-    @ViewBuilder private var footerControls: some View {
-        if installed {
-            Chip("已安装")
-            SmallBtn("卸载") { store.previewPackUninstall(packId, label) }
-                .help("端到端卸载：停进程 + 删受控配置 + 删包文件（零系统残留）；受影响池会先列出")
-        } else if inProgress {
-            Text(packStageLabel(statusRec?.stage))
-                .font(.system(size: 11, design: .monospaced)).foregroundColor(.accent)
-        } else if failed {
-            SmallBtn("重试", primary: true) { store.startPackInstall(packId, label) }
-            Text("失败").font(.system(size: 10.5)).foregroundColor(.warnC)
-        } else if !templateReady {
-            Text("待接入").font(.system(size: 10.5)).foregroundColor(.faint)
-                .help("该包的运行时模板未接入（PK5 批次），暂不可安装")
-        } else {
-            SmallBtn("安装", primary: true) { store.startPackInstall(packId, label) }
-                .help("从后端 Catalog 冻结的源下载并校验后安装；不自动启动 — 首请求按需唤醒")
-        }
-    }
-}
-
 /// 云端接入：真数据 CRUD（GET/POST/DELETE /admin/cloud/providers + provider-models 五动作）
 struct CloudView: View {
     @ObservedObject var store: GatewayStore
@@ -3441,9 +3623,16 @@ struct SettingsView: View {
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("API Key 鉴权").font(.system(size: 13, weight: .semibold)).foregroundColor(.ink)
-                                Text(store.securityEnforced
-                                     ? "客户端需携带密钥调用 · 已登记 \(store.securityKeyCount) 把密钥"
-                                     : "关闭中 — 本机任意客户端可直接调用 · 已登记 \(store.securityKeyCount) 把密钥")
+                                // B2：状态未知 ≠ 关闭中 — 网关不可达/未取到时如实呈现
+                                let secDesc: String = {
+                                    switch store.authPresentation {
+                                    case .enabledAll: return "客户端需携带密钥调用 · 已登记 \(store.securityKeyCount) 把密钥"
+                                    case .enabledPools: return "仅模型池请求需密钥 · 已登记 \(store.securityKeyCount) 把密钥"
+                                    case .disabled: return "关闭中 — 本机任意客户端可直接调用 · 已登记 \(store.securityKeyCount) 把密钥"
+                                    case .unknown: return "状态未知 — 网关不可达或未返回状态（不代表已关闭）"
+                                    }
+                                }()
+                                Text(secDesc)
                                     .font(.system(size: 11.5)).foregroundColor(.faint)
                             }
                             Spacer()
@@ -3810,6 +3999,10 @@ final class MiniWeaveNSView: NSView {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    // 进程级强持有：main.swift 顶层 let 是 main() 局部变量，会被 ARC 提前释放，
+    // 而 NSApplication.delegate 是 unsafe unretained —— 曾导致回调打野指针崩溃
+    // 且 applicationDidFinishLaunching 不执行（窗口永不出现）。static let 永生。
+    static let shared = AppDelegate()
     let store = GatewayStore()
     var window: NSWindow?
     var statusItem: NSStatusItem?
@@ -3901,7 +4094,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func showOverview() {
         if window == nil {
-            let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 620),
+            // 调试启动参数（视觉验收矩阵用；正式行为不受影响）：
+            //   -page N  初始页（0总览/1模型服务/2本地推理/3模型池/4监控台/5能力包/6云端接入/7设置）
+            //   -size WxH 窗口内容尺寸
+            let argv = ProcessInfo.processInfo.arguments
+            var width = 960.0, height = 620.0
+            if let i = argv.firstIndex(of: "-size"), i + 1 < argv.count {
+                let wh = argv[i + 1].split(separator: "x").compactMap { Double($0) }
+                if wh.count == 2, wh[0] >= 480, wh[1] >= 400 {
+                    width = wh[0]; height = wh[1]
+                }
+            }
+            let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                                styleMask: [.titled, .closable, .miniaturizable, .resizable],
                                backing: .buffered, defer: false)
             win.title = "MacFabric"
@@ -3909,6 +4113,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             win.delegate = self
             win.backgroundColor = NSColor(red: 0xf5/255, green: 0xf5/255, blue: 0xf8/255, alpha: 1)
             window = win
+            if let i = argv.firstIndex(of: "-page"), i + 1 < argv.count, let p = Int(argv[i + 1]) {
+                store.tab = p
+            }
         }
         guard let win = window else { return }
         if win.isMiniaturized { win.deminiaturize(nil) }   // 修复：最小化后重新调出
@@ -3927,7 +4134,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 // ─── main ──────────────────────────────────────────────────────
 
 let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
+app.delegate = AppDelegate.shared
 app.setActivationPolicy(.regular)
 app.run()

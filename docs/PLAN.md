@@ -1,8 +1,8 @@
 # MacFabric 实施基线（PLAN）
 
-> 版本 v1.0 · 2026-11-14 · 状态：已定版（七轮讨论结论合并）
-> 本文档是唯一实施基线。任何偏离需先改此文档再动代码。
-> UI 设计稿：`design/ui-design-v0.html`（11 个画面 + 设计令牌，随本仓库演进）
+> 版本 v1.1 · 2026-11-16 · 状态：产品整版裁决已补入；新改造仅完成特性与计划，未实施。
+> 本文档是唯一实施基线。任何偏离需先改此文档再动代码；细化合同见 §13 指定的 v2 spec。
+> UI 旧稿：`design/ui-design-v0.html`；当前规范：`docs/superpowers/specs/2026-11-16-ui-standard-v2.md`。新视觉样稿确认前不实施 UI。
 
 ---
 
@@ -22,7 +22,7 @@
 | D4 | 本地 LLM 档位 | **默认 ≤4B**（纯文本与 VL 同限），作为高级设置可配置（2026-11-15 修订，原"封顶"）。参数量门禁仅作用于对话类 LLM/VL；ASR/TTS/Embedding/Rerank/OCR 按内存门禁，不设参数门槛。任何放宽都必须经设置 + 实际资源预检，默认配置行为不变。大模型需求默认走云端聚合。候选：Qwen3-4B/1.7B、LFM2-2.6B、Gemma-3-4B、Phi-4-mini、Qwen3-VL-4B |
 | D5 | 机型适配 | 状态机按 RAM 参数化；36GB 为开发基准，预设分 36/24/16GB 三档 |
 | D6 | 项目形态 | 独立新仓库 MacFabric；models.d YAML schema 与上游兼容（能力包可互通）；上游保持通用定位 |
-| D7 | 内存状态机 | **三规则版**（见 §3）。腾挪策略降级为安全网；`B = RAM − 8G` 唯一公式，**无第二道上限**（128GB 机型天然放宽；引擎真被系统拒分配时按引擎失败路径呈现，产品层不做预判） |
+| D7 | 内存状态机 | **三规则版**（见 §3）。唯一公式 `B = RAM − reserve`，默认 reserve=8192 MiB、设置可改；显式 env ＞ policy ＞ 默认值，无第二道上限；资源预检与运行账本共用预算，系统分配失败仍走真实失败路径 |
 | D8 | 安装分发 | **单一 dmg 路径**：拖拽安装 → 首启三步向导 → 零终端。Python 运行时（python-build-standalone）内嵌 .app；llama.cpp/whisper.cpp Metal 二进制随包或首用下载；MLX 轮子首用经内置 uv 装入托管 venv；模型文件首用下载到 App Support。公证需 Apple Developer ID（$99/年），否则首开右键→打开 |
 | D9 | OCR 桥 | 打包 ~200 行 Swift CLI（`ocr-helper`）：stdin 收图、stdout 吐 JSON，子进程调用。不用 pyobjc |
 | D10 | TTS 兜底 | 系统语音通道 = `say` 命令（`-o` 落文件，内置中文语音），Kokoro 未加载时兜底；能力包命名"系统语音兜底" |
@@ -53,7 +53,7 @@
 ├──────────────────────────────────────────────────────┤
 │  Mac 引擎适配器                                        │
 │  llama.cpp(Metal) · Ollama · MLX · whisper.cpp        │
-│  mlx-audio(Kokoro) · say(系统语音) · Vision(ocr-helper)│
+│  Kokoro ONNX(待适配) · say · Vision(ocr-helper)       │
 │  [退役门禁内保留] vLLM/NInfer/SGLang CUDA 线            │
 └──────────────────────────────────────────────────────┘
 ```
@@ -67,7 +67,9 @@ macOS 哲学：没有显存状态机，只有**内存压力**和**按需加载/�
 ### 三条规则（全部设计）
 
 ```
-预算 B = RAM − 8G（唯一公式；"内存保留 8GB" 是设置页唯一入口）
+预算 B = RAM − reserve（唯一公式；reserve 默认8192 MiB，可在设置页能力包策略修改）
+优先级：显式 MACFABRIC_RESERVE_MB > policy.system_reserved_memory_mb > 8192 MiB
+内存账本卡只读；env覆盖需可见；展示可用预算时不得再次扣reserve
 
 规则1【准入】启动/加载：账本装得下 → 启动；装不下 → 拒绝，
             弹窗给出"差多少、停掉谁、然后怎样"，人点确认（不自动腾挪）
@@ -86,31 +88,34 @@ macOS 哲学：没有显存状态机，只有**内存压力**和**按需加载/�
 
 ## 4. 引擎与能力矩阵
 
-| 能力 | 引擎 | 默认模型 | 装载 | 协议端点 |
-|---|---|---|---|---|
-| 对话（本地） | MLX / llama.cpp(Metal) / Ollama | Qwen3-4B · Qwen3-1.7B · LFM2-2.6B | 按需 | /v1/chat/completions · /v1/messages(经翻译层) |
-| 看图（本地） | MLX | Qwen3-VL-4B | 按需 | 同上（图像块映射） |
-| 嵌入 | llama.cpp | bge-m3 GGUF | 常驻·静态直连 | /v1/embeddings |
-| 重排 | llama.cpp | bge-reranker-v2-m3 | 常驻·静态直连 | /v1/rerank |
-| 语音转写 | whisper.cpp(Metal) | large-v3-turbo | 按需 | /v1/audio/transcriptions |
-| 语音合成 | mlx-audio（Kokoro-82m）+ `say` 兜底 | kokoro-82m | 常驻 | /v1/audio/speech |
-| 文字识别 | Vision framework（Swift CLI 桥） | 系统内置 | 常驻·零模型 | /ocr（自定义） |
-| 文生图/图生图 | MLX（mflux）| Flux-schnell 级 | 按需 | /v1/images/generations · /v1/images/edits |
-| 云端 | 上游 9 预设 | glm-5 / glm-5-flash / seedream 等 | 常在 | 全端点一视同仁 |
+下表区分已取证路径与待适配蓝图，**不是现成可安装清单**。全部本地部署必须经能力包统一合同；无合规包/模板的旧静态入口不回流。
 
-镜像加速：HF 下载默认可切 hf-mirror.com（设置页开关，默认开）。
+| 能力 | 底座/方向 | 当前证据与本轮范围 | 目标端点 |
+|---|---|---|---|
+| 文本生成 | llama.cpp Metal | Qwen3-4B已有路径；本轮6型号逐条验证 | /v1/chat/completions、/v1/messages |
+| 文本嵌入 | llama.cpp 专用模板 | BGE-M3 dense已有证据；本轮3型号补语义验证 | /v1/embeddings |
+| 相关性重排 | llama.cpp rank模板 | 本轮BGE-reranker-v2-m3待适配 | /v1/rerank |
+| 视觉理解 | llama.cpp＋匹配mmproj | 本轮Qwen3-VL-2B/4B待适配，不能用纯文本验证替代 | chat/messages图像输入 |
+| 文字识别 | Vision Swift helper | 后续分型再审；当前catalog占位不算可用 | /ocr |
+| 语音识别 | whisper.cpp研究方向 | 源问题未解决前Whisper继续移出交付目录 | /v1/audio/transcriptions |
+| 语音合成 | 系统say / Kokoro ONNX | 保留已选ONNX方向，模板/依赖另审，不暗换MLX | /v1/audio/speech |
+| 图像生成 | mflux研究方向 | 底座/许可/资源另审，文生图与图生图分别验 | images/generations、images/edits |
+| 云端 | 既有云接入 | 依实际发现/启用/协议能力提供接入，不承诺所有端点 | 按上游实际能力 |
 
-## 5. 模型池（默认五件套）+ 静态直连
+模型产物源统一 ModelScope（用户扩展的显式输入另受安全校验）；旧HF镜像直装旁路不恢复。Gemma许可证复核前不进任何批次。llama.cpp b12361为回归基线，必要升级先隔离验证、提交确切版本/摘要与回归报告后另行冻结。
+
+## 5. 模型池（产品蓝图）+ 能力包模型直连
 
 ```
-fabric-fast      快速对话   ① qwen3-4b(本机) ② glm-5(云端)
-fabric-small     轻量任务·意图分类  ① qwen3-1.7b(本机) ② glm-5-flash(云端)
+fabric-fast      快速对话   ① qwen3-4b-instruct-2507(本机) ② glm-5(云端)
+fabric-small     轻量任务·意图分类  ① qwen3-1-7b(本机候选) ② glm-5-flash(云端)
 fabric-premium   长文写作   ① glm-5(云端)            [本地 ≤4B 不入此池]
 fabric-txt2img   文生图     ① mflux-schnell(本机) ② seedream-4.0(云端)
 fabric-img2img   图生图     ① mflux-schnell·编辑模式 ② seedream-edit(云端)
-静态直连（不进池）：bge-m3 · bge-reranker-v2-m3 —— 按模型名直接路由
+包模型直连（不进聊天池）：bge-m3 · bge-reranker-v2-m3 —— 按规范api_model_id路由；后者待模板/产物验证
 ```
 
+- 上述候选链为蓝图，不表示全部已部署；迁移时本地引用取实际旧→新映射，`fabric-*`与云端ID不改名。
 - 规则与上游一致：优先级尝试、已提交不重放、固定错误信封、跨本地/云回退显式开启、preview→apply 门禁
 - 界面：分组列表 + 状态圆点 + 有序行（对齐 macOS"网络→服务顺序"范式）；调用中整行能力线色微染；管理器下拉切换池
 
@@ -147,14 +152,14 @@ fabric-img2img   图生图     ① mflux-schnell·编辑模式 ② seedream-edit
 
 - 网关：上游 pytest 全量迁移 + 新增内存账本仿真（超卖/压力/自愈）
 - 翻译层：Claude Code 真实会话录制 → 金标回放
-- App：Swift Testing；浏览器门禁不适用（无 WebView）
+- App：先用CLT swiftc直编资料/状态/示例契约测试；真实原生GUI/AX与人工VoiceOver、明暗/窗口矩阵独立验收；不假设已有Xcode/XCTest基建。浏览器门禁不适用（无 WebView）
 - 引擎版本全部 pin：llama.cpp（pin tag 自建 Metal 二进制脚本）、MLX、whisper.cpp
 
 ## 10. 里程碑
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **P0 基线**（当前） | 仓库初始化；Mac 上跑通网关：Metal llama.cpp + Ollama 适配器；双协议、模型池回归 | Claude Code 指向 localhost:8999 正常工作 |
+| **P0 基线**（原始路线，非当前进度声明） | 仓库初始化；Mac 上跑通网关：Metal llama.cpp + Ollama 适配器；双协议、模型池回归 | Claude Code 指向 localhost:8999 正常工作 |
 | P1 内核 Mac 化 | CUDA 线门禁退役、内存账本状态机、翻译层、launchd/uv 打包、ocr-helper | 全测试绿 + 免 sudo + 重启自愈 |
 | P2 原生 App | SwiftUI 骨架 + 菜单栏 + 总览/模型服务/本地推理/模型池 + 监控台 | App 替代 Web Dashboard 日常操作 |
 | P3 能力包 | ASR/TTS/OCR/嵌入/重排/生图 预设 + 新端点全通 | 每类能力一条 curl 可验 |
@@ -171,3 +176,15 @@ fabric-img2img   图生图     ① mflux-schnell·编辑模式 ② seedream-edit
 
 - 本仓库：GitHub `vincentlau2046/MacFabric` + GitCode 镜像（public）
 - 上游：[InferFabric](https://github.com/vincentlau2046/InferFabric)（MIT）——YAML schema 兼容，设计引用注明出处
+
+## 13. 2026-11-16 产品整版裁决（优先于旧稿冲突项）
+
+1. 采用统一产品资料＋分类表格＋详情，不再局部补卡片；既有模型和所有现有页面均改造。
+2. 官方模型真名作标题，内部pack/实例ID退至技术详情；**调用ID同步硬切、无旧ID别名**。内部生命周期键和不可变历史保留；池本地候选、key scope、缓存、公开路由与示例一起迁移。生产仅在明确批准的迁移点由受保护领域操作，严禁直接写DB。
+3. 首批四类12型号目标按[产品定义v2](superpowers/specs/2026-11-16-product-definition-v2.md)逐条冻结/验证；候选不等于支持。其他能力进入蓝图，新底座/源/许可/依赖逐类再审。
+4. [全页面UI规范v2](superpowers/specs/2026-11-16-ui-standard-v2.md)约束总览/菜单栏、模型服务、本地推理、模型池、监控台、能力包、云端接入、设置/首启；三张视觉样稿确认后才实施界面。样稿审核补充（2026-11-16）：模型服务页本地与云端模型**同页按类型统一分类呈现**，云端行原样保留上游 ID；模型池定位为**独立的服务概念**——同类能力聚合并统一路由的集中配置，调整池规则一次即对多 Agent 生效。
+5. 保持现有推理鉴权开启，修复硬编码误显；统一loading/unknown/stale与真实policy；App用户录入现有key，可选Keychain/会话，按profile隔离，不静默建key，不在示例/日志泄漏。
+6. 强隔离（开发/生产及引擎执行）、原生GUI、真实语义E2E、双端同源发布产物与成对状态回滚为硬门禁。API200、编译通过、独立进程组不单独构成验收。
+7. 已有显式加载策略/idle/autostart保留；新包默认按§3，展示真实值。官方/用户/本机导入共用事务和资源预检，旧旁路移除或归一。
+
+执行入口：[整版计划](superpowers/plans/2026-11-16-product-upgrade.md)，拆为A基础/硬切、B全页UI/鉴权、C目录/扩展、D真实验收/发布。**本次仅落盘特性与plan；所有改造、测试、下载、迁移和发布均未在本轮执行。** 旧QA只证明当时记录的范围，不得作为新门禁全绿证明。

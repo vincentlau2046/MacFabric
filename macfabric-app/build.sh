@@ -39,11 +39,15 @@ EOF
 rm -f "$APP/Contents/Resources/DEV_PROFILE"
 [ "$DEBUG" = "1" ] && printf 'dev' > "$APP/Contents/Resources/DEV_PROFILE"
 
+SOURCES="Sources/ProductModels.swift Sources/AuthState.swift Sources/GatewayKeychain.swift Sources/DesignSystem.swift Sources/ModelTable.swift Sources/ModelDetails.swift Sources/main.swift"
 swiftc -O \
-  -framework SwiftUI -framework AppKit \
-  Sources/MacFabricApp.swift -o "$APP/Contents/MacOS/MacFabric"
+  -framework SwiftUI -framework AppKit -framework Security \
+  $SOURCES -o "$APP/Contents/MacOS/MacFabric"
 
 cp build/Info.plist "$APP/Contents/Info.plist"
+# 防止构建产物被 Spotlight 索引 → 启动台出现第二个“正式版”（用户裁决 2026-11-16：
+# 正式版全机仅 /Applications 一份，更新走 promote-install.sh 覆盖）
+touch build/.metadata_never_index
 # 图标（scripts/make-icon.swift 生成 build/AppIcon.icns；缺失时跳过不阻塞构建）
 [ -f build/AppIcon.icns ] && cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
