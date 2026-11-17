@@ -10,6 +10,8 @@ enum DS {
     static let panel = adaptive(light: 0xFFFFFF, dark: 0x17171C)
     static let chrome = adaptive(light: 0xECECF1, dark: 0x1E1E25)
     static let lineC = adaptive(light: 0x1D1D22, dark: 0x000000, lightAlpha: 0.10, darkAlpha: 0.22)
+    /// 玻璃洗色（嵌板/胶囊底）：浅色 5% 黑，深色 9% 白
+    static let glass = adaptive(light: 0x000000, dark: 0xFFFFFF, lightAlpha: 0.05, darkAlpha: 0.09)
     static let ink = adaptive(light: 0x1D1D22, dark: 0xECECF1)
     static let dim = adaptive(light: 0x55555F, dark: 0xA8A8B4)
     static let faint = adaptive(light: 0x85858F, dark: 0x6E6E7A)
@@ -78,7 +80,7 @@ enum DS {
     static func monoDigit(_ base: Font) -> Font { base.monospacedDigit() }
 
     // ── 基础设施 ───────────────────────────────────────────────
-    private static func adaptive(light: UInt32, dark: UInt32, lightAlpha: Double = 1, darkAlpha: Double = 1) -> Color {
+    static func adaptive(light: UInt32, dark: UInt32, lightAlpha: Double = 1, darkAlpha: Double = 1) -> Color {
         Color(NSColor(name: nil) { appearance in
             let hex = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
             let alpha = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? darkAlpha : lightAlpha

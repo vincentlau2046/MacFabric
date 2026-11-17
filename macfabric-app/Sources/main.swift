@@ -16,18 +16,19 @@ extension Color {
                   green: Double((hex >> 8) & 0xff) / 255,
                   blue: Double(hex & 0xff) / 255)
     }
-    static let desk = Color(hex: 0xf5f5f8)      // 桌面（light 默认 — 用户偏好）
-    static let panel = Color(hex: 0xffffff)     // 窗口面板
-    static let chrome = Color(hex: 0xececf1)    // 标题栏
-    static let glass = Color.black.opacity(0.045)
-    static let lineC = Color.black.opacity(0.10)
-    static let ink = Color(hex: 0x1d1d22)
-    static let dim = Color(hex: 0x55555f)
-    static let faint = Color(hex: 0x85858f)
-    static let accent = Color(hex: 0x4a63e8)    // 织物蓝
-    static let okC = Color(hex: 0x1fa843)
-    static let errC = Color(hex: 0xc23b3b)   // 失败反馈（Task 10 类型化状态色）
-    static let warnC = Color(hex: 0xb06000)
+    // 设计 token — 全部重接 DS 自适应色（批 2：跟随系统深色）
+    static let desk = DS.desk
+    static let panel = DS.panel
+    static let chrome = DS.chrome
+    static let glass = DS.glass
+    static let lineC = DS.lineC
+    static let ink = DS.ink
+    static let dim = DS.dim
+    static let faint = DS.faint
+    static let accent = DS.accent
+    static let okC = DS.okC
+    static let errC = DS.errC
+    static let warnC = DS.warnC
     // 能力线色（九根线 = 九类能力）
     static let thJudge = Color(hex: 0x8e4fd8)
     static let thLlm = Color(hex: 0x4c5fe0)
@@ -38,6 +39,11 @@ extension Color {
     static let thTts = Color(hex: 0xd45f35)
     static let thOcr = Color(hex: 0x6b9c1f)
     static let thImg = Color(hex: 0x1c9fa0)
+
+    /// 洗色三档（深色下改用白色低透明，避免黑洗色在深底不可见）
+    static let washStrong = DS.adaptive(light: 0x000000, dark: 0xFFFFFF, lightAlpha: 0.10, darkAlpha: 0.16)
+    static let wash = DS.adaptive(light: 0x000000, dark: 0xFFFFFF, lightAlpha: 0.05, darkAlpha: 0.08)
+    static let washFaint = DS.adaptive(light: 0x000000, dark: 0xFFFFFF, lightAlpha: 0.03, darkAlpha: 0.05)
 }
 
 /// 能力线色 + 人话名（设计稿：能力名用人话说，模型真名放小字）
@@ -1930,7 +1936,7 @@ struct WeaveBar: View {
             }
         }
         .frame(height: 34)
-        .background(Color.black.opacity(0.03))
+        .background(Color.washFaint)
         .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.lineC, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 9))
     }
@@ -1963,7 +1969,7 @@ struct Sidebar: View {
         }
         .frame(width: 172)
         .padding(.horizontal, 8)
-        .background(Color.black.opacity(0.025))
+        .background(Color.washFaint)
     }
 }
 
@@ -2054,9 +2060,9 @@ struct OverviewView: View {
             segs.append(WeaveSeg(color: threadColor(m.model_type), ratio: ratio, name: m.name,
                          gb: String(format: "%.1f", Double(mb) / 1024)))
         }
-        segs.append(WeaveSeg(color: Color.black.opacity(0.06), ratio: store.freeRatio, name: "空闲",
+        segs.append(WeaveSeg(color: Color.wash, ratio: store.freeRatio, name: "空闲",
                      gb: String(format: "%.1f", Double(max(store.budgetMB - store.usedMB - store.reserveMB, 0)) / 1024)))
-        segs.append(WeaveSeg(color: Color.black.opacity(0.10), ratio: Double(store.reserveMB) / Double(max(store.budgetMB, 1)), name: "系统保留", gb: "8.0"))
+        segs.append(WeaveSeg(color: Color.washStrong, ratio: Double(store.reserveMB) / Double(max(store.budgetMB, 1)), name: "系统保留", gb: "8.0"))
         return segs
     }
 
@@ -2286,7 +2292,7 @@ struct Chip: View {
             .foregroundColor(color ?? .dim)
             .padding(.horizontal, 9).padding(.vertical, 2)
             .overlay(Capsule().stroke(color ?? Color.lineC, lineWidth: 1))
-            .background(color.map { $0.opacity(0.10) } ?? Color.black.opacity(0.045), in: Capsule())
+            .background(color.map { $0.opacity(0.10) } ?? Color.glass, in: Capsule())
     }
 }
 
@@ -2319,7 +2325,7 @@ struct CopyButton: View {
         .buttonStyle(.plain)
         .padding(.horizontal, small ? 7 : 10).padding(.vertical, 3)
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.lineC, lineWidth: 1))
-        .background(Color.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
+        .background(Color.wash, in: RoundedRectangle(cornerRadius: 6))
         .foregroundColor(.ink)
     }
 }
@@ -2442,7 +2448,7 @@ struct SmallBtn: View {
             .disabled(disabled)
             .opacity(disabled ? 0.35 : 1)
             .padding(.horizontal, 10).padding(.vertical, 3)
-            .background(primary ? Color.accent : Color.black.opacity(0.05),
+            .background(primary ? Color.accent : Color.wash,
                         in: RoundedRectangle(cornerRadius: 6))
             .overlay(RoundedRectangle(cornerRadius: 6)
                 .stroke(primary ? Color.accent : Color.lineC, lineWidth: 1))
@@ -2558,7 +2564,7 @@ struct PoolsView: View {
                                 .lineLimit(4).truncationMode(.middle)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(8)
-                                .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+                                .background(Color.wash, in: RoundedRectangle(cornerRadius: 6))
                         }.padding(12)
                     }
                 } else {
@@ -2806,7 +2812,7 @@ struct PoolCard: View {
                 }
             }
             .padding(10)
-            .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+            .background(Color.wash, in: RoundedRectangle(cornerRadius: 8))
         }
     }
 
@@ -3069,7 +3075,7 @@ struct MonitorView: View {
                 .font(.system(size: 10.5)).foregroundColor(.faint)
         }
         .padding(10)
-        .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+        .background(Color.wash, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func perfCell(_ k: String, _ v: String) -> some View {
@@ -3146,7 +3152,7 @@ struct MonitorView: View {
                     }
                 }
                 .padding(10)
-                .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+                .background(Color.wash, in: RoundedRectangle(cornerRadius: 8))
             }
         }
         .padding(.vertical, 2)
@@ -3240,7 +3246,6 @@ struct MainWindowView: View {
                 .background(Color.panel)
         }
         .background(Color.panel)
-        .preferredColorScheme(.light)
         .confirmationDialog(store.confirmText ?? "",
                             isPresented: Binding(get: { store.confirmText != nil },
                                                  set: { if !$0 { store.confirmText = nil; store.confirmAction = nil } }),
@@ -4165,7 +4170,7 @@ struct WizardView: View {
             HStack(spacing: 6) {
                 ForEach(0..<4, id: \.self) { i in
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(i <= ws.page ? Color.accent : Color.black.opacity(0.12))
+                        .fill(i <= ws.page ? Color.accent : Color.washStrong)
                         .frame(height: 4)
                 }
             }
@@ -4192,7 +4197,6 @@ struct WizardView: View {
         }
         .frame(width: 520, height: 360)
         .background(Color.panel)
-        .preferredColorScheme(.light)
     }
 
     private var welcomePage: some View {
@@ -4248,7 +4252,7 @@ struct WizardView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 12)
-        .background(Color.black.opacity(0.03), in: RoundedRectangle(cornerRadius: 9))
+        .background(Color.washFaint, in: RoundedRectangle(cornerRadius: 9))
     }
 
     private func poolRow(_ name: String, _ use: String, _ chain: String) -> some View {
@@ -4260,7 +4264,7 @@ struct WizardView: View {
             Text(chain).font(.system(size: 11, design: .monospaced)).foregroundColor(.faint)
         }
         .padding(.vertical, 6).padding(.horizontal, 10)
-        .background(Color.black.opacity(0.025), in: RoundedRectangle(cornerRadius: 7))
+        .background(Color.washFaint, in: RoundedRectangle(cornerRadius: 7))
     }
 }
 
@@ -4302,7 +4306,7 @@ struct MiniWeaveView: View {
         let used = Double(miniStore.snapshot?.status.gpu_used_mb ?? 0)
         let total = Double(miniStore.snapshot?.status.gpu_total_mb ?? 0)
         if total > 0 { segs.append((Color.accent.opacity(0.75), min(used / total, 1.0))) }
-        segs.append((Color.black.opacity(0.08), total > 0 ? max(1 - used / total, 0.02) : 1.0))
+        segs.append((Color.wash, total > 0 ? max(1 - used / total, 0.02) : 1.0))
         return segs
     }
 
@@ -4347,7 +4351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var wizardWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        NSApp.appearance = NSAppearance(named: .aqua)   // light 默认（用户偏好）
+        // 不设 appearance —— 跟随系统深浅色（批 2：解除浅色固定）
         buildMenuBarItem()
         store.onMemoryInsufficient = { [weak self] name, reason in
             self?.showMemoryDialog(name: name, reason: reason)
@@ -4436,6 +4440,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             //   -page N  初始页（0总览/1模型服务/2本地推理/3模型池/4监控台/5能力包/6云端接入/7设置）
             //   -size WxH 窗口内容尺寸
             let argv = ProcessInfo.processInfo.arguments
+            // 调试启动参数（视觉验收矩阵用；正式行为不受影响）：
+            //   -appearance dark|light  覆盖本进程外观（缺省跟随系统）
+            if let i = argv.firstIndex(of: "-appearance"), i + 1 < argv.count {
+                NSApp.appearance = NSAppearance(named: argv[i + 1] == "dark" ? .darkAqua : .aqua)
+            }
             var width = 960.0, height = 620.0
             if let i = argv.firstIndex(of: "-size"), i + 1 < argv.count {
                 let wh = argv[i + 1].split(separator: "x").compactMap { Double($0) }
@@ -4449,7 +4458,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             win.title = "MacFabric"
             win.center()
             win.delegate = self
-            win.backgroundColor = NSColor(red: 0xf5/255, green: 0xf5/255, blue: 0xf8/255, alpha: 1)
+            win.backgroundColor = .windowBackgroundColor   // 语义自适应（批 2）
             window = win
             if let i = argv.firstIndex(of: "-page"), i + 1 < argv.count, let p = Int(argv[i + 1]) {
                 store.tab = p
