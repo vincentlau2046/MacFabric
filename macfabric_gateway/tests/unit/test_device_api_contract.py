@@ -80,7 +80,7 @@ def test_hub_device_snapshot_ttl_fake_clock(tmp_path):
 
 # ── /api/snapshot composition ────────────────────────────────────
 
-def _run_snapshot_handler(monkeypatch, dev, *, power_w=None):
+def _run_snapshot_handler(monkeypatch, dev, *, system_info=None):
     """Drive ProxyHandler._handle_snapshot with fake pm; return payload."""
     from inferfabric.proxy import handler as hmod
 
@@ -117,22 +117,49 @@ def _run_snapshot_handler(monkeypatch, dev, *, power_w=None):
     pm = SimpleNamespace(mgr=mgr, telemetry=tel)
 
     captured = {}
-    fake = SimpleNamespace(
-        headers={},
-        _system_info=lambda snap, caps=None: {"device": {"snapshot": {"timestamp": snap.timestamp}}},
-        send_response=lambda code: captured.update(code=code),
-        send_header=lambda k, v: captured.setdefault("headers", {}).update({k: v}),
-        end_headers=lambda: None,
-        _safe_write=lambda body: captured.update(body=body),
-    )
-    hmod.ProxyHandler._handle_snapshot(fake, pm)
+
+    class _Shell:
+        """Handler shell: real _system_info binding, stubbed HTTP writer."""
+        _system_info = hmod.ProxyHandler._system_info
+        if system_info is not None:  # per-test override (still bound)
+            _system_info = system_info
+
+        def __init__(self):
+            self.headers = {}
+
+        def send_response(self, code):
+            captured["code"] = code
+
+        def send_header(self, k, v):
+            captured.setdefault("headers", {})[k] = v
+
+        def end_headers(self):
+            pass
+
+        def _safe_write(self, body):
+            captured["body"] = body
+
+    hmod.ProxyHandler._handle_snapshot(_Shell(), pm)
     return json.loads(captured["body"])
+
+
+def test_snapshot_handler_uses_real_system_info(monkeypatch):
+    """Regression: /api/snapshot must not double-convert capabilities.
+
+    _handle_snapshot passes raw caps into _system_info; passing the already
+    converted dict crashed the live endpoint ('dict' has no .memory).
+    """
+    from inferfabric.proxy import handler as hmod
+    dev = CountingDevice(timestamp=55.0)
+    payload = _run_snapshot_handler(
+        monkeypatch, dev, system_info=hmod.ProxyHandler._system_info)
+    assert payload["system"]["device"]["capabilities"]["memory"] is True
+    assert payload["system"]["device"]["snapshot"]["timestamp"] == 55.0
 
 
 def test_device_routes_share_one_probe_and_timestamp(monkeypatch):
     dev = CountingDevice(timestamp=1234.5)
     payload = _run_snapshot_handler(monkeypatch, dev)
-
     assert dev.calls == 1  # one provider probe feeds every consumer
     env = payload["device"]
     assert env["snapshot"]["timestamp"] == 1234.5

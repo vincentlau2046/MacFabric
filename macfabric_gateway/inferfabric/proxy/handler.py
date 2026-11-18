@@ -1744,7 +1744,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                        "gpu_util_pct": legacy["gpu_util_pct"]})
 
         # 便宜字段每次轮询都重取（保证 request_log / GPU 温度等实时性，C1）
-        system = self._system_info(dev_snap, device_env["capabilities"])
+        # 传原始 caps 对象 —— _system_info 内部做 dict 转换，传已转换的
+        # dict 会二次转换崩溃（'dict' has no .memory）。
+        system = self._system_info(dev_snap, dev_tel.capabilities())
         models = pm.mgr.list_models()
         try:
             history = pm.mgr.state.get_history(30)
