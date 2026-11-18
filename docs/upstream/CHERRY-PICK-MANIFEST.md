@@ -69,3 +69,11 @@
 - 新功能进新文件；触碰上游文件的 diff 必须是注入点级别。
 - 每条目附验收测试，要求在上游平台（含 CUDA 机）可跑；平台探测用 `MACFABRIC_FORCE_PLATFORM` mock。
 - pick 分支基于 `e453a90` 切出，上游前进由上游责任人 rebase。
+
+## 4. D23 部署隔离范式条目（用户裁决 2026-11-18：坚持并上游推广）
+
+| # | 特性域 | pick 分支 | commit 范围 | 新增文件 | 触碰上游文件 | 验收测试 | 状态 |
+|---|---|---|---|---|---|---|---|
+| 11 | F3 部署隔离范式（推 x86+NVIDIA） | pick/deploy-isolation | 待切 | packs/runtime_prep.py、packs/sandbox.py、packs/uninstaller.py、packs/supervisor.py、docs/ISOLATION.md | process_manager/base.py（python_bin 注入、引擎引用计数 `_collect_engine_refs`）、config.py | test_packs_sandbox.py、test_packs_runtime_prep.py、test_packs_installer.py（平台无关） | 未实施（先与上游对齐 x86 表达形态） |
+
+**范式原则（用户原话裁决）**：部署不得影响系统环境；整体卸载/安装必须方便（一键化、容器化拆除）。Mac 侧表达 = 用户态自包含（engines/ 独立二进制 + venv + `python_bin` 显式）；**x86+NVIDIA 侧不是照搬 Mac 路径，而是同一原则的本地表达**——上游既有 Docker（ninfer/sglang）与 conda env 路径需审计：容器/venv 是否项目内自包含、卸载是否引用计数拆除、有无系统级残留（conda 全局、系统 site-packages、/usr/local 二进制）。产出物 = 适配方案 + 对应 pick 分支，先在 PR #1 讨论区或单独 issue 与上游对齐形态再动手。

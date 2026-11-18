@@ -45,7 +45,7 @@
 ### F3 模型生命周期与进程管理（平台层）
 - **锁定语义**：引擎适配器接口（start/stop/health_check/validate）；Mac 引擎矩阵 = llama.cpp Metal（对话主力）、Ollama、kokoro TTS（ONNX CPU）、whisper ASR（Metal）、Vision OCR（零模型，Swift helper）；停止 = lsof 定 PID → SIGTERM → 校验 → SIGKILL（fuser 旧路径废弃）。
 - **autostart（D19）**：网关启动钩子 best-effort 拉起，失败只记日志；`POST /admin/models/set-autostart` 改 YAML 热重载；每模型 `autostart: false` 默认。
-- **环境隔离范式**：所有部署自包含（engines/ 独立二进制 + venv，`python_bin` 显式路径）；卸载=容器化拆除（停服务→删yaml→热重载→删模型→引擎引用计数归零 rmtree→池候选联动清除，响应带清理审计字段）。
+- **环境隔离范式（D23，不可妥协 + 上游推广）**：所有部署自包含（engines/ 独立二进制 + venv，`python_bin` 显式路径），部署绝不影响系统环境；卸载=容器化拆除（停服务→删yaml→热重载→删模型→引擎引用计数归零 rmtree→池候选联动清除，响应带清理审计字段），整体安装/卸载一键化。**该范式要推送给 InferFabric 在 x86+NVIDIA 平台推广**（上游以 Docker/conda 自包含形态表达同一原则，manifest pick/deploy-isolation 条目承接）。范式文档：docs/ISOLATION.md。
 
 ### F4 能力包 packs（网关核心 + 平台层）
 - **锁定语义**：统一合同进模型（catalog/download/install/uninstall_preview/uninstall/status + policy + custom + 下载进度快照）；`model_type` 标签（embedding/rerank/vl 线色）；包模型直连不进聊天池，按 `api_model_id` 路由；首请求自动唤醒。
