@@ -72,9 +72,21 @@ class TelemetryHub:
       - TokenStatsCollector (Prometheus polling)
     """
 
-    def __init__(self, data_dir: Path, if_yaml_config: dict | None = None):
+    def __init__(self, data_dir: Path, if_yaml_config: dict | None = None, *,
+                 device_telemetry=None):
         self._data_dir = data_dir
         self._runtime_cfg = if_yaml_config or {}
+
+        # Device telemetry (DeviceTelemetry plan T1): optional injection for
+        # tests; default assembles once through the platform factory (Null
+        # for unknown profiles until concrete backends are wired). Read-only
+        # provider; device control is NOT held here (manager/process layer
+        # owns destructive ops).
+        if device_telemetry is None:
+            from inferfabric.platform import detect
+            from inferfabric.platform.telemetry import telemetry_for_profile
+            device_telemetry = telemetry_for_profile(detect())
+        self.device_telemetry = device_telemetry
 
         # Core: unified DB
         import inferfabric.migrations  # noqa: F401 — register migrations before IFFDB init
