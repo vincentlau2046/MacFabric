@@ -49,11 +49,16 @@
 | # | 特性域 | pick 分支 | commit 范围 | 新增文件 | 触碰上游文件 | 验收测试 | 状态 |
 |---|---|---|---|---|---|---|---|
 | 1 | F1 三协议入口 | pick/protocol-bridges | 待切 | anthropic_translate.py、anthropic_bridge.py、responses_bridge.py | chat_handlers/handler（装配点） | tests/unit/test_anthropic_translate.py + golden 录制件 | 待摘取 |
-| 2 | F2 平台资源账本 | pick/platform-layer | 40bb02e..001b073 | platform/ 全包 | manager/gpu_state/health/model_lifecycle/model_discovery（5 处导入点） | test_platform_*.py（4 文件，全部平台无关可跑） | 待摘取 |
+| 2 | F2 平台资源账本 | pick/platform-layer | 40bb02e..`d392007`（**含 procguard fail-visible 修复**，见下注） | platform/ 全包 | manager/gpu_state/health/model_lifecycle/model_discovery（5 处导入点） | test_platform_*.py（4 文件，全部平台无关可跑） | 待摘取 |
 | 3 | F4 能力包 | pick/capability-packs | 待切 | packs/、pack_handlers.py、jobs.py | handler.py admin 面、chat_handlers（503 闸） | test_packs_*.py（11 文件）+ test_jobs.py | 待摘取 |
 | 4 | F5 模型池 v2 | pick/pool-v2 | 待切 | — | model_pool/*、dashboard model-pools 两件、proxy_manager | 池 CAS/rebuild 相关单测 | 待摘取 |
-| 5 | F6 云聚合修复 | pick/cloud-fixes | 待切 | — | cloud_discovery.py、proxy_manager.py、proxy/chat_handlers.py + proxy/handler.py（调用侧各 2-3 行注入） | test_cloud_discovery_singleflight.py + 新增 test_cloud_route_resolution.py | 待摘取 |
+| 5 | F6 云聚合修复 | pick/cloud-fixes | `3670d40`..`94d5bd7`（2 commits，基线 e453a90） | test_cloud_route_resolution.py、test_cloud_discovery_singleflight.py | cloud_discovery.py、proxy_manager.py、proxy/chat_handlers.py + proxy/handler.py（调用侧各 1-3 行注入） | 单测：unit 1882 绿 ×2 + integration 118 绿（本机验证 2026-11-18） | 已提交 PR：[InferFabric#1](https://github.com/vincentlau2046/InferFabric/pull/1)（2026-11-18） |
+
+> **F6 制作记录**（inferfabric-pr session）：
+> ① 单飞测试中"池 dispatch 调用侧 background=True"断言用例移出，随 F5 pool-v2 摘取；② **floor 兜底补前缀键 hunk 已撤出**——与上游既有契约测试 `TestShortNameCollisionContract`（碰撞整条跳过）冲突，属行为变更非纯修复，是否上游化待上游责任人在 PR #1 讨论区裁决（PR 描述"Not included"节已说明）；③ `test_r9_anomaly_collector.py::test_query_since` 为上游既有 flaky（pristine 10 连跑失败 3 次），与 F6 无关；④ fabric-* 池命名从 F6/B2 剔除归 F5（Q1 裁决）。
 | 6 | F7 安全门禁 | pick/security-fixes | 待切 | — | security/*、db.py、handler.py security 面 | test_admin_auth.py | 待摘取 |
+>
+> **F2 制作注记**（主 session）：范围已扩展至 `d392007`——终审 Important-1 修复落在 procguard.py（launchctl/systemctl 返回码校验 + systemd enable --now + guard_for_profile 强制显式 label，防覆写生产 plist）。**摘取必须包含该修复**，否则上游拿到的是 fail-silent 版 install。
 | 7 | F8 守护与隔离 | （随 2 platform-layer） | — | procguard.py | scripts/gateway-launchd.sh（上游为 systemd 等价物） | test_platform_vram_procguard_engines.py | 待摘取 |
 | 8 | F9 Dashboard 新页 | pick/dashboard-pages | 未实施 | M2 产出 packs/security/connect 三 fragment | dashboard/__init__.py 注册点 | M2 验收 | 未实施 |
 | 9 | F10 Connect 托管 | pick/connect-clients | 未实施 | M3 产出 platform/clients.py | dashboard 注册点 | M3 验收 | 未实施 |
