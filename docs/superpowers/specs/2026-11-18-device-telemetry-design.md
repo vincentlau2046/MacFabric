@@ -1,6 +1,6 @@
 # 双平台 DeviceTelemetry 统一设备遥测设计
 
-> 日期：2026-11-18 · 状态：待用户审批（builder check 已过，见 §13）
+> 日期：2026-11-18 · 状态：裁决完成，待用户终审批准（builder check 见 §13，用户裁决见 §14）
 > 关联设计：`2026-11-18-python-gateway-refocus-design.md`、`2026-11-18-mac-feature-lockdown.md`
 > 适用平台：Apple Silicon（macOS/统一内存）与 x86 + NVIDIA（Linux/CUDA/VRAM）
 
@@ -269,3 +269,18 @@ def telemetry_for_profile(profile: PlatformProfile) -> DeviceTelemetry:
 4. 接线清单补全（builder 实测新增）：`model_lifecycle.py`、`process_manager/base.py`、`process_manager/sglang.py`、`health_checker.py`、`proxy/handler.py`（/system 端点仍直调 nvidia-smi）、`cli.py`——全部纳入 T2/T3。
 5. Dashboard null 迁移：清理 `store.js` 的 `|| 0`/`|| 32607` 伪造值与 `overview.js` 的 5090D 硬编码上限；`memory_kind` 驱动文案；不支持的能力隐藏卡片填充而非画 0。
 6. 测试补充：平台无关契约测试、mock 后端测试、DB migration 回归、Dashboard/API null 契约测试。
+
+## 14. 用户裁决记录（2026-11-18，全部采纳推荐项）
+
+| # | 议题 | 裁决 |
+|---|---|---|
+| 14.1 | NVIDIA 多 GPU 标量语义 | **标量聚合**：used/total/power 等为跨卡聚合口径；逐卡明细（devices[]）留待多卡路由需求出现再加；配合 14.5 的 device_id 维度预留 |
+| 14.2 | Apple 旧 gpu_* 映射 | **明确映射 + UI 弃用**：gpu_used_mb→统一内存 used（调度依赖，不断）、gpu_total_mb→budget B、gpu_util_pct→**null**（不再伪造内存比例）；Dashboard 全部切 device 对象，旧字段仅 API 兼容一个周期后移除 |
+| 14.3 | DeviceControl.reset 范围 | **接口 + Apple unsupported**：本期定义 DeviceControl 协议，reset() 仅在 capabilities.reset=true 的 NVIDIA 后端实现；Apple 返回明确 unsupported；gpu_state/CLI reset 逻辑迁移进 DeviceControl |
+| 14.4 | 遥测不可用语义 | **分级**：观测类（功耗/温度/利用率采样）fail-open→None，UI 显示不可用；准入与破坏性操作（wait_gpu_free、reset、内存准入闸）fail-closed→保守拒绝或维持现有保守语义 |
+| 14.5 | capabilities 静态/动态拆分 | DeviceCapabilities 只声明后端静态能力；字段本次实际可用性由快照 None + sources 表达（builder 代拟，用户未纠正即执行） |
+| 14.6 | 功耗样本表迁移 | 新建 device_power_samples(ts, accelerator, device_id, watts, source)；旧 gpu_power_samples 保留只读兼容视图，旧行 platform=unknown，历史数据不丢（builder 代拟，执行） |
+| 14.7 | NVIDIA 采集通道 | 本期只用 nvidia-smi，不引入 NVML 依赖；命令缺失→NullTelemetry/字段 None；未来换 NVML 不动契约（builder 代拟，执行） |
+| 14.8 | 兼容周期终止条件 | 旧 gpu_* 字段与旧表保留至"对应特性合入上游 + 一个上游发布周期"；删除条件写入 manifest 条目，不现在定死版本号（builder 代拟，执行） |
+
+> §12 原"待用户确认的细节"三条已由本表覆盖（12.1→14.4/14.2、12.2→14.8、12.3→14.7）。
