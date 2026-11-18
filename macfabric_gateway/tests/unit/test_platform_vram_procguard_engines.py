@@ -88,10 +88,70 @@ def test_null_guard_is_foreground_noop():
     assert g.status() == "foreground"
 
 
-def test_procguard_protocol_selected_by_profile():
+def test_launchd_install_fails_when_launchctl_rejects(monkeypatch, tmp_path):
+    """Fail-visible contract: install() must return False if launchctl
+    rejects the plist (Final review Important 1)."""
+    import inferfabric.platform.procguard as pg
+
+    def fake_run(*a, **k):
+        m = type("R", (), {"returncode": 1, "stdout": "", "stderr": "boom"})()
+        return m
+
+    monkeypatch.setattr(pg.subprocess, "run", fake_run)
+    g = pg.LaunchdProcGuard("com.test.guard", ["/bin/true"])
+    assert g.install() is False
+
+
+def test_launchd_install_succeeds_when_launchctl_ok(monkeypatch, tmp_path):
+    import inferfabric.platform.procguard as pg
+
+    calls = []
+
+    def fake_run(cmd, **k):
+        calls.append(cmd)
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(pg.subprocess, "run", fake_run)
+    monkeypatch.setattr(pg.Path, "home", lambda: tmp_path)
+    g = pg.LaunchdProcGuard("com.test.guard", ["/bin/true"])
+    assert g.install() is True
+    assert (tmp_path / "Library" / "LaunchAgents" / "com.test.guard.plist").exists()
+
+
+def test_systemd_install_enables_unit_and_fails_on_error(monkeypatch, tmp_path):
+    """systemd install must enable --now (not just daemon-reload) and fail
+    visibly when systemctl rejects the unit."""
+    import inferfabric.platform.procguard as pg
+
+    calls = []
+
+    def fake_run(cmd, **k):
+        calls.append(cmd)
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(pg.subprocess, "run", fake_run)
+    monkeypatch.setattr(pg.Path, "home", lambda: tmp_path)
+    g = pg.SystemdProcGuard("inferfabric-gateway", ["/bin/true"])
+    assert g.install() is True
+    joined = " ".join(" ".join(c) for c in calls)
+    assert "enable" in joined and "--now" in joined
+
+    monkeypatch.setattr(pg.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"returncode": 1})())
+    assert g.install() is False
+
+
+def test_guard_factory_requires_explicit_identity():
+    """guard_for_profile must not fabricate a production label — the caller
+    supplies the real label/args (prevents overwriting the live plist)."""
+    import pytest
     from inferfabric.platform import detect
     from inferfabric.platform.procguard import guard_for_profile
-    assert guard_for_profile(detect()) is not None
+    with pytest.raises(TypeError):
+        guard_for_profile(detect())
+    g = guard_for_profile(detect(), label="com.example.gw",
+                          program_args=["/bin/true"])
+    assert g is not None
 
 
 # ── Engine matrix ──────────────────────────────────────────────

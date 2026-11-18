@@ -58,12 +58,13 @@ class LaunchdProcGuard:
 
     def install(self) -> bool:
         try:
+            self._plist_path.parent.mkdir(parents=True, exist_ok=True)
             self._plist_path.write_text(render_launchd_plist(
                 self.label, self.program_args, log_path=self.log_path),
                 encoding="utf-8")
-            subprocess.run(["launchctl", "load", "-w", str(self._plist_path)],
-                           check=False, capture_output=True, timeout=15)
-            return True
+            r = subprocess.run(["launchctl", "load", "-w", str(self._plist_path)],
+                               check=False, capture_output=True, timeout=15)
+            return r.returncode == 0  # fail visible: rejected plist ≠ installed
         except Exception:
             return False
 
@@ -98,8 +99,12 @@ class SystemdProcGuard:
                 "[Unit]\nDescription=InferFabric gateway\n\n[Service]\n"
                 f"ExecStart={args}\nRestart=on-failure\n\n[Install]\n"
                 "WantedBy=default.target\n", encoding="utf-8")
-            subprocess.run(["systemctl", "--user", "daemon-reload"],
-                           check=False, capture_output=True, timeout=15)
+            for cmd in (["systemctl", "--user", "daemon-reload"],
+                        ["systemctl", "--user", "enable", "--now", self.unit]):
+                r = subprocess.run(cmd, check=False, capture_output=True,
+                                   timeout=15)
+                if r.returncode != 0:
+                    return False  # fail visible; unit written but not started
             return True
         except Exception:
             return False
@@ -133,11 +138,16 @@ class NullProcGuard:
         return "foreground"
 
 
-def guard_for_profile(profile) -> ProcGuard:
-    """Pick the guardian matching a PlatformProfile."""
+def guard_for_profile(profile, label: str, program_args: list[str],
+                      log_path: str | None = None) -> ProcGuard:
+    """Pick the guardian matching a PlatformProfile.
+
+    The caller MUST supply the real service identity (label/args) — this
+    factory never fabricates one, so it can never overwrite a production
+    plist with placeholder content.
+    """
     if profile.procguard == "launchd":
-        return LaunchdProcGuard("com.macfabric.gateway",
-                                ["/bin/sh", "-lc", "exec gateway"])
+        return LaunchdProcGuard(label, program_args, log_path=log_path)
     if profile.procguard == "systemd":
-        return SystemdProcGuard("inferfabric-gateway", ["gateway"])
+        return SystemdProcGuard(label, program_args)
     return NullProcGuard()

@@ -18,8 +18,8 @@
 | request_log_db.py | key_name/metadata 字段 + route 兜底（NOT NULL 防静默丢弃） | B1 |
 | db.py | 同上 schema 演进 | B1 |
 | tune.py / proxy/async_server.py / __init__.py | 版本与路由注册零碎修正 | B1 |
-| cloud_discovery.py | 斜杠模型精确解析；floor 兜底补注册前缀键；全名优先路由 | B2 |
-| proxy_manager.py | 云发现单飞（单锁单线程）；fabric-* 池命名 | B2 |
+| cloud_discovery.py | 斜杠模型精确解析（resolve_cloud_model，含 spec 短名键兜底）；floor 兜底补注册前缀键；resolve_route 全名优先 | B2 |
+| proxy_manager.py | 云发现单飞（单锁单线程，失败可重试）。**fabric-\* 池命名已移出**（裁决 2026-11-18：与 model_pool/* 深度纠缠且属用户可见命名变更，归 B3/F5 一并制作） | B2 |
 | model_pool/dispatch.py + pool_forward.py + config.py + registry.py + catalog.py + __init__.py | 池 v2：priority=index*10 全量重建、CAS 回写、409 重试、selector 证据编译期推导（accept_declared 默认 true） | B2 |
 | dashboard/fragments/model-pools.html + js/model-pools.js | 池 v2 控制面对应 UI | B2 |
 | security/auth_facade.py + security/admin.py | 鉴权 facade 与 admin 修正（marker/db 缺失不 crashloop） | B3 |
@@ -52,7 +52,7 @@
 | 2 | F2 平台资源账本 | pick/platform-layer | 40bb02e..001b073 | platform/ 全包 | manager/gpu_state/health/model_lifecycle/model_discovery（5 处导入点） | test_platform_*.py（4 文件，全部平台无关可跑） | 待摘取 |
 | 3 | F4 能力包 | pick/capability-packs | 待切 | packs/、pack_handlers.py、jobs.py | handler.py admin 面、chat_handlers（503 闸） | test_packs_*.py（11 文件）+ test_jobs.py | 待摘取 |
 | 4 | F5 模型池 v2 | pick/pool-v2 | 待切 | — | model_pool/*、dashboard model-pools 两件、proxy_manager | 池 CAS/rebuild 相关单测 | 待摘取 |
-| 5 | F6 云聚合修复 | pick/cloud-fixes | 待切 | — | cloud_discovery.py、proxy_manager、forwarder | test_cloud_discovery_singleflight.py 等 | 待摘取 |
+| 5 | F6 云聚合修复 | pick/cloud-fixes | 待切 | — | cloud_discovery.py、proxy_manager.py、proxy/chat_handlers.py + proxy/handler.py（调用侧各 2-3 行注入） | test_cloud_discovery_singleflight.py + 新增 test_cloud_route_resolution.py | 待摘取 |
 | 6 | F7 安全门禁 | pick/security-fixes | 待切 | — | security/*、db.py、handler.py security 面 | test_admin_auth.py | 待摘取 |
 | 7 | F8 守护与隔离 | （随 2 platform-layer） | — | procguard.py | scripts/gateway-launchd.sh（上游为 systemd 等价物） | test_platform_vram_procguard_engines.py | 待摘取 |
 | 8 | F9 Dashboard 新页 | pick/dashboard-pages | 未实施 | M2 产出 packs/security/connect 三 fragment | dashboard/__init__.py 注册点 | M2 验收 | 未实施 |

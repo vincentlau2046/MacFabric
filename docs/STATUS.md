@@ -66,7 +66,7 @@
 - cli.py gpu-clear 文案 macOS 化（仅提示文案，无功能影响）
 - power_stats macOS 化（功耗曲线，Mac 无 nvidia-smi 口径，需 IOKit 探索）
 
-## P2 原生 App — 🔜 骨架完成（2026-11-14 凌晨）
+## P2 原生 App — ❌ 已整体删除（2026-11-18 D17 裁决；下文 2026-11-14 的 ✅ 记录为历史存档，不再代表现状。功能由 Web Dashboard 承接，映射见 specs/2026-11-18-python-gateway-refocus-design.md §6.3）
 
 | 项 | 结果 |
 |---|---|
