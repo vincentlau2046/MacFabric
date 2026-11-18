@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 import queue as _queue
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -91,6 +92,14 @@ class TelemetryHub:
             from inferfabric.platform.telemetry import telemetry_for_profile
             device_telemetry = telemetry_for_profile(detect())
         self.device_telemetry = device_telemetry
+        # DeviceTelemetry T5: per-hub observation cache — /api/snapshot,
+        # /system and /api/device_metrics share ONE reading per 15s window
+        # (monotonic clock; one refresh per expiry, cold start included).
+        # Admission/control paths never read this cache — they use the raw
+        # provider (fresh snapshot, fail-closed).
+        self._device_snap_cache: tuple[float, object] | None = None
+        self._device_snap_ttl = 15.0
+        self._clock = time.monotonic  # test seam (fake monotonic clock)
 
         # Core: unified DB
         import inferfabric.migrations  # noqa: F401 — register migrations before IFFDB init
@@ -130,6 +139,22 @@ class TelemetryHub:
         # DeviceTelemetry T4: 消费统一遥测（device_telemetry 已在上方装配）。
         self.power_sampler = PowerSampler(db=self._db,
                                           telemetry=self.device_telemetry)
+
+    def get_device_snapshot(self):
+        """Cached device reading for observation endpoints (15s TTL).
+
+        Returns the shared DeviceSnapshot for /api/snapshot.device,
+        /system and /api/device_metrics — one provider probe per expiry
+        window. Not for admission/control (those use device_telemetry
+        directly).
+        """
+        now = self._clock()
+        cached = self._device_snap_cache
+        if cached is not None and (now - cached[0]) < self._device_snap_ttl:
+            return cached[1]
+        snap = self.device_telemetry.snapshot()
+        self._device_snap_cache = (now, snap)
+        return snap
 
     def start_token_collector(self, manager_ref: Callable[[], Any]):
         """Inject manager ref and start token collection.

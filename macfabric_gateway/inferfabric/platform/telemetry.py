@@ -35,6 +35,7 @@ __all__ = [
     "NullDeviceControl",
     "snapshot_to_dict",
     "capabilities_to_dict",
+    "legacy_gpu_fields",
     "telemetry_for_profile",
     "device_control_for_profile",
 ]
@@ -128,6 +129,25 @@ def capabilities_to_dict(caps: DeviceCapabilities) -> dict:
         "clock": caps.clock, "pressure": caps.pressure,
         "reset": caps.reset,
     }
+
+
+def legacy_gpu_fields(snapshot: DeviceSnapshot) -> dict:
+    """Approved legacy gpu_* mapping (spec §14.2) for one snapshot.
+
+    unified (Apple): gpu_total_mb carries the budget B; utilization is never
+    fabricated. vram: physical VRAM total + derived VRAM occupancy pct.
+    Unavailable readings stay None (never 0).
+    """
+    if snapshot.memory_kind == "unified":
+        return {"gpu_used_mb": snapshot.memory_used_mb,
+                "gpu_total_mb": snapshot.memory_budget_mb,
+                "gpu_util_pct": None}
+    util = (snapshot.memory_used_mb / snapshot.memory_total_mb * 100
+            if snapshot.memory_used_mb is not None
+            and snapshot.memory_total_mb else None)
+    return {"gpu_used_mb": snapshot.memory_used_mb,
+            "gpu_total_mb": snapshot.memory_total_mb,
+            "gpu_util_pct": util}
 
 
 # ── Null backends (unknown platform / no accelerator) ────────────

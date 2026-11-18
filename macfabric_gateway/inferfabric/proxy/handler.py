@@ -169,6 +169,24 @@ def _snapshot_etag(payload: dict) -> str:
     （recent requests / 24h 指标 / GPU 温度被吞掉）。
     """
     content = {k: v for k, v in payload.items() if k not in ("ts", "rev", "etag")}
+    # DeviceTelemetry T5: the device sampling timestamp is volatile-only in
+    # the hash — actual values, sources and capabilities still invalidate.
+    for holder_key in ("device", "system"):
+        holder = content.get(holder_key)
+        if not isinstance(holder, dict):
+            continue
+        if holder_key == "device":
+            env = holder
+        else:
+            env = holder.get("device")
+        if isinstance(env, dict) and isinstance(env.get("snapshot"), dict):
+            env = dict(env)
+            env["snapshot"] = {k: v for k, v in env["snapshot"].items()
+                               if k != "timestamp"}
+            if holder_key == "device":
+                content["device"] = env
+            else:
+                content["system"] = {**holder, "device": env}
     raw = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -264,7 +282,9 @@ def _compute_expensive(pm) -> dict:
     各组独立兜底（单组失败不拖垮另一组）。"""
     exp = {}
     try:
-        exp["status"] = pm.mgr.status()
+        # DeviceTelemetry T5: skeleton only — gpu_* fields are refilled from
+        # the shared cached reading so one probe feeds device/system/status.
+        exp["status"] = pm.mgr.status(include_device=False)
     except Exception:
         exp["status"] = {}
     try:
@@ -382,11 +402,13 @@ _GET_ROUTES = {
     "/admin/packs/uninstall-preview": _admin(lambda h, pm: h._handle_pack_uninstall_preview(pm)),
     "/ocr":                     _admin(lambda h, pm: h._handle_ocr(pm)),
     "/v1/models":               lambda h, pm: h._handle_v1_models(pm),
-    "/system":                  lambda h, pm: h._send_json(h._system_info()),
+    "/system":                  lambda h, pm: h._send_json(
+        h._system_info(pm.telemetry.get_device_snapshot())),
     "/api/metrics":             lambda h, pm: h._handle_api_metrics(pm),
     "/api/monitor-report":      lambda h, pm: h._handle_monitor_report(pm),
     "/api/latency":           lambda h, pm: h._handle_api_latency(pm),
     "/api/power":             lambda h, pm: h._handle_api_power(pm),
+    "/api/device_metrics":    lambda h, pm: h._handle_api_device_metrics(pm),
     "/api/device_power":      lambda h, pm: h._handle_api_device_power(pm),
     "/api/request_log":         lambda h, pm: h._handle_request_log(pm),
     "/api/token-stats":         lambda h, pm: h._handle_token_stats(pm),
@@ -1701,11 +1723,28 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             exp_cache = _ExpensiveCache(ttl=float(getattr(pm, "_snap_exp_ttl", SNAPSHOT_EXP_TTL)))
             pm._snap_exp_cache = exp_cache
         exp = exp_cache.get_or_refresh(lambda: _compute_expensive(pm))
-        status = exp.get("status") or {}
+        # copy: the cached dict must not be mutated by the refill below
+        status = dict(exp.get("status") or {})
         metrics_24h = exp.get("metrics_24h") or {}
 
+        # DeviceTelemetry T5: ONE cached reading (15s TTL, one probe per
+        # expiry) feeds device + system + status.gpu_* — one timestamp
+        # everywhere. Observation cache only; admission/control paths use
+        # the raw provider.
+        from inferfabric.platform.telemetry import (
+            capabilities_to_dict, legacy_gpu_fields, snapshot_to_dict,
+        )
+        dev_tel = pm.telemetry.device_telemetry
+        dev_snap = pm.telemetry.get_device_snapshot()
+        device_env = {"snapshot": snapshot_to_dict(dev_snap),
+                      "capabilities": capabilities_to_dict(dev_tel.capabilities())}
+        legacy = legacy_gpu_fields(dev_snap)
+        status.update({"gpu_used_mb": legacy["gpu_used_mb"],
+                       "gpu_total_mb": legacy["gpu_total_mb"],
+                       "gpu_util_pct": legacy["gpu_util_pct"]})
+
         # 便宜字段每次轮询都重取（保证 request_log / GPU 温度等实时性，C1）
-        system = self._system_info()
+        system = self._system_info(dev_snap, device_env["capabilities"])
         models = pm.mgr.list_models()
         try:
             history = pm.mgr.state.get_history(30)
@@ -1737,6 +1776,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # C1: etag 覆盖全部 payload 字段组（内容哈希，排除 ts/rev/etag）
         content = {
             "status": status, "system": system, "models": models,
+            "device": device_env,
             "history": history, "token_stats": token_stats or {},
             "request_log": request_log, "metrics_24h": metrics_24h or {},
             "local_models": {"discovered": [], "configured": list(pm.mgr._models.keys()),
@@ -1774,10 +1814,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # ─── System Info ─────────────────────────────────────────────
 
-    def _system_info(self):
+    def _system_info(self, snapshot=None, capabilities=None):
+        """System info; device values come from the shared telemetry snapshot.
+
+        DeviceTelemetry T5: no GPU subprocess here — the snapshot is taken
+        once by the caller (TelemetryHub 15s cache) and projected. Device
+        fields are None when unavailable (never 0).
+        """
         info = {"cpu_percent": 0, "cpu_cores": os.cpu_count() or 1,
                 "ram_total_gb": 0, "ram_used_gb": 0, "uptime_seconds": 0,
-                "gpu_util_pct": 0, "gpu_clock_mhz": 0, "gpu_power_w": 0}
+                "gpu_util_pct": None, "gpu_clock_mhz": None,
+                "gpu_power_w": None, "gpu_temp_c": None}
         try:
             with open("/proc/meminfo") as f:
                 mem = f.read()
@@ -1798,24 +1845,42 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 info["uptime_seconds"] = int(float(f.read().split()[0]))
         except Exception:
             pass
-        try:
-            import subprocess as _sub
-            r = _sub.run(
-                ["nvidia-smi", "--query-gpu=utilization.gpu,clocks.current.graphics,power.draw,temperature.gpu",
-                 "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=5
+        if snapshot is not None:
+            from inferfabric.platform.telemetry import (
+                capabilities_to_dict, snapshot_to_dict,
             )
-            if r.returncode == 0 and r.stdout.strip():
-                vals = r.stdout.strip().splitlines()[0].split(",")
-                info["gpu_util_pct"] = round(float(vals[0].strip().replace(" ", "")), 1)
-                info["gpu_clock_mhz"] = int(vals[1].strip().replace(" ", ""))
-                info["gpu_power_w"] = round(float(vals[2].strip().replace(" ", "")), 1)
-                if len(vals) >= 4:
-                    info["gpu_temp_c"] = round(float(vals[3].strip().replace(" ", "")), 1)
-        except Exception:
-            pass
+            # system.gpu_* = device utilization semantics (spec §14.2);
+            # legacy VRAM occupancy lives in status.gpu_util_pct.
+            info["gpu_util_pct"] = snapshot.utilization_pct
+            info["gpu_clock_mhz"] = snapshot.clock_mhz
+            info["gpu_power_w"] = snapshot.power_w
+            info["gpu_temp_c"] = snapshot.temperature_c
+            info["device"] = {"snapshot": snapshot_to_dict(snapshot)}
+            if capabilities is not None:
+                info["device"]["capabilities"] = capabilities_to_dict(capabilities)
         info["version"] = __version__
         return info
+
+    def _handle_api_device_metrics(self, pm):
+        """GET /api/device_metrics — platform-neutral device reading.
+
+        {snapshot, capabilities}; snapshot carries timestamp + sources.
+        JSON null = unavailable (never 0). Served from the hub's 15s
+        observation cache — the same envelope /api/snapshot.device uses.
+        """
+        try:
+            dev_tel = pm.telemetry.device_telemetry
+            snap = pm.telemetry.get_device_snapshot()
+            from inferfabric.platform.telemetry import (
+                capabilities_to_dict, snapshot_to_dict,
+            )
+            self._send_json({
+                "snapshot": snapshot_to_dict(snap),
+                "capabilities": capabilities_to_dict(dev_tel.capabilities()),
+            }, 200)
+        except Exception as e:
+            log.error("/api/device_metrics failed: %s", e)
+            self._send_json({"error": "device metrics unavailable"}, 500)
 
     # ─── Control helpers ─────────────────────────────────────────
 

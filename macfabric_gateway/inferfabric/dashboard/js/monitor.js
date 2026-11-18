@@ -263,11 +263,11 @@
       // echarts 首渲染即抛 cartesian2d getInitialData 异常）
       IFCharts.update(_charts.power, {
         xAxis: { data: [], boundaryGap: true },
-        // 双轴同构骨架：左 W 固定 0–600（卡 TDP 封顶，不会突破，无需动态取整）；
-        // 右 度 空态 _niceCeil(0,6)=1.2 → 0,0.2,…,1.2。两轴同 splitNumber:6 + min:0
-        // → 6 等分像素位置重合，右轴只印标签不画网格线，一套尺度线（左轴的）。
+        // 双轴同构骨架（DeviceTelemetry T5：无固定 600W TDP 上限——左轴
+        // no-scale 空态与右轴同取 _niceCeil(0,6)=1.2）。两轴同 splitNumber:6
+        // + min:0 → 6 等分像素位置重合，右轴只印标签不画网格线。
         yAxis: [
-          { name: 'W', min: 0, max: 600, splitNumber: 6, position: 'left',
+          { name: 'W', min: 0, max: _niceCeil(0, 6), splitNumber: 6, position: 'left',
             axisLabel: { formatter: function (v) { return v + ' W'; } } },
           { name: '度', min: 0, max: _niceCeil(0, 6), splitNumber: 6,
             splitLine: { show: false }, position: 'right',
@@ -290,17 +290,20 @@
     var cum = buckets.map(function (b) {
       return { value: b.cum_kwh, symbol: 'circle', symbolSize: 5 };
     });
-    // 左轴 W 固定 0–600（卡 TDP 封顶，不会突破）；右轴 度 max = _niceCeil(累计量, 6)
+    // 左轴 W max = 本窗口实际样本的 nice 上取整（DeviceTelemetry T5：移除
+    // 固定瓦数上限假设，数据驱动；无数据桶时退化为 no-scale 空态 1.2）；
+    // 右轴 度 max = _niceCeil(累计量, 6)
     // —— nice 上取整到 6 等分干净步长，max/6 恒为 {1,2,5}×10^k：
     //   总量大 → 整数刻度（37 度 → max 60 → 0,10,…,60），总量 <1 度 → 0.1/0.2/0.5 档。
     // 两轴同 splitNumber:6 + min:0 → 6 等分像素位置重合，右轴只印标签（splitLine 隐藏），
     // 只有左轴一套尺度线——「坐标整数」「max 随实际调节」「不能有两套尺度线」三点齐。
     var maxKwh = _niceCeil((totals.kwh || 0) || 1, 6);
+    var maxW = _niceCeil(Math.max.apply(null, avg.filter(function (v) { return v != null; }).concat([1])), 6);
 
     IFCharts.update(_charts.power, {
       xAxis: { data: xs, boundaryGap: true },
       yAxis: [
-        { name: 'W', min: 0, max: 600, splitNumber: 6, position: 'left',
+        { name: 'W', min: 0, max: maxW, splitNumber: 6, position: 'left',
           axisLabel: { formatter: function (v) { return v + ' W'; } } },
         { name: '度', min: 0, max: maxKwh, splitNumber: 6,
           splitLine: { show: false }, position: 'right',

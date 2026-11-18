@@ -526,7 +526,12 @@ class ModelManager:
 
     # ── Status ────────────────────────────────────────────────────
 
-    def status(self) -> dict:
+    def status(self, *, include_device: bool = True) -> dict:
+        """Service status. include_device=True (default) adds the "device"
+        envelope from one fresh snapshot (control-path reading, not the hub
+        cache). include_device=False returns a skeleton WITHOUT any device
+        snapshot (gpu_* fields None) — /api/snapshot refills them from its
+        shared cached reading so all endpoints project one probe."""
         active = list(self.active_services)
         sleep_states = self.state.get_all_sleep_states()
         services_status = {}
@@ -564,17 +569,23 @@ class ModelManager:
             for m in self._models.values()
         }
 
-        # DeviceTelemetry T3: one snapshot feeds device + legacy fields.
-        from .platform.telemetry import snapshot_to_dict, capabilities_to_dict
-        snap = self._device_telemetry.snapshot()
-        if snap.memory_kind == "unified":
-            legacy_total = snap.memory_budget_mb      # Apple: budget B (§14.2)
-            legacy_util = None                        # never fabricate pct
+        # DeviceTelemetry T3/T5: one snapshot feeds device + legacy fields
+        # (approved §14.2 mapping lives in legacy_gpu_fields).
+        from .platform.telemetry import (
+            legacy_gpu_fields, snapshot_to_dict, capabilities_to_dict,
+        )
+        if include_device:
+            snap = self._device_telemetry.snapshot()
+            legacy = legacy_gpu_fields(snap)
+            device_env = {
+                "snapshot": snapshot_to_dict(snap),
+                "capabilities": capabilities_to_dict(
+                    self._device_telemetry.capabilities()),
+            }
         else:
-            legacy_total = snap.memory_total_mb       # NVIDIA: physical VRAM
-            legacy_util = (snap.memory_used_mb / snap.memory_total_mb * 100
-                           if snap.memory_used_mb is not None
-                           and snap.memory_total_mb else None)
+            legacy = {"gpu_used_mb": None, "gpu_total_mb": None,
+                      "gpu_util_pct": None}
+            device_env = None
 
         return {
             "gpu_mode": self.gpu_mode,
@@ -584,14 +595,10 @@ class ModelManager:
             "scenario_active": scenario_active,
             "sleep_states": sleep_states,
             "switch_target": self.state.get("switching_target") or None,
-            "gpu_used_mb": snap.memory_used_mb,
-            "gpu_total_mb": legacy_total,
-            "gpu_util_pct": legacy_util,
-            "device": {
-                "snapshot": snapshot_to_dict(snap),
-                "capabilities": capabilities_to_dict(
-                    self._device_telemetry.capabilities()),
-            },
+            "gpu_used_mb": legacy["gpu_used_mb"],
+            "gpu_total_mb": legacy["gpu_total_mb"],
+            "gpu_util_pct": legacy["gpu_util_pct"],
+            "device": device_env,
             "vllm_pid": self._proc.vllm_pid,
             "comfyui_pid": self._proc.comfyui_pid,
             "tts_pid": self._proc.tts_pid,
