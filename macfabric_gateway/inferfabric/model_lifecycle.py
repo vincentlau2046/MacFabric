@@ -114,7 +114,7 @@ class ModelLifecycle:
         # MACFABRIC G1: macOS 上由内存账本 R1（manager._admit_memory，switch
         # 入口处、支持 force 超卖确认）负责准入，此闸退役以免双重门槛语义打架；
         # Linux 保持原行为。
-        from inferfabric import mac_platform as _mf
+        from inferfabric.platform import probe as _mf
         if not engine_present and model.gpu_role != "none" and not _mf.IS_MACOS:
             if model.peak_vram_mb > 0:
                 current_vram = gpu_used_mb()

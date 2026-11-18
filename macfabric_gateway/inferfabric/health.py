@@ -17,7 +17,7 @@ from .config import (
     GPU_FREE_THRESHOLD_MB,
     STOP_SIGTERM_TIMEOUT,
 )
-from . import mac_platform
+from .platform import probe as mac_platform  # platform-layer probes (M1)
 
 log = logging.getLogger("inferfabric")
 

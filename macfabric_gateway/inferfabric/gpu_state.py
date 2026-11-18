@@ -52,7 +52,7 @@ class GpuStateMachine:
         MACFABRIC P1: 委托 mac_platform — macOS 用 lsof（无 fuser），
         Linux 保持 fuser 上游行为。
         """
-        from inferfabric.mac_platform import pid_on_port
+        from inferfabric.platform.probe import pid_on_port
         return pid_on_port(port)
 
     # ── Scan / Derive ─────────────────────────────────────────────

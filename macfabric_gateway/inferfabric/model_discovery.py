@@ -209,7 +209,7 @@ vllm:
 """
     elif model_type.startswith("llama_cpp"):
         port = max([p for p in used_ports if p >= 11435] + [11434]) + 1
-        from . import mac_platform as _mf
+        from .platform import probe as _mf
         if _mf.IS_MACOS:
             gguf = ""
             for base in [models_dir.parents[1] / "models", Path.home() / "models"]:

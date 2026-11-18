@@ -31,7 +31,7 @@ from .process_manager import ProcessManager
 
 def ModeOf(m):
     """MACFABRIC G1: ModelConfig → 账本 Mode（ledger_mode 空值=on_demand）。"""
-    from inferfabric.memory_ledger import Mode
+    from inferfabric.platform.resource import Mode
     return Mode.RESIDENT if getattr(m, "ledger_mode", "") == "resident" else Mode.ON_DEMAND
 from .health import (
     gpu_used_mb,
@@ -285,8 +285,9 @@ class ModelManager:
         探测到的实测水位与账面取更紧约束。baseline≤0（未知）直接放行。
         返回 None 表示无需检查（未知内存），否则返回 AdmitDecision。
         """
-        from inferfabric.memory_ledger import MemoryLedger, Lifecycle
-        from inferfabric import mac_platform
+        from inferfabric.platform.resource import Lifecycle
+        from inferfabric.platform.resource_umem import UnifiedMemoryLedger as MemoryLedger
+        from inferfabric.platform import probe as mac_platform
         if not mac_platform.IS_MACOS:
             return None
         baseline = getattr(model, "mem_baseline_mb", 0) or getattr(model, "peak_vram_mb", 0)
