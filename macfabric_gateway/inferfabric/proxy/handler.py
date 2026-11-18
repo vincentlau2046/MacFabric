@@ -254,6 +254,9 @@ _lat_series_cache = {w: _ExpensiveCache(ttl=_LAT_CACHE_TTL[w]) for w in _LAT_CAC
 # month 保留键（端点只读无害），UI 不再提供「月」；week = 近~90 天 · 13×7d 周桶。
 _POWER_CACHE_TTL_GRANS = ("hour", "day", "week", "month")
 _power_series_cache = {g: _ExpensiveCache(ttl=300.0) for g in _POWER_CACHE_TTL_GRANS}
+# DeviceTelemetry T4: /api/device_power 独立缓存（不能与 /api/power 共用，
+# 两个端点读不同流，共享 key 会互相返回对方的流）。
+_device_power_series_cache = {g: _ExpensiveCache(ttl=300.0) for g in _POWER_CACHE_TTL_GRANS}
 
 
 def _compute_expensive(pm) -> dict:
@@ -384,6 +387,7 @@ _GET_ROUTES = {
     "/api/monitor-report":      lambda h, pm: h._handle_monitor_report(pm),
     "/api/latency":           lambda h, pm: h._handle_api_latency(pm),
     "/api/power":             lambda h, pm: h._handle_api_power(pm),
+    "/api/device_power":      lambda h, pm: h._handle_api_device_power(pm),
     "/api/request_log":         lambda h, pm: h._handle_request_log(pm),
     "/api/token-stats":         lambda h, pm: h._handle_token_stats(pm),
     "/api/token-curve":         lambda h, pm: h._handle_token_curve(pm),
@@ -1232,6 +1236,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             log.error("/api/power failed: %s", e)
             self._send_json({"error": "power series unavailable"}, 500)
+
+    def _handle_api_device_power(self, pm):
+        """GET /api/device_power?gran=hour|day|week|month — 当前聚合流序列。
+
+        DeviceTelemetry T4：与 /api/power 同 shape，但只读 v011
+        device_power_samples 的 aggregate 流（legacy 流留在 /api/power）。
+        5min TTL 单飞缓存与 /api/power 相同。
+        """
+        from urllib.parse import urlparse, parse_qs
+        try:
+            qs = parse_qs(urlparse(self.path).query)
+            gran = qs.get("gran", ["hour"])[0]
+            if gran not in _POWER_CACHE_TTL_GRANS:
+                gran = "hour"
+            data = _device_power_series_cache[gran].get_or_refresh(
+                lambda: pm.telemetry.get_device_power_series(gran))
+            self._send_json(data, 200)
+        except Exception as e:
+            log.error("/api/device_power failed: %s", e)
+            self._send_json({"error": "device power series unavailable"}, 500)
 
     def _handle_vllm_metrics(self, pm):
         from urllib.parse import urlparse, parse_qs

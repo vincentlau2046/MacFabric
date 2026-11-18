@@ -24,7 +24,11 @@ from inferfabric.db import IFFDB
 from inferfabric.proxy.request_logger import RequestLogger, RequestLog
 from inferfabric.metrics_aggregator import MetricsAggregator, AggregatorThread
 from inferfabric.token_stats import TokenStatsCollector
-from inferfabric.power_stats import PowerSampler, query_power_series
+from inferfabric.power_stats import (
+    PowerSampler,
+    query_device_power_series,
+    query_power_series,
+)
 
 log = logging.getLogger("inferfabric.telemetry")
 
@@ -122,8 +126,10 @@ class TelemetryHub:
         # Token collector (manager_ref injected later)
         self.token_collector = TokenStatsCollector(manager_ref=None, interval=300, db=self._db)
 
-        # GPU 功耗采样器（60s，handler 启动后 start_power_sampler() 开启线程）
-        self.power_sampler = PowerSampler(db=self._db)
+        # 设备功耗采样器（60s，handler 启动后 start_power_sampler() 开启线程）
+        # DeviceTelemetry T4: 消费统一遥测（device_telemetry 已在上方装配）。
+        self.power_sampler = PowerSampler(db=self._db,
+                                          telemetry=self.device_telemetry)
 
     def start_token_collector(self, manager_ref: Callable[[], Any]):
         """Inject manager ref and start token collection.
@@ -140,8 +146,12 @@ class TelemetryHub:
         self.power_sampler.start()
 
     def get_power_series(self, gran: str = "hour") -> dict:
-        """GET /api/power 的分桶序列（v6.2 功耗/电费卡）。"""
+        """GET /api/power 的分桶序列（legacy 流，v6.2 功耗/电费卡）。"""
         return query_power_series(self._db, gran)
+
+    def get_device_power_series(self, gran: str = "hour") -> dict:
+        """GET /api/device_power 的分桶序列（当前聚合流，DeviceTelemetry T4）。"""
+        return query_device_power_series(self._db, gran)
 
     def record(self, entry: RequestLog) -> None:
         self.logger.log(entry)
