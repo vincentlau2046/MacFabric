@@ -76,11 +76,26 @@
 - pick 分支基于 `e453a90` 切出，上游前进由上游责任人 rebase。
 - **限流纪律（D24，用户裁决 2026-11-18）**：本地网关默认不限速（rpm=0 永不改变）；ratelimit 相关 diff 的 PR 描述必须写明"无默认行为变更"；任何新增限流配置/默认值改动单独报备用户裁决。F5 携带的 ratelimit hunk = observe 等待语义修复（非限流变更），PR 描述照此表述。
 
+### 3.1 与主仓责任人的 PR 协同协议（用户指示 2026-11-18，防空等待）
+
+**节奏与触发**
+1. 双向 30min 循环：我侧 cron 巡检（PR/Issue API 全量比对 manifest 已知状态）；上游承诺评审循环 ~30min（Issue #3 14:14Z 整合评论书面确认）。
+2. **主动通知义务（我侧）**：每次新开 PR / 推送修复 commit 后，**立即**在对应 PR 发一条简短 "pushed，ready for re-review（逐项对账见上）" 评论——不等巡检、不依赖 GitHub 事件通知（explicit fetch 不更新 tracking refs 的教训已在 #4 出现过）。
+3. **评审响应时限**：上游 verdict 进来后，blocking 项当日修完重推，同批 nits 一并处理，逐项回帖对账（#2/#4 模式）。
+
+**空等待防护**
+4. ping 规则：push/评论后等满 2 个巡检周期（~1h）仍无评审动静 → 礼貌 ping 一次；再无回应不再追加，转报用户。
+5. 裁决类等待不空转：等方案/行为变更裁决期间，转做本地可推进的其它 manifest 条目（F1/F4/F7、entry #12 等），裁决回来再切回。
+6. 分工边界（依 Issue #3 整合评论）：上游责任人=本地镜像/迁移运维 + 物理 CUDA 验收；我=inferfabric-pr=L3b、uninstall CLI、L1（延后）及后续 manifest 条目的 PR 制作与评审响应。
+
+**状态落盘**
+7. manifest 每次状态变化即更新并 commit（维护人=inferfabric-pr）；跨会话交接以 manifest 为唯一对账源，Issue/PR 侧以最新带 "single source of truth" 声明的评论为准。
+
 ## 4. D23 部署隔离范式条目（用户裁决 2026-11-18：坚持并上游推广）
 
 | # | 特性域 | pick 分支 | commit 范围 | 新增文件 | 触碰上游文件 | 验收测试 | 状态 |
 |---|---|---|---|---|---|---|---|
-| 11 | F3 部署隔离范式（推 x86+NVIDIA） | pick/deploy-isolation | 待切 | packs/runtime_prep.py、packs/sandbox.py、packs/uninstaller.py、packs/supervisor.py、docs/ISOLATION.md | process_manager/base.py（python_bin 注入、引擎引用计数 `_collect_engine_refs`）、config.py | test_packs_sandbox.py、test_packs_runtime_prep.py、test_packs_installer.py（平台无关） | 审计已上报上游：[InferFabric#3](https://github.com/vincentlau2046/InferFabric/issues/3)（5 问打包单 issue，2026-11-18）；PR #2 描述已附链接；**上游已裁决（issue #3 两评论，2026-11-18）**：Q1-Q5 全答 + 方向更新——**Docker-first 全沙箱为终局**（重引擎迁 `deployment: docker`，ComfyUI 豁免留宿主；L2 conda 前缀方案被取代，L1 降为过渡兼容；L3 折入迁移：`build_docker_cmd` 补 `:ro` + 管理镜像标签 + 作用域 prune；`iff remove`+引用计数+dry-run CLI 先行不变）；Q5 裁定 pkgs=用户级共享缓存不自动清。新切分方案待报批：**PR-A = L1 过渡 + L3 镜像卫生（上游明示可立即开工）**、PR-B = docker 迁移计划（钉版镜像→影子验证→逐模型迁 YAML→退役 env） |
+| 11 | F3 部署隔离范式（推 x86+NVIDIA） | pick/deploy-isolation | 待切 | packs/runtime_prep.py、packs/sandbox.py、packs/uninstaller.py、packs/supervisor.py、docs/ISOLATION.md | process_manager/base.py（python_bin 注入、引擎引用计数 `_collect_engine_refs`）、config.py | test_packs_sandbox.py、test_packs_runtime_prep.py、test_packs_installer.py（平台无关） | 审计已上报上游：[InferFabric#3](https://github.com/vincentlau2046/InferFabric/issues/3)（5 问打包单 issue，2026-11-18）；PR #2 描述已附链接。**以 issue #3 14:14Z 整合评论为唯一事实源（取代其前两条）**：① docker 迁移（qwen3-vl-4b/gemma4-31b-vl/ovis-ocr2）批准、无需代码 PR（上游本地运维）；② ComfyUI 豁免=终局；③ **L3a `:ro` 已完成**（上游 88c64af）；④ **L3b 镜像标签+作用域 prune → 指派本 session**（小 PR 先行）；⑤ **L2-uninstall CLI（`iff remove`+引擎引用计数+dry-run，CLI 先行，dashboard 入口同弧线不阻塞）→ 指派本 session**，本 issue 主体、下一个实质 PR，issue 保持 open 直至其落地；⑥ L1（IFF_CONDA_ENVS+python_bin）延后至三模型 docker 迁移完成后；⑦ Q5 pkgs=用户级共享缓存不自动清=终局。本 session 已回帖确认（2026-11-18，comment 6981444580）：接 L3b + uninstall CLI，顺序 L3b 先行。原 PR-A/PR-B 切分提案被整合表取代，作废。 |
 
 **范式原则（用户原话裁决）**：部署不得影响系统环境；整体卸载/安装必须方便（一键化、容器化拆除）。Mac 侧表达 = 用户态自包含（engines/ 独立二进制 + venv + `python_bin` 显式）；**x86+NVIDIA 侧不是照搬 Mac 路径，而是同一原则的本地表达**——上游既有 Docker（ninfer/sglang）与 conda env 路径需审计：容器/venv 是否项目内自包含、卸载是否引用计数拆除、有无系统级残留（conda 全局、系统 site-packages、/usr/local 二进制）。产出物 = 适配方案 + 对应 pick 分支，先在 PR #1 讨论区或单独 issue 与上游对齐形态再动手。
 
