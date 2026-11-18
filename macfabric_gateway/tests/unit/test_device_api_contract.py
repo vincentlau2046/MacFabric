@@ -308,3 +308,25 @@ def test_legacy_gpu_fields_mapping():
         clock_mhz=None, pressure_level=None, timestamp=1.0, sources={})
     assert legacy_gpu_fields(unknown) == {
         "gpu_used_mb": None, "gpu_total_mb": None, "gpu_util_pct": None}
+
+
+def test_hub_device_snapshot_single_flight(tmp_path):
+    """Concurrent observers at expiry must produce ONE provider probe."""
+    import threading
+    from inferfabric.platform.telemetry import DeviceCapabilities
+
+    class SlowDevice(CountingDevice):
+        def snapshot(self):
+            time.sleep(0.25)
+            return super().snapshot()
+
+    hub = TelemetryHub(data_dir=tmp_path, device_telemetry=SlowDevice())
+    hub._clock = time.monotonic
+    out = []
+    def probe():
+        out.append(hub.get_device_snapshot())
+    threads = [threading.Thread(target=probe) for _ in range(4)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    assert hub.device_telemetry.calls == 1          # single flight
+    assert all(s is out[0] for s in out)            # one shared reading

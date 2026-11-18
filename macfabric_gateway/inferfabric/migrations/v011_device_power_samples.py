@@ -14,12 +14,15 @@ source='legacy_gpu_power_samples' —— 不把旧数据归于虚构的 GPU/设�
 
 
 def upgrade(conn):
-    legacy_exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' "
-        "AND name='gpu_power_samples'").fetchone() is not None
-
     conn.execute("BEGIN IMMEDIATE")
     try:
+        # Review fix: decide inside the write transaction — a concurrent
+        # process may commit v011 between our check and our lock; re-checking
+        # here (type='table') makes the copy/drop race-free and idempotent.
+        legacy_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='gpu_power_samples'").fetchone() is not None
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS device_power_samples (
                 ts INTEGER NOT NULL,
@@ -52,9 +55,9 @@ def upgrade(conn):
             SELECT d.ts, d.watts
             FROM device_power_samples d
             WHERE d.device_id = 'unknown'
-               OR NOT EXISTS (
+               OR (d.device_id = 'aggregate' AND NOT EXISTS (
                     SELECT 1 FROM device_power_samples l
-                    WHERE l.ts = d.ts AND l.device_id = 'unknown')
+                    WHERE l.ts = d.ts AND l.device_id = 'unknown'))
         """)
 
         conn.execute("PRAGMA user_version = 11")

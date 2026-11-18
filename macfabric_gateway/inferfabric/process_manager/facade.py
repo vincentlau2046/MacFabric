@@ -447,7 +447,10 @@ class ProcessManager(BaseProcessManager):
 
         time.sleep(2)
         if GPU_AUTO_CLEAR_CUDA_STATE:
-            self._clear_gpu_cuda_state()  # clear fragmentation after force kill
+            # Review fix: use the gated public path — with DeviceControl
+            # injected the occupancy gates apply (unknown occupancy refuses);
+            # without one this falls back to the legacy sequence.
+            self.clear_gpu_cuda_state(force=True)  # clear fragmentation after force kill
         self._state.set("vllm_pid", "")
         self._state.set("comfyui_pid", "")
         self._state.set("tts_pid", "")

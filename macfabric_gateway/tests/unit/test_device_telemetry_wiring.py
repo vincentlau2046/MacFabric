@@ -7,6 +7,7 @@ fabricated total on admission/control paths; observations stay None.
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -229,6 +230,72 @@ def test_force_reset_gpu_free_handles_none(tmp_path, monkeypatch):
                        state_db_path=tmp_path / "state.db",
                        device_telemetry=FakeTelemetry(snap))
     mgr.state.set_multi({"gpu_mode": "idle", "active_services": "[]"})
+    # CRITICAL isolation (review): never let the state machine issue real
+    # host-wide kills (pkill -f / fuser -k) or nvidia-smi resets from a unit
+    # test — stub the process facade; only the telemetry contract is exercised.
+    kills = []
+    _stub = SimpleNamespace(
+        force_kill_all=lambda: kills.append("kill"),
+        clear_gpu_cuda_state=lambda force=False: kills.append("clear"),
+    )
+    mgr._proc = _stub
+    mgr._gpu_state._proc = _stub  # state machine keeps its own reference
+    # short-circuit the 20s wait loop; the None→False contract is asserted
+    # directly at the wait_gpu_free level in test_wait_gpu_free_*
+    import inferfabric.gpu_state as gs
+    monkeypatch.setattr(gs, "wait_gpu_free", lambda *a, **kw: False)
     r = mgr._gpu_state.force_reset()
+    assert kills == ["kill", "clear"]  # no real host commands ran
     assert r["gpu_free"] is False        # None ≠ free
     assert r["status"] == "reset"
+
+
+def test_force_reset_gpu_free_reflects_wait_result(tmp_path, monkeypatch):
+    """gpu_free must be the wait outcome, not the stale pre-wait sample.
+
+    Sequence: first probe (logged used) is busy; by the wait loop the device
+    is free → gpu_free True (old code reported False from the stale sample).
+    """
+    from inferfabric.manager import ModelManager
+    seq = [_snap(memory_used_mb=30000),
+           _snap(memory_used_mb=100),
+           _snap(memory_used_mb=100)]
+
+    class SeqTelemetry:
+        def snapshot(self):
+            return seq.pop(0) if seq else _snap(memory_used_mb=100)
+
+        def capabilities(self):
+            return DeviceCapabilities(memory=True)
+
+    mgr = ModelManager(models_dir=tmp_path / "models.d",
+                       state_db_path=tmp_path / "state.db",
+                       device_telemetry=SeqTelemetry())
+    mgr.state.set_multi({"gpu_mode": "idle", "active_services": "[]"})
+    _stub = SimpleNamespace(
+        force_kill_all=lambda: None,
+        clear_gpu_cuda_state=lambda force=False: None,
+    )
+    mgr._proc = _stub
+    mgr._gpu_state._proc = _stub
+    r = mgr._gpu_state.force_reset()
+    assert r["gpu_free"] is True
+
+
+def test_force_kill_all_routes_clear_through_device_control(tmp_path, monkeypatch):
+    """force_kill_all's post-kill clear must go through the gated
+    DeviceControl path, not the legacy ungated nvidia-smi sequence."""
+    from inferfabric.process_manager import facade as fmod
+    from inferfabric.state import StateDB
+    monkeypatch.setattr(fmod, "GPU_AUTO_CLEAR_CUDA_STATE", True)
+    monkeypatch.setattr(fmod.subprocess, "run",
+                        lambda *a, **kw: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(fmod.os, "killpg", lambda *a, **kw: None)
+    import inferfabric.process_manager.base as pmb
+    monkeypatch.setattr(pmb, "gpu_used_mb", lambda telemetry=None: None)
+
+    ctrl = FakeControl(OperationResult(ok=True, status="ok", message="gpu-reset"))
+    proc = fmod.ProcessManager(StateDB(tmp_path / "state.db"),
+                               device_control=ctrl)
+    proc.force_kill_all()
+    assert ctrl.called == 1

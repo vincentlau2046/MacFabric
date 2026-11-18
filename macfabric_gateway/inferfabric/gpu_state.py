@@ -365,7 +365,11 @@ class GpuStateMachine:
         self._proc.clear_gpu_cuda_state(force=True)
 
         used = gpu_used_mb(self._device_telemetry)
-        if not wait_gpu_free(timeout=20, telemetry=self._device_telemetry):
+        # Review fix: gpu_free reflects the WAIT outcome, not the stale
+        # pre-wait sample (an early busy reading must not poison the report,
+        # an early free reading must not mask a later regression).
+        gpu_free = wait_gpu_free(timeout=20, telemetry=self._device_telemetry)
+        if not gpu_free:
             log.warning(
                 "Device memory not free after force_reset (%s MB used). "
                 "GPU CUDA state was cleared but memory is still in use. "
@@ -390,7 +394,7 @@ class GpuStateMachine:
         return {
             "status": "reset",
             "gpu_mode": GPUMode.IDLE,
-            # Fail-closed: an unavailable reading is never "free".
-            "gpu_free": (used is not None
-                         and used < GPU_FREE_THRESHOLD_MB),
+            # Fail-closed: wait_gpu_free returns False when the reading is
+            # unavailable — never reported free on missing data.
+            "gpu_free": gpu_free,
         }

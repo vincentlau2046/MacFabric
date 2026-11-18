@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 import queue as _queue
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -99,6 +100,7 @@ class TelemetryHub:
         # provider (fresh snapshot, fail-closed).
         self._device_snap_cache: tuple[float, object] | None = None
         self._device_snap_ttl = 15.0
+        self._device_snap_lock = threading.Lock()  # single-flight refresh
         self._clock = time.monotonic  # test seam (fake monotonic clock)
 
         # Core: unified DB
@@ -152,9 +154,14 @@ class TelemetryHub:
         cached = self._device_snap_cache
         if cached is not None and (now - cached[0]) < self._device_snap_ttl:
             return cached[1]
-        snap = self.device_telemetry.snapshot()
-        self._device_snap_cache = (now, snap)
-        return snap
+        with self._device_snap_lock:  # one refresh per expiry, even concurrent
+            cached = self._device_snap_cache
+            now = self._clock()
+            if cached is not None and (now - cached[0]) < self._device_snap_ttl:
+                return cached[1]
+            snap = self.device_telemetry.snapshot()
+            self._device_snap_cache = (self._clock(), snap)
+            return snap
 
     def start_token_collector(self, manager_ref: Callable[[], Any]):
         """Inject manager ref and start token collection.

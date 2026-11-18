@@ -254,3 +254,30 @@ def test_power_series_does_not_interpolate_across_streams(tmp_path):
     assert set(legacy_series.keys()) == set(device_series.keys())
     assert {"gran", "buckets", "totals", "available"} <= set(device_series.keys())
     assert legacy_series["available"] and device_series["available"]
+
+
+def test_v011_tolerates_view_from_concurrent_migration():
+    """Race hardening: the legacy-table check must happen inside the write
+    transaction. If another process already migrated (gpu_power_samples is
+    now the compat view), this run must skip the copy/drop, not crash."""
+    conn = _legacy_db()
+    v011_device_power_samples.upgrade(conn)   # first process finishes
+    conn.execute("PRAGMA user_version = 0")   # second process started earlier
+    v011_device_power_samples.upgrade(conn)   # must not raise / duplicate
+    n = conn.execute("SELECT COUNT(*) FROM device_power_samples").fetchone()[0]
+    assert n == 3
+
+
+def test_v011_compat_view_excludes_per_device_rows():
+    """The (ts, watts) view carries historical + aggregate rows only —
+    a per-device sample (device_id != unknown/aggregate) must never leak
+    into the legacy one-row-per-ts projection."""
+    conn = _legacy_db()
+    v011_device_power_samples.upgrade(conn)
+    conn.execute(
+        "INSERT INTO device_power_samples VALUES "
+        "(4_000, 'linux', 'nvidia', 'card0', 77.0, 'device_telemetry')")
+    conn.commit()
+    rows = conn.execute(
+        "SELECT ts, watts FROM gpu_power_samples ORDER BY ts").fetchall()
+    assert rows == [(1_000, 41.5), (2_000, 42.5), (3_000, 43.5)]
