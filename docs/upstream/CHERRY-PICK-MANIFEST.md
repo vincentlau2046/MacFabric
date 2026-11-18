@@ -11,9 +11,9 @@
 | 文件 | 内容摘要 | 归属批次 |
 |---|---|---|
 | proxy/forwarder.py | usage 双 chunk 取 max；/admin CORS 收紧；Anthropic base 路径双约定拼接 | B1 |
-| proxy/sse_buffer.py | 流式缓冲修复 | B1 |
+| proxy/sse_buffer.py | 流式缓冲修复（= saw_done/saw_error 观测位 hunk ~10 行）→ **已核销：随 F5 带上**（D 桶 stream_state 前置，2026-11-18 裁决） | B1→F5 |
 | proxy/request_logger.py | 日志字段补全 | B1 |
-| ratelimit.py | 限流修复 | B1 |
+| ratelimit.py | 限流修复（= observe 模式 effective_timeout hunk ~12 行）→ **已核销：随 F5 带上**（池预算契约前置，2026-11-18 裁决） | B1→F5 |
 | telemetry.py | 指标口径修复 | B1 |
 | request_log_db.py | key_name/metadata 字段 + route 兜底（NOT NULL 防静默丢弃） | B1 |
 | db.py | 同上 schema 演进 | B1 |
@@ -51,7 +51,7 @@
 | 1 | F1 三协议入口 | pick/protocol-bridges | 待切 | anthropic_translate.py、anthropic_bridge.py、responses_bridge.py | chat_handlers/handler（装配点） | tests/unit/test_anthropic_translate.py + golden 录制件 | 待摘取 |
 | 2 | F2 平台资源账本 | pick/platform-layer | 移植自 40bb02e..`d392007`，落为上游基线 2 commits：`7cc392a`（platform 包+4 套测试）+ `331c315`（5 导入点装配） | platform/ 全包 7 文件 + test_platform_*.py 4 文件 | manager/gpu_state/health/model_lifecycle/model_discovery（5 处导入点注入） | unit 1894 绿 + integration 118 绿（darwin 原生 + IFF_FORCE_PLATFORM=linux mock 双跑） | 已提交 PR：[InferFabric#2](https://github.com/vincentlau2046/InferFabric/pull/2)（2026-11-18） |
 | 3 | F4 能力包 | pick/capability-packs | 待切 | packs/、pack_handlers.py、jobs.py | handler.py admin 面、chat_handlers（503 闸） | test_packs_*.py（11 文件）+ test_jobs.py | 待摘取 |
-| 4 | F5 模型池 v2 | pick/pool-v2 | 待切 | — | model_pool/ 6 文件（A 池v2核心+B 命名v2+C 单飞调用侧+D 结构化传输，~470 行）+ proxy/chat_handlers.py（`_forward_request_ex` 注入 1-2 处）+ dashboard 两件 | 回收 test_pool_prefix_fabric.py + 池 CAS/rebuild 单测；**依赖 PR #1 先合入**（C 调用侧） | 待摘取（制作方案已批，2026-11-18 第二封报备） |
+| 4 | F5 模型池 v2 | pick/pool-v2 | 待切 | — | model_pool/ 6 文件（A 池v2核心+B 命名v2+C 单飞调用侧+D 结构化传输，~470 行）+ proxy/chat_handlers.py（`_forward_request_ex` 注入 1-2 处）+ proxy/sse_buffer.py（观测位 hunk）+ ratelimit.py（observe effective_timeout hunk）+ dashboard 两件 | 回收 test_pool_prefix_fabric.py / test_pool_deadline_recovery / test_pool_health_policy + 池 CAS/rebuild 单测；**依赖 PR #1 先合入**（C 调用侧） | 待摘取（制作方案已批；sse_buffer/ratelimit 两 hunk 已裁决随带，2026-11-18） |
 | 5 | F6 云聚合修复 | pick/cloud-fixes | `3670d40`..`94d5bd7`（2 commits，基线 e453a90） | test_cloud_route_resolution.py、test_cloud_discovery_singleflight.py | cloud_discovery.py、proxy_manager.py、proxy/chat_handlers.py + proxy/handler.py（调用侧各 1-3 行注入） | 单测：unit 1882 绿 ×2 + integration 118 绿（本机验证 2026-11-18） | 已提交 PR：[InferFabric#1](https://github.com/vincentlau2046/InferFabric/pull/1)（2026-11-18） |
 
 > **F6 制作记录**（inferfabric-pr session）：
