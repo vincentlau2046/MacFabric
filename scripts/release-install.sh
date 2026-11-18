@@ -19,7 +19,7 @@
 # 回滚: scripts/release-install.sh <上一个 gateway-v* tag>
 set -euo pipefail
 
-REPO=/Users/Apple/Documents/MacFabric
+REPO=/Users/Apple/Projects/MacFabric
 PROD="$HOME/Library/MacFabric/prod"
 MODELS_D="$HOME/.inferfabric/models.d"
 PLIST="$HOME/Library/LaunchAgents/com.macfabric.gateway.plist"

@@ -3,7 +3,7 @@
 ## 一键验收
 
 ```bash
-cd /Users/Apple/Documents/MacFabric
+cd /Users/Apple/Projects/MacFabric
 
 # 1. 网关（应已在跑；若没有）
 #    注意：launchd 服务【未激活】（需你亲自批准开机自启），手动启动：

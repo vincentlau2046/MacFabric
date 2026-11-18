@@ -4292,7 +4292,7 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 0) {
                         SettingRow(title: "模型目录",
                                    desc: "GGUF 模型文件所在位置（本机发现扫描此处）",
-                                   path: "/Users/Apple/Documents/MacFabric/models")
+                                   path: "/Users/Apple/Projects/MacFabric/models")
                         SettingRow(title: "引擎",
                                    desc: "llama.cpp Metal 构建 · anthropic_native 透传",
                                    path: "engines/llama-b12361")
