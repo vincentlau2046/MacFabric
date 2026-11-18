@@ -82,3 +82,25 @@ legacy 流：**上游合入 + 一个发布周期**后移除；回滚 v011 需迁
 
 **回滚程序**：`mv prod prod.broken && mv prod.old prod` + `cp plist.bak-20261118-215216 plist` +
 `launchctl kickstart -k gui/$(id -u)/com.macfabric.gateway`；数据库回滚用迁移前备份恢复 request_log.db。
+
+## 6. 生产合入（gateway-v7.11.1，fork parity，2026-11-18）
+
+上游 PR#4 评审修复（6d86f7c）镜像落 fork main `f7392a5`（生产跑 fork 代码，
+parity 缺口必须补齐）：blocker=`_resolve_pool_snap` 存量池键回落；nit1=物理门后
+重算转发预算（本地+云）；nit2=admin PUT pop 掉 expected_revision 不落盘；nit3=
+priority `_strict_int` 严格解析。测试 tests/unit/test_pool_parity_pr4.py 5 例
+RED→GREEN，全量 431 绿。
+
+| 步骤 | 证据 |
+|---|---|
+| 部署动机 | 生产 model_pools.yaml 实测已含被 nit2 污染落盘的 `expected_revision: 80`（bug 在产线存活的直接证据）；池键已迁移规范名，blocker 为前馈防护 |
+| 安装 | tag `gateway-v7.11.1`（双远端已推）→ `scripts/release-install.sh gateway-v7.11.1`；旧版保留 `prod.old`，plist 备份 `.bak-20261118-221618` |
+| 冒烟 | SMOKE OK: catalog 200；launchd running pid 73943 |
+| 数据库 | request_log.db `user_version=11` 原样保留（本次无迁移） |
+| 部署码核验 | prod dispatch.py 含 `_resolve_pool_snap`（1 处定义+2 调用点）、admin.py pop×2、config.py `_strict_int`×1 |
+| /api/snapshot | status.gpu_total_mb=28672（预算映射）、gpu_util_pct=null、system.device 实时 Apple 快照在位 |
+| /api/device_power | 结构正常（gran/buckets/totals/available），新流样本累积中 |
+
+**遗留（deferred minor）**：`inferfabric/__init__.py` `__version__` 停在 7.10.12，
+自 v7.11.0 起版本号以 git tag 为准、常量未随版（自 v7.10.12 即漂移，非本次引入）；
+后续发布周期统一修（发布脚本注入或随版 bump）。
