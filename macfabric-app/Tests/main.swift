@@ -262,8 +262,10 @@ final class MemoryAdminTokenStore: GatewayCredentialStore {
     }
     func delete(profile: GatewayProfile) throws { items.removeValue(forKey: profile.keychainAccount) }
 }
-check("adminServiceDiffersFromInference", AdminTokenCredentialStore.serviceName != GatewayProfile.keychainService
-    && AdminTokenCredentialStore.serviceName == "io.macfabric.gateway-admin")
+// 用户裁决 2026-11-18：admin token 改存本机受控文件（FileCredentialStore），
+// 钥匙串退役 — 保留 legacy service 常量仅供清理/兼容提示。
+check("adminLegacyServiceConstant", AdminTokenCredentialStore.legacyKeychainService == "io.macfabric.gateway-admin"
+    && AdminTokenCredentialStore.legacyKeychainService != GatewayProfile.keychainService)
 
 // ── 主动录入契约（用户裁决 2026-11-17）：born 迁移已移除 —
 // Keychain 存取本身即录入/读取路径（AdminTokenCredentialStore.save/load），

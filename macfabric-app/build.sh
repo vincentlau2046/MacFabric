@@ -39,7 +39,7 @@ EOF
 rm -f "$APP/Contents/Resources/DEV_PROFILE"
 [ "$DEBUG" = "1" ] && printf 'dev' > "$APP/Contents/Resources/DEV_PROFILE"
 
-SOURCES="Sources/ProductModels.swift Sources/AuthState.swift Sources/GatewayClient.swift Sources/GatewayKeychain.swift Sources/DesignSystem.swift Sources/ModelTable.swift Sources/ModelDetails.swift Sources/main.swift"
+SOURCES="Sources/ProductModels.swift Sources/AuthState.swift Sources/GatewayClient.swift Sources/GatewayKeychain.swift Sources/AdminTokenFileStore.swift Sources/DesignSystem.swift Sources/ModelTable.swift Sources/ModelDetails.swift Sources/main.swift"
 swiftc -O \
   -framework SwiftUI -framework AppKit -framework Security \
   $SOURCES -o "$APP/Contents/MacOS/MacFabric"

@@ -7,7 +7,9 @@ import Foundation
 // ── admin token 双账目（service 与推理 key 分离）────────────────
 
 struct AdminTokenCredentialStore {
-    static let serviceName = "io.macfabric.gateway-admin"
+    // 用户裁决 2026-11-18：Token 存本机受控文件，不再写登录钥匙串
+    // （adhoc 重签后每次发版都触发钥匙串授权弹窗；文件 0600 仅当前用户可读）。
+    static let legacyKeychainService = "io.macfabric.gateway-admin"
     private let backing: GatewayCredentialStore
 
     init(backing: GatewayCredentialStore) { self.backing = backing }

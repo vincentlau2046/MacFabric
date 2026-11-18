@@ -813,9 +813,10 @@ final class GatewayStore: ObservableObject {
     private var timer: Timer?
     private var curveTimer: Timer?
     /// 控制面门禁（批 1 TOP1）：admin/控制路由请求注入 X-Admin-Token
-    /// （双账目：独立 Keychain service；凭据仅主动录入 — 设置页入口）
+    /// （凭据仅主动录入 — 设置页入口；存本机受控文件 0600，
+    /// 用户裁决 2026-11-18：默认模式零钥匙串触碰，杜绝登录密码弹窗）
     let adminTokens = AdminTokenCredentialStore(
-        backing: KeychainCredentialStore(service: AdminTokenCredentialStore.serviceName))
+        backing: FileCredentialStore())
     @Published var adminTokenReady = false
     @Published var adminTokenMissing = false
     /// 主窗口可见性 — 菜单栏常驻应用，窗口关闭后暂停轮询（空转打点无意义；
@@ -858,7 +859,7 @@ final class GatewayStore: ObservableObject {
         return true
     }
 
-    /// 凭据状态刷新（设置页显示 + 主动录入后同步）：只读 Keychain，不读文件。
+    /// 凭据状态刷新（设置页显示 + 主动录入后同步）：只读本机受控文件。
     func refreshAdminTokenState() {
         let stored = adminTokens.load(profile: CURRENT_PROFILE)
         let ready = stored != nil && !(stored ?? "").isEmpty
@@ -866,7 +867,7 @@ final class GatewayStore: ObservableObject {
         adminTokenMissing = !ready
     }
 
-    /// 设置页主动录入（高级安全功能使能的体现）：存 Keychain 后立即生效。
+    /// 设置页主动录入（高级安全功能使能的体现）：存本机文件后立即生效。
     func saveAdminToken(_ token: String) {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -874,11 +875,11 @@ final class GatewayStore: ObservableObject {
             return
         }
         if adminTokens.save(trimmed, profile: CURRENT_PROFILE) {
-            notify(.success, "✅ 管理 Token 已保存到钥匙串（同档位管理请求自动携带）")
+            notify(.success, "✅ 管理 Token 已保存（同档位管理请求自动携带）")
             refreshAdminTokenState()
             adminTokenDraft = ""
         } else {
-            notify(.error, "❌ 钥匙串保存被拒 — 请在系统设置中允许 MacFabric 访问钥匙串")
+            notify(.error, "❌ 保存失败 — 请检查 ~/Library/Application Support/MacFabric 目录权限")
         }
     }
 
@@ -4258,7 +4259,7 @@ struct SettingsView: View {
                                     SmallBtn("清除") { store.clearAdminToken() }
                                 }
                             }
-                            Text("仅当网关开启严格模式（MACFABRIC_ADMIN_REQUIRED=1）时，管理动作才校验此 Token；默认开放模式本机免凭据。保存进 macOS 钥匙串，按档位隔离，不落盘明文。")
+                            Text("仅当网关开启严格模式（MACFABRIC_ADMIN_REQUIRED=1）时，管理动作才校验此 Token；默认开放模式本机免凭据。保存在本机受控目录（仅当前用户可读），按档位隔离，不触碰系统钥匙串。")
                                 .font(.system(size: 10)).foregroundColor(.faint)
                         }
                         .padding(.vertical, 4)
