@@ -35,7 +35,6 @@ def ModeOf(m):
     return Mode.RESIDENT if getattr(m, "ledger_mode", "") == "resident" else Mode.ON_DEMAND
 from .health import (
     gpu_used_mb,
-    gpu_total_mb,
     check_http_status,
 )
 from .health_checker import DefaultHealthChecker
@@ -72,6 +71,8 @@ class ModelManager:
         state: IStateDB | None = None,
         lock: IGPULock | None = None,
         health: IHealthChecker | None = None,
+        device_telemetry=None,
+        device_control=None,
     ):
         """Initialize ModelManager.
 
@@ -89,6 +90,21 @@ class ModelManager:
         except (AttributeError, TypeError):
             pass  # 测试桩/受限 IProcessManager 不接受回引用 → 保持基类回退
         self._health = health if health is not None else DefaultHealthChecker()
+        # DeviceTelemetry T3: unified device observation/control providers.
+        # Telemetry: injected or factory default; control: injected or
+        # platform default (NullDeviceControl on Apple/unknown).
+        if device_telemetry is not None:
+            self._device_telemetry = device_telemetry
+        else:
+            from .platform import detect
+            from .platform.telemetry import telemetry_for_profile
+            self._device_telemetry = telemetry_for_profile(detect())
+        if device_control is not None:
+            self._device_control = device_control
+        else:
+            from .platform import detect
+            from .platform.telemetry import device_control_for_profile
+            self._device_control = device_control_for_profile(detect())
         self._models = load_models(self.models_dir)
         # 计算属性: gpu_mode 从 active_services 实时推导
         self.state.set_models_lookup(self.get_model)
@@ -96,11 +112,21 @@ class ModelManager:
         # Sub-module instances
         self._gpu_state = GpuStateMachine(
             self.state, self._proc, self._health, self._lock, self._models,
+            device_telemetry=self._device_telemetry,
         )
         self._lifecycle = ModelLifecycle(
             self.state, self._proc, self._health, self._lock,
             self._gpu_state, self._models, self.models_dir,
+            device_telemetry=self._device_telemetry,
         )
+        # DeviceTelemetry T3: process manager consumes DeviceControl for
+        # hardware reset (clear_gpu_cuda_state); telemetry injected for
+        # wait/baseline paths.
+        try:
+            self._proc.device_control = self._device_control
+            self._proc.device_telemetry = self._device_telemetry
+        except (AttributeError, TypeError):
+            pass  # 测试桩/受限 IProcessManager 不接受注入 → 退回旧路径
 
         # Startup self-check: catch missing cross-layer methods early
         # (e.g. reload_models, start_ollama — P0 regressions from audit)
@@ -418,14 +444,15 @@ class ModelManager:
             port_owners = {name: p for name, p in self._gpu_state._scan_port_owners().items()
                            if name != target}
             if gpu_services or port_owners:
-                vram = gpu_used_mb()
+                vram = gpu_used_mb(self._device_telemetry)
+                vram_txt = f"{vram}MB" if vram is not None else "unknown MB"
                 occupied = ", ".join(
                     (f"{s} (port {p[0]}, pid {p[1]})" for s, p in port_owners.items()
                     if s not in gpu_services)
                 ) or ", ".join(gpu_services)
                 return {
                     "status": "error",
-                    "message": f"GPU is occupied ({occupied or ', '.join(gpu_services)}, {vram}MB used). "
+                    "message": f"GPU is occupied ({occupied or ', '.join(gpu_services)}, {vram_txt} used). "
                                f"DB state is stale (gpu_mode=idle but GPU busy). "
                                f"Run 'iff reconcile' or 'iff reset'.",
                 }
@@ -537,6 +564,18 @@ class ModelManager:
             for m in self._models.values()
         }
 
+        # DeviceTelemetry T3: one snapshot feeds device + legacy fields.
+        from .platform.telemetry import snapshot_to_dict, capabilities_to_dict
+        snap = self._device_telemetry.snapshot()
+        if snap.memory_kind == "unified":
+            legacy_total = snap.memory_budget_mb      # Apple: budget B (§14.2)
+            legacy_util = None                        # never fabricate pct
+        else:
+            legacy_total = snap.memory_total_mb       # NVIDIA: physical VRAM
+            legacy_util = (snap.memory_used_mb / snap.memory_total_mb * 100
+                           if snap.memory_used_mb is not None
+                           and snap.memory_total_mb else None)
+
         return {
             "gpu_mode": self.gpu_mode,
             "active_services": active_services,
@@ -545,9 +584,14 @@ class ModelManager:
             "scenario_active": scenario_active,
             "sleep_states": sleep_states,
             "switch_target": self.state.get("switching_target") or None,
-            "gpu_used_mb": gpu_used_mb(),
-            "gpu_total_mb": gpu_total_mb(),
-            "gpu_util_pct": gpu_used_mb() / gpu_total_mb() * 100 if gpu_total_mb() > 0 else 0.0,
+            "gpu_used_mb": snap.memory_used_mb,
+            "gpu_total_mb": legacy_total,
+            "gpu_util_pct": legacy_util,
+            "device": {
+                "snapshot": snapshot_to_dict(snap),
+                "capabilities": capabilities_to_dict(
+                    self._device_telemetry.capabilities()),
+            },
             "vllm_pid": self._proc.vllm_pid,
             "comfyui_pid": self._proc.comfyui_pid,
             "tts_pid": self._proc.tts_pid,

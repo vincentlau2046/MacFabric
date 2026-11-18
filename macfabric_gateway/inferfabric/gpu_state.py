@@ -36,12 +36,14 @@ class GpuStateMachine:
     Owns the reconciliation logic, orphan detection, and force-reset.
     """
 
-    def __init__(self, state, proc, health, lock, models):
+    def __init__(self, state, proc, health, lock, models,
+                 device_telemetry=None):
         self.state = state
         self._proc = proc
         self._health = health
         self._lock = lock
         self._models = models
+        self._device_telemetry = device_telemetry
 
     # ── Port / Process Helpers ────────────────────────────────────
 
@@ -196,12 +198,25 @@ class GpuStateMachine:
 
     # ── VRAM ──────────────────────────────────────────────────────
 
-    def _get_current_vram_pct(self) -> float:
-        """Get current GPU VRAM usage as a percentage of total."""
+    def _get_current_vram_pct(self) -> float | None:
+        """Current VRAM occupancy pct; None when the reading is unavailable.
+
+        DeviceTelemetry T3: callers must fail closed on None (never treat
+        as 0%).
+        """
         try:
-            return gpu_used_mb() / max(gpu_total_mb(), 1) * 100
+            snap = (self._device_telemetry.snapshot()
+                    if self._device_telemetry is not None else None)
+            if snap is None:
+                from .health import gpu_used_mb, gpu_total_mb
+                used, total = gpu_used_mb(), gpu_total_mb()
+            else:
+                used, total = snap.memory_used_mb, snap.memory_total_mb
+            if used is None or total is None:
+                return None
+            return used / max(total, 1) * 100
         except Exception:
-            return 0.0
+            return None
 
     # ── Config Drift ──────────────────────────────────────────────
 
@@ -349,12 +364,13 @@ class GpuStateMachine:
         # P1-6: Clear GPU CUDA state after force kill to eliminate fragmentation
         self._proc.clear_gpu_cuda_state(force=True)
 
-        if not wait_gpu_free(timeout=20):
+        used = gpu_used_mb(self._device_telemetry)
+        if not wait_gpu_free(timeout=20, telemetry=self._device_telemetry):
             log.warning(
-                "GPU not free after force_reset (%d MB used). "
-                "GPU CUDA state was cleared but GPU still has memory in use. "
+                "Device memory not free after force_reset (%s MB used). "
+                "GPU CUDA state was cleared but memory is still in use. "
                 "Manual reset may be needed: sudo nvidia-smi --gpu-reset",
-                gpu_used_mb()
+                used if used is not None else "unknown",
             )
 
         self._lock.force_clear()
@@ -374,5 +390,7 @@ class GpuStateMachine:
         return {
             "status": "reset",
             "gpu_mode": GPUMode.IDLE,
-            "gpu_free": gpu_used_mb() < GPU_FREE_THRESHOLD_MB,
+            # Fail-closed: an unavailable reading is never "free".
+            "gpu_free": (used is not None
+                         and used < GPU_FREE_THRESHOLD_MB),
         }
