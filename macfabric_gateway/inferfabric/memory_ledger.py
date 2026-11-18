@@ -1,190 +1,27 @@
+"""DEPRECATED shim — moved to inferfabric.platform.resource_umem (M1 refactor).
+
+Kept one release cycle so existing imports keep working:
+    from inferfabric.memory_ledger import MemoryLedger, Mode, ...   # still fine
+New code must import from inferfabric.platform.resource_umem / .resource.
 """
-inferfabric/memory_ledger.py — MacFabric 统一内存账本（PLAN.md D2/D3 裁决实现）。
+import warnings
 
-设计原则（少即是多，Mac 统一内存哲学）：
-- 单一预算公式：B = RAM − 8G（无第二上限，128GB Mac 不人为设限）。
-- 三条规则：
-  R1 准入：sum(resident) + mem_baseline_mb > B → 拒绝（force=True 时放行，
-      语义为「用户在弹窗里点了仍然加载」——责任转移到人）。
-  R2 常驻策略：mode=resident 常驻；mode=on_demand 空闲 idle_timeout_min 后可休眠。
-  R3 压力安全网：macOS 内存压力 ≥ 3 时，优先休眠 on_demand 模型（先到先休）。
-- 生命周期：stopped → loading → ready ⇄ sleeping → stopped（上游三态的
-  Mac 语义映射，字段 mem_baseline_mb/mode/idle_timeout_min）。
+from .platform.resource import (  # noqa: F401
+    AdmitDecision,
+    LedgerEntry,
+    Lifecycle,
+    Mode,
+)
+from .platform.resource_umem import UnifiedMemoryLedger  # noqa: F401
 
-纯逻辑模块：内存水位/压力由调用方注入（mac_platform 探测或测试桩），
-本模块不做任何子进程调用，保证可单测。
-"""
+MemoryLedger = UnifiedMemoryLedger
 
-from __future__ import annotations
+__all__ = ["MemoryLedger", "UnifiedMemoryLedger", "Mode", "Lifecycle",
+           "AdmitDecision", "LedgerEntry"]
 
-import time
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Callable, Optional
-
-
-class Mode(str, Enum):
-    RESIDENT = "resident"      # 常驻：只受 R1/R3 约束，无空闲休眠
-    ON_DEMAND = "on_demand"    # 按需：空闲 idle_timeout_min 后可被 R2/R3 休眠
-
-
-class Lifecycle(str, Enum):
-    STOPPED = "stopped"
-    LOADING = "loading"
-    READY = "ready"
-    SLEEPING = "sleeping"
-
-
-@dataclass
-class AdmitDecision:
-    ok: bool
-    reason: str = ""
-    available_mb: int = 0
-    needed_mb: int = 0
-
-
-@dataclass
-class LedgerEntry:
-    name: str
-    mem_baseline_mb: int
-    mode: Mode
-    idle_timeout_min: float = 30.0
-    state: Lifecycle = Lifecycle.STOPPED
-    last_used_ts: float = field(default_factory=time.time)
-
-    @property
-    def idle_seconds(self) -> float:
-        return time.time() - self.last_used_ts
-
-
-class MemoryLedger:
-    """统一内存账本：准入（R1）+ 常驻策略（R2）+ 压力安全网（R3）。
-
-    `probe_available_mb` 注入当前可用水位探测（生产=mac_platform.mem_used_mb
-    反推，测试=固定桩）；None 表示探测不可用，此时 R1 仅按账面基线记账。
-    """
-
-    def __init__(
-        self,
-        budget_mb: int,
-        probe_available_mb: Optional[Callable[[], Optional[int]]] = None,
-    ):
-        self.budget_mb = budget_mb
-        self.probe_available_mb = probe_available_mb
-        self._entries: dict[str, LedgerEntry] = {}
-
-    # ── 记账 ────────────────────────────────────────────────────
-
-    def registered(self, name: str) -> Optional[LedgerEntry]:
-        return self._entries.get(name)
-
-    def entries(self) -> dict[str, LedgerEntry]:
-        return dict(self._entries)
-
-    def resident_total_mb(self) -> int:
-        """账面占用：loading/ready/sleeping 的模型都占内存（sleeping 保留
-        基线的 25% 作 KV 归零后的驻留估计，与 upstream sleep 语义对齐）。"""
-        total = 0
-        for e in self._entries.values():
-            if e.state == Lifecycle.STOPPED:
-                continue
-            total += e.mem_baseline_mb if e.state != Lifecycle.SLEEPING \
-                else max(e.mem_baseline_mb // 4, 0)
-        return total
-
-    def register(self, name: str, mem_baseline_mb: int, mode: Mode,
-                 idle_timeout_min: float = 30.0) -> LedgerEntry:
-        e = LedgerEntry(name=name, mem_baseline_mb=mem_baseline_mb,
-                        mode=mode, idle_timeout_min=idle_timeout_min)
-        self._entries[name] = e
-        return e
-
-    # ── R1 准入 ────────────────────────────────────────────────
-
-    def admit(self, name: str, force: bool = False) -> AdmitDecision:
-        """准入检查。ok=False 时 reason 面向用户（弹窗文案直接可用）。"""
-        e = self._entries.get(name)
-        if e is None:
-            return AdmitDecision(False, f"模型 {name} 未注册到内存账本")
-        if e.state in (Lifecycle.READY, Lifecycle.LOADING):
-            return AdmitDecision(True, "已在运行")
-        if e.state == Lifecycle.SLEEPING:
-            return AdmitDecision(True, "休眠中，唤醒即可")
-
-        needed = e.mem_baseline_mb
-        accounted = self.resident_total_mb()
-        available = self.budget_mb - accounted
-
-        # 实测水位修正：探测可用时取两者更紧的约束（账面 vs 实测）
-        if self.probe_available_mb is not None:
-            live = self.probe_available_mb()
-            if live is not None:
-                available = min(available, live)
-
-        if needed <= available:
-            e.state = Lifecycle.LOADING
-            return AdmitDecision(True, "通过", available, needed)
-
-        if force:
-            # 用户确认后的超卖放行——责任在人（D3 R1 语义）
-            e.state = Lifecycle.LOADING
-            return AdmitDecision(True, f"用户确认超卖加载（超出 {needed - available}MB）",
-                                 available, needed)
-        return AdmitDecision(
-            False,
-            f"内存不足：需要 {needed}MB，预算仅剩 {available}MB"
-            f"（B = RAM − 保留 = {self.budget_mb}MB，已占用 {accounted}MB）",
-            available, needed,
-        )
-
-    # ── 状态迁移 ────────────────────────────────────────────────
-
-    def mark_ready(self, name: str) -> None:
-        e = self._entries[name]
-        e.state = Lifecycle.READY
-        e.last_used_ts = time.time()
-
-    def mark_sleeping(self, name: str) -> None:
-        e = self._entries[name]
-        e.state = Lifecycle.SLEEPING
-
-    def mark_stopped(self, name: str) -> None:
-        e = self._entries[name]
-        e.state = Lifecycle.STOPPED
-
-    def touch(self, name: str) -> None:
-        """请求经过时刷新 last_used（proxy 转发成功后调用）。"""
-        e = self._entries.get(name)
-        if e:
-            e.last_used_ts = time.time()
-
-    # ── R2 空闲休眠候选 ────────────────────────────────────────
-
-    def idle_sleep_candidates(self, now: Optional[float] = None) -> list[str]:
-        """按 R2：on_demand 且空闲超过 idle_timeout_min 的 ready 模型。
-
-        返回按空闲时长降序（最久未用先休）。resident 永不进入候选。
-        """
-        now = now or time.time()
-        out = []
-        for e in self._entries.values():
-            if (e.mode is Mode.ON_DEMAND and e.state is Lifecycle.READY
-                    and (now - e.last_used_ts) >= e.idle_timeout_min * 60):
-                out.append(e)
-        out.sort(key=lambda e: e.last_used_ts)
-        return [e.name for e in out]
-
-    # ── R3 压力安全网 ──────────────────────────────────────────
-
-    def pressure_eviction_plan(self, pressure_level: int) -> list[str]:
-        """macOS 内存压力 ≥3 时给出休眠顺序：on_demand 先（最久未用优先），
-        不足再动 resident。level<3 返回空。"""
-        if pressure_level < 3:
-            return []
-        on_demand = [e for e in self._entries.values()
-                     if e.mode is Mode.ON_DEMAND and e.state is Lifecycle.READY]
-        on_demand.sort(key=lambda e: e.last_used_ts)
-        residents = [e for e in self._entries.values()
-                     if e.mode is Mode.RESIDENT and e.state is Lifecycle.READY]
-        residents.sort(key=lambda e: e.last_used_ts)
-        return [e.name for e in on_demand] + [e.name for e in residents]
+warnings.warn(
+    "inferfabric.memory_ledger is deprecated; import "
+    "inferfabric.platform.resource_umem instead",
+    DeprecationWarning,
+    stacklevel=2,
+)
