@@ -33,12 +33,13 @@
 
 **切分边界**（与 F4 capability-packs 重叠协商）：deploy-isolation 只带 L1 配置解耦 + L2 四模块基底 + L3 两处小修；packs 目录其余（目录/装拆 API）归 F4。
 
-## 4. 待上游确认的问题（issue/PR 评论用）
+## 4. 待上游确认的问题（issue 用，4+1 问）
 
 1. conda env 是否接受迁入项目数据目录（`conda create -p` 前缀式）？还是维持全局 env + 仅加引用计数账本？
 2. `IFF_CONDA_ENVS` / python_bin 显式字段是否可接受（不改默认行为，只加覆盖入口）？
 3. docker 镜像打管理标签 + 作用域 prune 是否可接受？
 4. uninstall 端点（CLI `iff remove` / admin API）优先级与形态。
+5. `~/miniconda3/pkgs` 缓存残留的承接：拆除路径须同时清理或明确声明 pkgs 占用——`conda clean` 作用域化，或文档化为用户级共享缓存不自动清，二选一（主 session 审阅补充）。
 
 ## 5. 验收测试预案（切分支时带）
 
