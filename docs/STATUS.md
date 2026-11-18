@@ -313,3 +313,10 @@
 - 池页：删每池"复制池配置"按钮 → 底部新增「如何调用这些池」指引卡
   （Base URL 双方言 / model 填池名 / API Key 来源 + 可复制 curl 示例）。
 - 设置页：已撤销密钥最多留 3 条痕（更早的折叠提示，防列表无限拉长）。
+
+## 2026-11-18 — 战略转向 + M1 平台抽象层（纯 Python 网关回归）
+
+- **产品裁决（D15–D22）**：放弃 SwiftUI App 线（App/安装版/dev 版/状态目录/缓存已彻底删除，D17）；UI 回归上游式 Web Dashboard（D15）；上游合入走 cherry-pick，由 peer session `inferfabric-pr` 承接 PR 事务（D16）；autostart 维持网关自管（D19）；34 个演进 diff 分级整理（D20）；main 不冻结（D22）。特性面以 F1–F10 锁定（specs/2026-11-18-mac-feature-lockdown.md）。
+- **M0**：基线 316 tests 绿 + 沙箱冒烟（qa/2026-11-18-m0-baseline.md）。
+- **M1**：`inferfabric/platform/` 抽象层落地（detect/ResourceLedger/umem+vram 双后端/probe/procguard/engines）；`memory_ledger.py`+`mac_platform.py` 转 shim；核心装配点 5 处切换；全量 345 tests 绿；生产双协议冒烟通过（glm-5 双通道 "ok"，qa/2026-11-18-m1-platform-layer.md）。
+- **D20 审计**：34 演进文件 A/P/M 三级归类 + CHERRY-PICK-MANIFEST 首批 10 条目（docs/upstream/），inferfabric-pr 已接管对账。
