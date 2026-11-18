@@ -49,9 +49,9 @@
 | # | 特性域 | pick 分支 | commit 范围 | 新增文件 | 触碰上游文件 | 验收测试 | 状态 |
 |---|---|---|---|---|---|---|---|
 | 1 | F1 三协议入口 | pick/protocol-bridges | 待切 | anthropic_translate.py、anthropic_bridge.py、responses_bridge.py | chat_handlers/handler（装配点） | tests/unit/test_anthropic_translate.py + golden 录制件 | 待摘取 |
-| 2 | F2 平台资源账本 | pick/platform-layer | 40bb02e..`d392007`（**含 procguard fail-visible 修复**，见下注） | platform/ 全包 | manager/gpu_state/health/model_lifecycle/model_discovery（5 处导入点） | test_platform_*.py（4 文件，全部平台无关可跑） | 待摘取 |
+| 2 | F2 平台资源账本 | pick/platform-layer | 移植自 40bb02e..`d392007`，落为上游基线 2 commits：`7cc392a`（platform 包+4 套测试）+ `331c315`（5 导入点装配） | platform/ 全包 7 文件 + test_platform_*.py 4 文件 | manager/gpu_state/health/model_lifecycle/model_discovery（5 处导入点注入） | unit 1894 绿 + integration 118 绿（darwin 原生 + IFF_FORCE_PLATFORM=linux mock 双跑） | 已提交 PR：[InferFabric#2](https://github.com/vincentlau2046/InferFabric/pull/2)（2026-11-18） |
 | 3 | F4 能力包 | pick/capability-packs | 待切 | packs/、pack_handlers.py、jobs.py | handler.py admin 面、chat_handlers（503 闸） | test_packs_*.py（11 文件）+ test_jobs.py | 待摘取 |
-| 4 | F5 模型池 v2 | pick/pool-v2 | 待切 | — | model_pool/*、dashboard model-pools 两件、proxy_manager | 池 CAS/rebuild 相关单测 | 待摘取 |
+| 4 | F5 模型池 v2 | pick/pool-v2 | 待切 | — | model_pool/ 6 文件（A 池v2核心+B 命名v2+C 单飞调用侧+D 结构化传输，~470 行）+ proxy/chat_handlers.py（`_forward_request_ex` 注入 1-2 处）+ dashboard 两件 | 回收 test_pool_prefix_fabric.py + 池 CAS/rebuild 单测；**依赖 PR #1 先合入**（C 调用侧） | 待摘取（制作方案已批，2026-11-18 第二封报备） |
 | 5 | F6 云聚合修复 | pick/cloud-fixes | `3670d40`..`94d5bd7`（2 commits，基线 e453a90） | test_cloud_route_resolution.py、test_cloud_discovery_singleflight.py | cloud_discovery.py、proxy_manager.py、proxy/chat_handlers.py + proxy/handler.py（调用侧各 1-3 行注入） | 单测：unit 1882 绿 ×2 + integration 118 绿（本机验证 2026-11-18） | 已提交 PR：[InferFabric#1](https://github.com/vincentlau2046/InferFabric/pull/1)（2026-11-18） |
 
 > **F6 制作记录**（inferfabric-pr session）：
@@ -59,21 +59,34 @@
 | 6 | F7 安全门禁 | pick/security-fixes | 待切 | — | security/*、db.py、handler.py security 面 | test_admin_auth.py | 待摘取 |
 >
 > **F2 制作注记**（主 session）：范围已扩展至 `d392007`——终审 Important-1 修复落在 procguard.py（launchctl/systemctl 返回码校验 + systemd enable --now + guard_for_profile 强制显式 label，防覆写生产 plist）。**摘取必须包含该修复**，否则上游拿到的是 fail-silent 版 install。
-| 7 | F8 守护与隔离 | （随 2 platform-layer） | — | procguard.py | scripts/gateway-launchd.sh（上游为 systemd 等价物） | test_platform_vram_procguard_engines.py | 待摘取 |
+>
+> **F2 制作注记**（inferfabric-pr session，2026-11-18）：
+> ① procguard fail-visible 修复（d392007）已包含 ✓；② env 命名按 §1 P 类既定原则上游化：`MACFABRIC_FORCE_PLATFORM→IFF_FORCE_PLATFORM`、`MACFABRIC_RESERVE_MB→IFF_RESERVE_MB`、`MACFABRIC_STATE_DIR→IFF_DATA_DIR`（与上游既有 env 约定对齐），测试同步；**追加（d2636fc，对齐 fork 7bbf3c4）**：detect/probe 已加 IFF_* 优先 + MACFABRIC_* 回落双读别名，两边 platform 文件除别名行外逐字一致，后续 pick 零重命名噪音——fork 侧 `_policy_reserve_mb` 仍单读 MACFABRIC_STATE_DIR，建议 fork 补对称别名行后两边完全一致；③ **未随带**：mac_platform/memory_ledger shim 两文件及其 3 个 shim 兼容用例（上游无 shim）；llama_cpp 停进程即睡眠语义（改 Linux 可见行为，留 fork 待议）；model_discovery 额外 scan_bases 与根级散置 GGUF 扫描（Mac 目录习惯，M 类）；④ TestDeployEngineAdoption 补平台钉定（probe.IS_MACOS→False），VRAM 守卫用例在统一内存机器确定性可跑（C2 纪律补强，已入 PR）。
+| 7 | F8 守护与隔离 | （随 2 platform-layer） | 已随 PR #2 `7cc392a` 带入（procguard fail-visible 版） | procguard.py | —（launchd/systemd 脚本上游等价物未带，fork 的 gateway-launchd.sh 留 M 类） | test_platform_vram_procguard_engines.py（随 PR #2） | 已提交 PR：随 [InferFabric#2](https://github.com/vincentlau2046/InferFabric/pull/2) |
 | 8 | F9 Dashboard 新页 | pick/dashboard-pages | 未实施 | M2 产出 packs/security/connect 三 fragment | dashboard/__init__.py 注册点 | M2 验收 | 未实施 |
 | 9 | F10 Connect 托管 | pick/connect-clients | 未实施 | M3 产出 platform/clients.py | dashboard 注册点 | M3 验收 | 未实施 |
-| 10 | F3 引擎矩阵 | （随 2 platform-layer） | — | engines.py | — | 同 2 | 待摘取 |
+| 10 | F3 引擎矩阵 | （随 2 platform-layer） | 已随 PR #2 `7cc392a` 带入 | engines.py | — | 同 2 | 已提交 PR：随 [InferFabric#2](https://github.com/vincentlau2046/InferFabric/pull/2) |
 
 ## 3. 摘取纪律（重申）
 
 - 新功能进新文件；触碰上游文件的 diff 必须是注入点级别。
-- 每条目附验收测试，要求在上游平台（含 CUDA 机）可跑；平台探测用 `MACFABRIC_FORCE_PLATFORM` mock。
+- 每条目附验收测试，要求在上游平台（含 CUDA 机）可跑；平台探测 mock env 上游化为 `IFF_FORCE_PLATFORM`（F2 制作时已改名，fork 侧仍为 MACFABRIC_FORCE_PLATFORM）。
 - pick 分支基于 `e453a90` 切出，上游前进由上游责任人 rebase。
 
 ## 4. D23 部署隔离范式条目（用户裁决 2026-11-18：坚持并上游推广）
 
 | # | 特性域 | pick 分支 | commit 范围 | 新增文件 | 触碰上游文件 | 验收测试 | 状态 |
 |---|---|---|---|---|---|---|---|
-| 11 | F3 部署隔离范式（推 x86+NVIDIA） | pick/deploy-isolation | 待切 | packs/runtime_prep.py、packs/sandbox.py、packs/uninstaller.py、packs/supervisor.py、docs/ISOLATION.md | process_manager/base.py（python_bin 注入、引擎引用计数 `_collect_engine_refs`）、config.py | test_packs_sandbox.py、test_packs_runtime_prep.py、test_packs_installer.py（平台无关） | 未实施（先与上游对齐 x86 表达形态） |
+| 11 | F3 部署隔离范式（推 x86+NVIDIA） | pick/deploy-isolation | 待切 | packs/runtime_prep.py、packs/sandbox.py、packs/uninstaller.py、packs/supervisor.py、docs/ISOLATION.md | process_manager/base.py（python_bin 注入、引擎引用计数 `_collect_engine_refs`）、config.py | test_packs_sandbox.py、test_packs_runtime_prep.py、test_packs_installer.py（平台无关） | 审计已上报上游：[InferFabric#3](https://github.com/vincentlau2046/InferFabric/issues/3)（5 问打包单 issue，2026-11-18）；PR #2 描述已附链接；等上游对齐形态后切分支 |
 
 **范式原则（用户原话裁决）**：部署不得影响系统环境；整体卸载/安装必须方便（一键化、容器化拆除）。Mac 侧表达 = 用户态自包含（engines/ 独立二进制 + venv + `python_bin` 显式）；**x86+NVIDIA 侧不是照搬 Mac 路径，而是同一原则的本地表达**——上游既有 Docker（ninfer/sglang）与 conda env 路径需审计：容器/venv 是否项目内自包含、卸载是否引用计数拆除、有无系统级残留（conda 全局、系统 site-packages、/usr/local 二进制）。产出物 = 适配方案 + 对应 pick 分支，先在 PR #1 讨论区或单独 issue 与上游对齐形态再动手。
+
+## 5. F5 分桶裁决新增条目（2026-11-18 第二封报备，8 桶全量分类后）
+
+| # | 特性域 | pick 分支 | 内容 | 状态 |
+|---|---|---|---|---|
+| 12 | 池观测/摘要（E 桶 ~257 行，bdd6e4b） | pick/pool-summary-observability | 纯增量观测体系，单立；**判据=剥离后测试是否自洽**，若剥离致 A/D 语义不完整需改随 F5 带上，须先报主 session 批准 | 待制作 |
+| 13 | 跨池唯一校验移除（H 桶 -24 行） | （待议） | 行为放宽变更，单立"行为变更待议"，不进纯修复批次 | 待议 |
+| 14 | 慢模型容忍默认值（G 桶 ~12 行，117e4d9） | （待议） | 行为默认值变更，单立"行为变更待议"，与 floor 兜底同性质 | 待议 |
+
+> **F5 分桶记录**：D 桶（结构化传输 e48401a）随 F5 带上——A 核心构建在其 `_forward_request_ex` suppress 模式之上，拆开不自洽，且 D 本身是传输正确性修复（裁决①，2026-11-18）；F 桶（purge_candidates 联动）归 D23 条目域（依赖 F6 已撤出的 excluded_models 语义，留 fork 待议）。
