@@ -128,8 +128,13 @@ def mem_used_mb() -> int | None:
 # ─── 预算 B（内存账本地基）─────────────────────────────────────
 
 def _reserve_mb() -> int:
-    """保留值优先级：env > packs policy > 默认 8192。"""
-    env = os.environ.get("MACFABRIC_RESERVE_MB", "").strip()
+    """保留值优先级：env > packs policy > 默认 8192。
+
+    env 双读：IFF_RESERVE_MB（上游名，PR#2 起两边文本一致）优先，
+    MACFABRIC_RESERVE_MB 为 fork 兼容别名。
+    """
+    env = (os.environ.get("IFF_RESERVE_MB")
+           or os.environ.get("MACFABRIC_RESERVE_MB", "")).strip()
     reserve = None
     if env:
         try:

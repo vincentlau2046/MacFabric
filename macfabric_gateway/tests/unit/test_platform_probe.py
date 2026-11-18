@@ -76,3 +76,17 @@ def test_shim_warns_deprecation():
         capture_output=True, text=True,
     )
     assert out.returncode != 0 and "deprecated" in (out.stderr or "").lower()
+
+
+def test_iff_env_alias_read(monkeypatch, tmp_path):
+    """Upstream renamed env vars to IFF_* (PR#2). Fork reads both: IFF_*
+    first, MACFABRIC_* fallback — keeps fork/upstream platform files
+    textually identical except alias lines (cherry-pick discipline)."""
+    monkeypatch.setattr(probe, "mem_total_mb", lambda: 32768)
+    monkeypatch.delenv("MACFABRIC_RESERVE_MB", raising=False)
+    monkeypatch.setenv("MACFABRIC_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("IFF_RESERVE_MB", "4096")
+    assert probe.budget_mb() == 32768 - 4096
+    monkeypatch.setenv("IFF_FORCE_PLATFORM", "linux")
+    from inferfabric.platform import detect
+    assert detect().os == "linux"
