@@ -1,0 +1,66 @@
+# CHERRY-PICK-MANIFEST — MacFabric → InferFabric 上游摘取清单
+
+> 基线：vendor/InferFabric HEAD `e453a90`（D20 审计基线）。上游前进时由上游责任人 rebase。
+> 对账状态：`待摘取` / `已提交 PR` / `已合入` / `被退回`。维护人：peer session `inferfabric-pr`。
+> 分类（D20）：**A=通用修复**（可直接摘）· **P=平台相关**（并入 platform/ 层后摘）· **M=Mac 专属**（留 fork，不摘）。
+
+## 1. 34 个演进文件三级归类（D20 diff 审计，2026-11-18）
+
+### A 类 — 通用修复/增强，可摘（逐条出 pick 分支）
+
+| 文件 | 内容摘要 | 归属批次 |
+|---|---|---|
+| proxy/forwarder.py | usage 双 chunk 取 max；/admin CORS 收紧；Anthropic base 路径双约定拼接 | B1 |
+| proxy/sse_buffer.py | 流式缓冲修复 | B1 |
+| proxy/request_logger.py | 日志字段补全 | B1 |
+| ratelimit.py | 限流修复 | B1 |
+| telemetry.py | 指标口径修复 | B1 |
+| request_log_db.py | key_name/metadata 字段 + route 兜底（NOT NULL 防静默丢弃） | B1 |
+| db.py | 同上 schema 演进 | B1 |
+| tune.py / proxy/async_server.py / __init__.py | 版本与路由注册零碎修正 | B1 |
+| cloud_discovery.py | 斜杠模型精确解析；floor 兜底补注册前缀键；全名优先路由 | B2 |
+| proxy_manager.py | 云发现单飞（单锁单线程）；fabric-* 池命名 | B2 |
+| model_pool/dispatch.py + pool_forward.py + config.py + registry.py + catalog.py + __init__.py | 池 v2：priority=index*10 全量重建、CAS 回写、409 重试、selector 证据编译期推导（accept_declared 默认 true） | B2 |
+| dashboard/fragments/model-pools.html + js/model-pools.js | 池 v2 控制面对应 UI | B2 |
+| security/auth_facade.py + security/admin.py | 鉴权 facade 与 admin 修正（marker/db 缺失不 crashloop） | B3 |
+| model_discovery.py | 端口分配泛化 + 探测委托（**P 成分**：探测调用已改 platform.probe，摘取时随 platform 层先行） | B3(P) |
+
+### P 类 — 平台相关（并入 platform/ 层，随 platform 分支整体摘）
+
+| 文件 | 内容 |
+|---|---|
+| platform/（新增包，本工作区 M1 产物） | ResourceLedger 接口 + umem/vram 双后端 + probe + procguard + engines + detect |
+| manager.py | `_admit_memory` 账本准入闸（G1）；已改从 platform 导入 |
+| gpu_state.py / health.py / model_lifecycle.py | 端口 PID 委托 probe；macOS 跳过 GPU 准入闸 |
+| process_manager/base.py + llama_cpp.py + tts.py + asr.py | `python_bin` 显式路径；lsof 停止路径；Metal 二进制配置化 |
+| config.py | `MACFABRIC_STATE_DIR`/`MACFABRIC_MODELS_DIR` 解耦（机制通用，命名可上游化改 IFF_*） |
+| memory_ledger.py + mac_platform.py | 迁移期 shim（摘取时可不带，上游直接用 platform/） |
+
+### M 类 — Mac 专属，留 fork（不上游）
+
+| 文件 | 内容 |
+|---|---|
+| proxy/chat_handlers.py（packs 部分） | pack 卸载 503 闸（依赖 packs 体系；上游若要 packs 则随 B4 整体摘） |
+| proxy/pack_handlers.py + packs/ + jobs.py + proxy/handler.py（admin 扩展大头） | 能力包体系 + jobs + admin 端面（**B4 候选**：以新文件为主可摘性好，是否上游化由上游责任人裁决） |
+| proxy/anthropic_bridge.py + anthropic_translate.py + responses_bridge.py | 协议桥三件套（**B5 候选**：翻译层上游同样适用，金标录制件已备） |
+
+## 2. 首批摘取条目（F1–F10 粒度）
+
+| # | 特性域 | pick 分支 | commit 范围 | 新增文件 | 触碰上游文件 | 验收测试 | 状态 |
+|---|---|---|---|---|---|---|---|
+| 1 | F1 三协议入口 | pick/protocol-bridges | 待切 | anthropic_translate.py、anthropic_bridge.py、responses_bridge.py | chat_handlers/handler（装配点） | tests/unit/test_anthropic_translate.py + golden 录制件 | 待摘取 |
+| 2 | F2 平台资源账本 | pick/platform-layer | 40bb02e..001b073 | platform/ 全包 | manager/gpu_state/health/model_lifecycle/model_discovery（5 处导入点） | test_platform_*.py（4 文件，全部平台无关可跑） | 待摘取 |
+| 3 | F4 能力包 | pick/capability-packs | 待切 | packs/、pack_handlers.py、jobs.py | handler.py admin 面、chat_handlers（503 闸） | test_packs_*.py（11 文件）+ test_jobs.py | 待摘取 |
+| 4 | F5 模型池 v2 | pick/pool-v2 | 待切 | — | model_pool/*、dashboard model-pools 两件、proxy_manager | 池 CAS/rebuild 相关单测 | 待摘取 |
+| 5 | F6 云聚合修复 | pick/cloud-fixes | 待切 | — | cloud_discovery.py、proxy_manager、forwarder | test_cloud_discovery_singleflight.py 等 | 待摘取 |
+| 6 | F7 安全门禁 | pick/security-fixes | 待切 | — | security/*、db.py、handler.py security 面 | test_admin_auth.py | 待摘取 |
+| 7 | F8 守护与隔离 | （随 2 platform-layer） | — | procguard.py | scripts/gateway-launchd.sh（上游为 systemd 等价物） | test_platform_vram_procguard_engines.py | 待摘取 |
+| 8 | F9 Dashboard 新页 | pick/dashboard-pages | 未实施 | M2 产出 packs/security/connect 三 fragment | dashboard/__init__.py 注册点 | M2 验收 | 未实施 |
+| 9 | F10 Connect 托管 | pick/connect-clients | 未实施 | M3 产出 platform/clients.py | dashboard 注册点 | M3 验收 | 未实施 |
+| 10 | F3 引擎矩阵 | （随 2 platform-layer） | — | engines.py | — | 同 2 | 待摘取 |
+
+## 3. 摘取纪律（重申）
+
+- 新功能进新文件；触碰上游文件的 diff 必须是注入点级别。
+- 每条目附验收测试，要求在上游平台（含 CUDA 机）可跑；平台探测用 `MACFABRIC_FORCE_PLATFORM` mock。
+- pick 分支基于 `e453a90` 切出，上游前进由上游责任人 rebase。
