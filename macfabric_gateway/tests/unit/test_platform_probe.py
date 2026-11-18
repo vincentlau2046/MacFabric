@@ -90,3 +90,15 @@ def test_iff_env_alias_read(monkeypatch, tmp_path):
     monkeypatch.setenv("IFF_FORCE_PLATFORM", "linux")
     from inferfabric.platform import detect
     assert detect().os == "linux"
+
+
+def test_policy_reserve_reads_iff_data_dir_first(monkeypatch, tmp_path):
+    """Symmetric with upstream PR#2 (d2636fc): policy path resolves
+    IFF_DATA_DIR first, MACFABRIC_STATE_DIR fallback."""
+    import json
+    (tmp_path / "packs").mkdir()
+    (tmp_path / "packs" / "policy.json").write_text(
+        json.dumps({"system_reserved_memory_mb": 2048}))
+    monkeypatch.delenv("MACFABRIC_STATE_DIR", raising=False)
+    monkeypatch.setenv("IFF_DATA_DIR", str(tmp_path))
+    assert probe._policy_reserve_mb() == 2048

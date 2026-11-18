@@ -32,9 +32,9 @@ def _policy_reserve_mb():
     直接读 JSON 不 import packs（避免 packs→config→本模块 环）；
     缺失/损坏/非法一律 None 回退默认，绝不抛异常（本模块纪律）。
     """
-    state_dir = os.environ.get(
-        "MACFABRIC_STATE_DIR",
-        os.path.join(os.path.expanduser("~"), ".inferfabric"))
+    state_dir = (os.environ.get("IFF_DATA_DIR")
+                 or os.environ.get("MACFABRIC_STATE_DIR")
+                 or os.path.join(os.path.expanduser("~"), ".inferfabric"))
     path = os.path.join(state_dir, "packs", "policy.json")
     try:
         with open(path, encoding="utf-8") as f:
