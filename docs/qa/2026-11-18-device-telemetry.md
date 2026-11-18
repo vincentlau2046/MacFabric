@@ -63,3 +63,22 @@ Task 6 计划中的真实浏览器空态/零值渲染检查留待有浏览器环
 legacy `gpu_used_mb`/`gpu_total_mb` shim、`gpu_power_samples` 兼容视图、`/api/power`
 legacy 流：**上游合入 + 一个发布周期**后移除；回滚 v011 需迁移前 SQLite 备份
 （`sqlite3 .backup`，禁止拷贝活 WAL 文件）或单独验证过的降级脚本。
+
+## 5. 生产合入（gateway-v7.11.0，用户授权 2026-11-18）
+
+| 步骤 | 证据 |
+|---|---|
+| 部署前备份 | `~/.inferfabric/backups/request_log-pre-v011-20261118-215116.db`（SQLite backup API，user_version=10，legacy 表 0 行） |
+| 主线合版 | feat/device-telemetry FF-merge → main `2574b3b`，tag `gateway-v7.11.0`（双远端已推） |
+| 安装 | `scripts/release-install.sh gateway-v7.11.0`（codeload 取包 → 原子换板 → 冒烟 import OK）；旧版保留 `prod.old`，plist 备份 `.bak-20261118-215216` |
+| 迁移生效 | 生产 request_log.db `user_version=11`；`device_power_samples` 表 + `gpu_power_samples` 兼容视图在位 |
+| /health | ok, gpu_mode=idle |
+| /api/device_metrics | darwin/apple_silicon/unified：20095/36864 MiB，budget 28672，util/power/temp=null |
+| /status | gpu_used_mb=20047, gpu_total_mb=28672（预算映射），device 信封在位 |
+| /api/snapshot | device 与 system.device 同一时间戳 |
+| 协议 | /v1/models 200；/v1/messages 无 key 401（正确拒绝） |
+| 功耗端点 | /api/power 与 /api/device_power 均 available=false（新流无样本，预期） |
+| Dashboard | 200（1.47MB），内含 memory_kind/统一内存/device_power 新逻辑 |
+
+**回滚程序**：`mv prod prod.broken && mv prod.old prod` + `cp plist.bak-20261118-215216 plist` +
+`launchctl kickstart -k gui/$(id -u)/com.macfabric.gateway`；数据库回滚用迁移前备份恢复 request_log.db。
