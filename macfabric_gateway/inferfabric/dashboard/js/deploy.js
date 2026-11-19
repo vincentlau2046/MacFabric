@@ -213,7 +213,9 @@
       var busy = _inflight[name] ? ' disabled' : '';
       var btn = '<button type="button" class="btn btn-sec btn-sm" data-action="autostart-toggle"' +
         ' data-model="' + escHtml(name) + '" data-cur="' + (on ? '1' : '0') + '"' + busy + '>' +
-        (on ? '关闭自启动' : '开启自启动') + '</button>';
+        (on ? '关闭自启动' : '开启自启动') + '</button>' +
+        ' <button type="button" class="btn btn-danger btn-sm" data-action="model-remove"' +
+        ' data-model="' + escHtml(name) + '"' + busy + '>移除</button>';
       return '<tr><td class="mono">' + escHtml(name) + '</td><td>' + badge + '</td><td>' + btn + '</td></tr>';
     }).join('');
     el.innerHTML = '<table class="if-table"><thead><tr><th>模型</th><th>自启动</th><th>操作</th></tr></thead>' +
@@ -289,6 +291,213 @@
     renderAutostartHint();
   });
 
+  /* ── 模型移除（iff remove 入口，上游 issue #8 item 1）──
+   * 三段式确认：预览（无 confirmed，零副作用）→ 报告展示（blocked 时给
+   * purge 选项，勾选后必须「重新预览」二次预览）→ confirmed:true 执行。
+   * 预览与执行各调一次 POST（服务端重算，不缓存预览报告）；
+   * 执行 409（预览后池引用变化）→ 用响应报告回预览重走，不自动重试。 */
+  var _remove = null;   // { name, report, purge, busy }
+
+  function _fetchAdmin(url, opts, cb) {
+    opts = opts || {};
+    opts.headers = UI.adminHeaders();
+    if (opts.body && typeof opts.body !== 'string') opts.body = JSON.stringify(opts.body);
+    fetch(url, opts).then(function (res) {
+      var unauthorized = res.status === 401;
+      res.json().then(function (j) {
+        if (unauthorized) {
+          UI.toast('401：需要 admin token — 请在右上角输入后重试', 'error');
+          cb({ unauthorized: true, message: (j && j.error) || 'unauthorized' }, j, res.status);
+        } else {
+          cb(null, j, res.status);
+        }
+      }, function () {
+        cb({ message: 'HTTP ' + res.status + '（非 JSON 响应）' }, null, res.status);
+      });
+    }, function (e) {
+      cb({ message: '网络错误：' + e.message });
+    });
+  }
+
+  var REMOVE_URL = '/admin/models/remove';
+
+  function openRemoveModal(name) {
+    if (_remove && _remove.busy) return;
+    _fetchAdmin(REMOVE_URL, { method: 'POST', body: { name: name } }, function (err, j) {
+      if (err) {
+        if (!err.unauthorized) UI.toast('移除预览失败：' + err.message, 'error');
+        return;   // 401 已由 _fetchAdmin 统一提示
+      }
+      _remove = { name: name, report: j || {}, purge: false, busy: false, error: null };
+      renderRemoveModal();
+    });
+  }
+
+  function closeRemoveModal() {
+    if (!_remove) return;
+    document.removeEventListener('keydown', _remove.onKey);
+    var holder = document.getElementById('depRemoveModal');
+    if (holder) { holder.style.display = 'none'; holder.innerHTML = ''; }
+    _remove = null;
+  }
+
+  /* running 三值：预览报告的 would-stop.running（true/false/"unknown"）；
+   * 无停止动作且显式 skipped → 未运行；其余缺省 → 状态未知。 */
+  function removeRunningState(report) {
+    var actions = report.actions || [];
+    for (var i = 0; i < actions.length; i++) {
+      var a = actions[i];
+      if (a.action === 'would-stop') {
+        if (a.running === true) return { badge: '运行中', hint: '执行时将先停止服务' };
+        if (a.running === false) return { badge: '未运行', hint: '' };
+        return { badge: '状态未知', hint: '执行时将尝试停止' };
+      }
+      if (a.action === 'stop' && a.status === 'skipped') {
+        return { badge: '未运行', hint: '' };
+      }
+    }
+    return { badge: '状态未知', hint: '执行时将尝试停止' };
+  }
+
+  function removeListBlock(title, items) {
+    if (!items || !items.length) return '';
+    return '<p class="if-field-label">' + title + '</p><ul class="if-field-hint">' +
+      items.map(function (p) { return '<li class="mono">' + escHtml(p) + '</li>'; }).join('') +
+      '</ul>';
+  }
+
+  function renderRemoveModal() {
+    if (!_remove) return;
+    var st = _remove;              // body 构建即引用（error 态），须先于 innerHTML
+    var r = _remove.report || {};
+    var name = _remove.name;
+    var holder = document.getElementById('depRemoveModal');
+    if (!holder) {
+      holder = document.createElement('div');
+      holder.id = 'depRemoveModal';
+      document.body.appendChild(holder);
+    }
+    var running = removeRunningState(r);
+    var poolRefs = r.pool_refs || [];
+    var blocked = r.status === 'blocked';
+    var scenario = r.scenario_refs || [];
+    var scenarioFiles = scenario.map(function (s) {
+      return (s.file || s.path || '?') + (s.preset ? ' · ' + s.preset : '');
+    });
+    var body = '';
+    if (r.status === 'error') {
+      body = '<p class="if-field-hint" style="color:var(--crit)">' + escHtml(r.message || '预览失败') + '</p>';
+    } else {
+      body =
+        '<p>服务状态：<span class="badge ' + (running.badge === '运行中' ? 'warn' : '') + '">' +
+          escHtml(running.badge) + '</span>' +
+        (running.hint ? ' <span class="if-field-hint">' + escHtml(running.hint) + '</span>' : '') + '</p>' +
+        (blocked
+          ? '<p style="color:var(--crit)">该模型被模型池候选引用，默认阻止移除：</p>' +
+            removeListBlock('引用该模型的池候选', poolRefs.map(function (p) {
+              return (p.pool || '?') + ' ← ' + (p.model_name || p.id || '?');
+            }))
+          : '') +
+        (_remove.purge && (r.actions || []).some(function (a) {
+          return a.action === 'would-purge-pool-candidates';
+        }) ? '<p class="if-field-hint">二次预览：将同时清除以上池候选引用（执行时以服务端重新计算为准）。</p>' : '') +
+        removeListBlock('以下权重文件不会被删除（工具永不删权重）：', r.weights_kept) +
+        (scenario.length
+          ? removeListBlock('移除后遗留的场景侧车条目（加载时被忽略）：', scenarioFiles)
+          : '') +
+        (blocked
+          ? '<label class="cpm-cap"><input type="checkbox" id="depRemovePurge"' +
+            (_remove.purge ? ' checked' : '') + '> 同时清除以上池候选引用（purge_pools）</label>' +
+            '<p class="if-field-hint">勾选后需「重新预览」确认副作用，才能执行移除。</p>'
+          : '') +
+        '<p class="if-field-hint">最终引用与状态以服务端执行时重新计算为准。</p>' +
+        (st.error
+          ? '<p class="if-field-hint" id="depRemoveErr" style="color:var(--crit)">' +
+            escHtml(st.error) + '</p>'
+          : '<p class="if-field-hint" id="depRemoveErr" style="display:none"></p>');
+    }
+    var canConfirm = r.status === 'would-remove';
+    holder.innerHTML =
+      '<div class="if-modal-backdrop">' +
+        '<div class="if-modal" role="dialog" aria-modal="true" aria-label="移除模型">' +
+          '<div class="if-modal-title" style="color:var(--crit)">移除模型 — ' + escHtml(name) + '</div>' +
+          '<div class="if-modal-body">' + body + '</div>' +
+          '<div class="if-modal-actions">' +
+            '<button type="button" class="btn btn-sec" data-act="remove-cancel">取消</button>' +
+            (blocked
+              ? '<button type="button" class="btn btn-sec" data-act="remove-repreview"' +
+                (_remove.purge ? '' : ' disabled') + '>重新预览</button>'
+              : '') +
+            '<button type="button" class="btn btn-danger" data-act="remove-confirm"' +
+              (_remove.busy || !canConfirm ? ' disabled' : '') + '>确认移除</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    holder.style.display = '';
+    if (st.onKey) document.removeEventListener('keydown', st.onKey);   // 重渲染不累积
+    st.onKey = function (e) { if (e.key === 'Escape') closeRemoveModal(); };
+    document.addEventListener('keydown', st.onKey);
+    var backdrop = holder.querySelector('.if-modal-backdrop');
+    backdrop.addEventListener('click', function (ev) {
+      var act = ev.target.getAttribute && ev.target.getAttribute('data-act');
+      if (act === 'remove-cancel' || ev.target === backdrop) { closeRemoveModal(); return; }
+      if (act === 'remove-repreview') {
+        // 二次预览：单独一次 POST（服务端重算），不缓存第一次的报告
+        st.busy = true; st.error = null; renderRemoveModal();
+        _fetchAdmin(REMOVE_URL, { method: 'POST', body: { name: st.name, purge_pools: !!st.purge } },
+          function (err, j) {
+            st.busy = false;
+            if (err) {
+              if (!err.unauthorized) UI.toast('移除预览失败：' + err.message, 'error');
+              renderRemoveModal();
+              return;
+            }
+            st.report = j || {};
+            renderRemoveModal();
+          });
+        return;
+      }
+      if (act === 'remove-confirm') {
+        st.busy = true; st.error = null; renderRemoveModal();
+        var bodyReq = { name: st.name, confirmed: true };
+        if (st.purge) bodyReq.purge_pools = true;
+        _fetchAdmin(REMOVE_URL, { method: 'POST', body: bodyReq }, function (err, j, code) {
+          st.busy = false;
+          if (err) {
+            if (!err.unauthorized) UI.toast('移除失败：' + err.message, 'error');
+            renderRemoveModal();
+            return;
+          }
+          if (code === 409 && j && j.status === 'blocked') {
+            // 预览后池引用变化的竞态：回预览重走，不自动重试
+            st.report = j;
+            UI.toast('执行时发现新的池候选引用，已回到预览 — 请重新确认', 'error');
+            renderRemoveModal();
+            return;
+          }
+          if (j && j.status === 'removed') {
+            closeRemoveModal();
+            UI.toast(name + ' 已移除（权重保留在原位置）', 'ok');
+            store.forceRefresh();
+            return;
+          }
+          // 400/500 执行失败：弹窗内联报错（走状态重渲染，保留上下文），不关窗
+          var msg = (j && (j.error || j.message)) || ('HTTP ' + code);
+          st.error = '移除失败：' + msg;
+          renderRemoveModal();
+        });
+        return;
+      }
+    });
+    var purgeCb = holder.querySelector('#depRemovePurge');
+    if (purgeCb) {
+      purgeCb.addEventListener('change', function () {
+        st.purge = purgeCb.checked;
+        renderRemoveModal();   // 勾选变化 → 回到待二次预览态（确认键保持禁用）
+      });
+    }
+  }
+
   /* ── 渲染入口 ──
    *   部署/拉取表单为静态（无 snapshot 数据依赖）；进度卡由 doDeploy/doPull 显隐。 */
   function renderDeploy() {
@@ -320,6 +529,7 @@
         return;
       }
       if (act === 'autostart-goto-inference') { store.switchTab('tab-inference'); return; }
+      if (act === 'model-remove') { openRemoveModal(btn.getAttribute('data-model')); return; }
     });
   }
 })();
