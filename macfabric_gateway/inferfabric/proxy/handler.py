@@ -487,6 +487,7 @@ _POST_ROUTES = {
     "/admin/packs/install":    _admin(lambda h, pm: h._handle_pack_install(pm)),
     "/admin/packs/custom":     _admin(lambda h, pm: h._handle_pack_custom(pm)),
     "/admin/models/set-autostart": _admin(lambda h, pm: h._handle_set_autostart(pm)),
+    "/admin/models/remove":        _admin(lambda h, pm: h._handle_models_remove(pm)),
     "/admin/packs/download":        _admin(lambda h, pm: h._handle_pack_download(pm)),
     "/admin/packs/policy":          _admin(lambda h, pm: h._handle_pack_policy_post(pm)),
 
@@ -2039,6 +2040,58 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                          "removed_model_files": removed_files,
                          "removed_engine_dir": removed_engine,
                          "pool_candidates_purged": purged})
+
+    def _handle_models_remove(self, pm):
+        """POST /admin/models/remove {name, confirmed?, purge_pools?} — iff remove
+        model 入口（上游 issue #8 item 1）。预览与执行各调一次 remove_model
+        （服务端重算，绝不缓存预览报告）。请求名先经 find_model 解析（支持
+        served-name；404 判定不依赖 message 措辞），stop_fn/is_running_fn 捕获
+        解析后的 config 名。预览态永远 200（would-remove/blocked/error 由 body
+        区分）；执行态：removed→200+热重载，blocked（预览后池引用变化的竞态）
+        →409 回预览重走，unknown model→404，PoolsConfigError→400，其余执行
+        失败→500 带报告。权重永不删除（只报告 weights_kept）。"""
+        data = self._read_body()
+        name = ((data or {}).get("name") or "").strip()
+        if not name:
+            self._send_json({"error": "missing 'name'"}, 400)
+            return
+        confirmed = bool((data or {}).get("confirmed", False))
+        purge_pools = bool((data or {}).get("purge_pools", False))
+        from inferfabric.config import IFF_DATA_DIR, MODELS_DIR
+        from inferfabric import uninstaller as un
+        mgr = pm.mgr
+        # 预解析（find_model 很便宜，一次两用）：404 判定不依赖 message 措辞；
+        # stop_fn/is_running_fn 捕获解析后的 config 名（served-name 请求等价）。
+        resolved, _cfg = un.find_model(mgr._models, name)
+        if _cfg is None:
+            msg = f"unknown model: {name!r}"
+            if confirmed:
+                self._send_json({"error": msg}, 404)
+            else:
+                self._send_json({"status": "error", "message": msg})
+            return
+        try:
+            report = un.remove_model(
+                resolved, models=mgr._models, models_dir=MODELS_DIR,
+                pools_path=IFF_DATA_DIR / "model_pools.yaml",
+                applied_scenarios_path=IFF_DATA_DIR / "active_scenarios.yaml",
+                stop_fn=(lambda: mgr.stop_service(resolved)),
+                is_running_fn=(lambda: resolved in mgr.active_services),
+                purge_pools=purge_pools, dry_run=not confirmed)
+        except un.PoolsConfigError as e:
+            self._send_json({"error": f"pool config gate (fail-closed): {e}"}, 400)
+            return
+        status = report.get("status")
+        if confirmed:
+            if status == "removed":
+                mgr.reload_models()
+            elif status in ("error", "blocked"):
+                code = 409 if status == "blocked" else 500
+                self._send_json(report, code)
+                return
+        log.info("models/remove %s confirmed=%s purge_pools=%s -> %s",
+                 name, confirmed, purge_pools, status)
+        self._send_json(report)
 
     def _handle_set_autostart(self, pm):
         """POST /admin/models/set-autostart {name, enabled} — 改 models.d YAML

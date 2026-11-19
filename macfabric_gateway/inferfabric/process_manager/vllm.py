@@ -23,6 +23,7 @@ from inferfabric.config import (
     ConfigError,
 )
 from inferfabric.health import wait_http, check_http_status
+from inferfabric.image_manager import ensure_image_pulled
 from inferfabric.process_manager.base import BaseProcessManager
 
 
@@ -159,6 +160,16 @@ class VLLMProcessManager(BaseProcessManager):
 
         cmd = cfg.build_docker_cmd(container_name)
         env = os.environ.copy()
+
+        # issue #3 L3b: 显式拉取 + 管理台账；issue #8-③（选项 2′）：
+        # 拉取失败即中止启动——不再让 docker run 无超时地隐式重拉
+        # （30GB 级镜像的真实 stall 场景），错误信息含原因与重试指引。
+        pull = ensure_image_pulled(cfg.docker_image)
+        if pull.get("status") == "error":
+            return {"status": "error",
+                    "message": (f"image pull failed for {cfg.docker_image}: "
+                                f"{pull.get('detail') or 'docker pull failed'} — "
+                                f"retry the start or run: docker pull {cfg.docker_image}")}
 
         log.info("Starting vLLM container %s: %s", container_name, " ".join(cmd[:8]) + "...")
         with open(log_file, "w") as f:

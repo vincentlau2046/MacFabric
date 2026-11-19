@@ -17,6 +17,9 @@ import dataclasses
 import logging
 import threading
 
+# 管理标签（issue #3 L3b fork 同步）：网关所启容器一律可辨
+from .image_manager import MANAGED_LABEL
+
 log = logging.getLogger("inferfabric")
 
 
@@ -137,13 +140,17 @@ class VLLMConfig:
 
         docker_flags = [
             "docker", "run", "--rm",
+            # 管理标签（issue #3 L3b fork 同步）：网关所启容器一律可辨 →
+            # docker container prune --filter label=… 作用域清理可用
+            "--label", MANAGED_LABEL,
             "--gpus", "all",
             "--ipc=host",
             "--ulimit", "memlock=-1",
             "--ulimit", "stack=67108864",
             "-p", f"{self.port}:{self.port}",
-            "-v", f"{model_path}:{model_path}",
-            "-v", f"{MODEL_BASE}:/models",
+            # 权重目录只读挂载（issue #3 隔离硬化 fork 同步）：容器不得写宿主权重
+            "-v", f"{model_path}:{model_path}:ro",
+            "-v", f"{MODEL_BASE}:/models:ro",
             "-v", f"{Path.home() / '.cache/huggingface'}:/root/.cache/huggingface",
             "--name", container_name,
             "--entrypoint", "vllm",
@@ -243,13 +250,17 @@ class SGLangConfig:
         container_cmd = self.build_cmd()
         docker_flags = [
             "docker", "run", "--rm",
+            # 管理标签（issue #3 L3b fork 同步）：网关所启容器一律可辨 →
+            # docker container prune --filter label=… 作用域清理可用
+            "--label", MANAGED_LABEL,
             "--gpus", "all",
             "--ipc=host",
             "--ulimit", "memlock=-1",
             "--ulimit", "stack=67108864",
             "-p", f"{self.port}:{self.port}",
-            "-v", f"{model_path}:{model_path}",
-            "-v", f"{MODEL_BASE}:/models",
+            # 权重目录只读挂载（issue #3 隔离硬化 fork 同步）：容器不得写宿主权重
+            "-v", f"{model_path}:{model_path}:ro",
+            "-v", f"{MODEL_BASE}:/models:ro",
             "-v", f"{Path.home() / '.cache/huggingface'}:/root/.cache/huggingface",
             "--name", container_name,
         ]
