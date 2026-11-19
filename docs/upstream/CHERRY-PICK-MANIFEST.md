@@ -126,7 +126,7 @@
 >
 > **UI 完成 + 验收发现两个上游缺口 → PR #11**（2026-11-19）：peer UI/Handler 落 `52263c2`（depRemoveModal 三段式；本 session 2 个 handler nit 已修：find_model 预解析 + resolved 捕获；交叉评审 APPROVE）。缺口取证后修上游（**PR #11**，`pick/uninstall-fixes` @ base 2fe7128，评论 7002751017）：① `purge_pool_candidates` 发 PUT 而 server 只路由 POST（无 do_PUT）→ 活 registry purge 必 501——**PR #7 回归**（mock 桩掩盖 method/路由契约错配），修为 POST + 方法钉定测试；② `weight_paths` 漏 llama_cpp `model_path`（显式 GGUF 文件路径），修为同 ninfer.weight_path 报告。上游 unit+integration **2262 绿**（interactive setup 错误 clean main 既有）。
 >
-> **① 弧线收尾**（用户批准后）：分支合入 MacFabric main（no-ff **`ff8a7f1`**，含 QA 文档 `docs/qa/2026-11-19-issue8-remove-entry.md` + fork 侧 purge POST 提前修 **`15718f2`**，PR #11 合入后逐字收敛）；fork 全量 **573 绿** + 真实浏览器验收 33/33。issue #8 item ① fork 侧交付完成；上游侧=PR #11 等评审。
+> **① 弧线收尾**（用户批准后）：分支合入 MacFabric main（no-ff **`ff8a7f1`**，含 QA 文档 `docs/qa/2026-11-19-issue8-remove-entry.md` + fork 侧 purge POST 提前修 **`15718f2`**，PR #11 合入后逐字收敛）；fork 全量 **573 绿** + 真实浏览器验收 33/33。issue #8 item ① fork 侧交付完成；上游侧=PR #11 等评审。 **PR #11 已合并**（APPROVE-WITH-NITS，rebase 为 `b12d1f7`，维护人独立复验 2262 绿 + 全仓无其他 PUT 调用方）；3 个 nits（weight_paths 123 字符行+冗余三元、测试局部名 put_payload、docstring 覆盖边界注记）→ 已开 **PR #12**（`pick/uninstall-nits`，纯 cosmetics，2262 绿，§3.1 评论 7003440682）。fork 侧 ① 的逐字收敛等 PR #12 合并后一次同步。
 
 **范式原则（用户原话裁决）**：部署不得影响系统环境；整体卸载/安装必须方便（一键化、容器化拆除）。Mac 侧表达 = 用户态自包含（engines/ 独立二进制 + venv + `python_bin` 显式）；**x86+NVIDIA 侧不是照搬 Mac 路径，而是同一原则的本地表达**——上游既有 Docker（ninfer/sglang）与 conda env 路径需审计：容器/venv 是否项目内自包含、卸载是否引用计数拆除、有无系统级残留（conda 全局、系统 site-packages、/usr/local 二进制）。产出物 = 适配方案 + 对应 pick 分支，先在 PR #1 讨论区或单独 issue 与上游对齐形态再动手。
 
