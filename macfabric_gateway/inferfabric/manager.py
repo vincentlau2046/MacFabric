@@ -326,14 +326,53 @@ class ModelManager:
                 (mac_platform.budget_mb() - (mac_platform.mem_used_mb() or 0))
                 if mac_platform.mem_used_mb() is not None else None),
         )
-        for name, m in self._models.items():
-            if name == model.name or name not in self.active_services:
-                continue
-            base2 = getattr(m, "mem_baseline_mb", 0) or getattr(m, "peak_vram_mb", 0)
-            e = ledger.register(name, base2, ModeOf(m))
-            e.state = Lifecycle.READY  # 运行中即占内存
+        # 活跃模型登记与观测路径共享（M2-T5 终审：两条路径同一账面口径）
+        self._register_active_ledger_entries(ledger, exclude=model.name)
         e = ledger.register(model.name, baseline, ModeOf(model))
         return ledger.admit(model.name, force=force)
+
+    def _register_active_ledger_entries(self, ledger, exclude=None):
+        """活跃模型登记（准入与观测共享）：只登记 active_services 里的模型，
+        全额基线记账（无折扣）；exclude=准入目标本身（观测路径不排除）。"""
+        from inferfabric.platform.resource import Lifecycle
+        for name, m in self._models.items():
+            if name == exclude or name not in self.active_services:
+                continue
+            base = getattr(m, "mem_baseline_mb", 0) or getattr(m, "peak_vram_mb", 0)
+            e = ledger.register(name, base, ModeOf(m))
+            e.state = Lifecycle.READY  # 运行中即占内存
+        return ledger
+
+    def memory_ledger_snapshot(self, device_snapshot=None):
+        """MACFABRIC G1 — 内存账本只读观测投影（M2-T5 overview 账本卡）。
+
+        与 _admit_memory 共享活跃模型登记逻辑，但观测路径绝不调用准入、
+        不做额外探测：预算/压力直接取调用方已获取的 device_snapshot
+        （同一探针同一时间戳）。非 unified 或无平台快照返回 None；
+        统一内存但采样字段缺失时保留该字段 null，不抹掉可计算的账面占用。
+        committed_mb = 活跃模型基线账面合计 —— 不是进程实测内存，也不是
+        下一模型的可准入额度；sleeping（进程已退出）不在 active_services，
+        本就不入账，故无 25% 睡眠折扣问题。
+        """
+        if device_snapshot is None:
+            return None
+        if getattr(device_snapshot, "memory_kind", None) != "unified":
+            return None
+        from inferfabric.platform.resource_umem import UnifiedMemoryLedger as MemoryLedger
+        ledger = MemoryLedger(budget_mb=0)   # 观测不走 admit — 预算仅透传
+        self._register_active_ledger_entries(ledger)
+        entries = [
+            {"name": e.name, "mem_baseline_mb": int(e.mem_baseline_mb),
+             "mode": e.mode.value if hasattr(e.mode, "value") else str(e.mode)}
+            for e in ledger.entries().values()
+        ]
+        budget = getattr(device_snapshot, "memory_budget_mb", None)
+        return {
+            "budget_mb": int(budget) if budget is not None else None,
+            "committed_mb": sum(e["mem_baseline_mb"] for e in entries),
+            "entries": entries,
+            "pressure_level": getattr(device_snapshot, "pressure_level", None),
+        }
 
     def switch(self, target: str, force: bool = False) -> dict:
         # v5.6.8 debug: log stack trace on every switch to trace mysterious caller

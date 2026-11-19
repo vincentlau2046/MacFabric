@@ -805,10 +805,19 @@ class CloudDiscovery:
                     md = {}
                     if mid:
                         md["model_id"] = mid
-                    if spec.get("price_input"):
+                    # 属性编辑六键完整落盘（M2-T4 回归钉）：数值属性用
+                    # `is not None` 门 —— 0 是合法值（truthy 门曾把 0 价当
+                    # 未设置丢弃）；context_window / max_output_tokens 此前
+                    # 在下方 known 排除集内却从未显式写出 → 属性经 save_config
+                    # 后重启静默蒸发。
+                    if spec.get("price_input") is not None:
                         md["price_input"] = spec["price_input"]
-                    if spec.get("price_output"):
+                    if spec.get("price_output") is not None:
                         md["price_output"] = spec["price_output"]
+                    if spec.get("context_window") is not None:
+                        md["context_window"] = spec["context_window"]
+                    if spec.get("max_output_tokens") is not None:
+                        md["max_output_tokens"] = spec["max_output_tokens"]
                     # L2b: 能力标签显式落盘 —— 此前在 known 排除集里被静默
                     # 丢弃（手写 YAML 标签一经策展操作 save_config 即蒸发）。
                     # 显式 False 也写：关闭标签靠持久化 false，不靠删键。

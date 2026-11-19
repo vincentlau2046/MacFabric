@@ -59,6 +59,23 @@
     </div>
   </div>
 
+  <!-- 自启动（M2-T3）：models[].autostart；写后确认读时序见 deploy.js -->
+  <div class="if-card" id="depAutostartCard">
+    <div class="if-card-hdr">
+      <span class="if-card-title">自启动</span>
+      <span class="if-card-sub">下次网关启动生效 — 即时启停去推理页</span>
+    </div>
+    <div class="if-card-body">
+      <div id="depAutostart">
+        <div class="skeleton"><div class="skeleton-row"></div></div>
+      </div>
+      <p class="if-field-hint" id="depAutostartHint"></p>
+      <div style="margin-top:8px">
+        <button type="button" class="btn btn-sec btn-sm" data-action="autostart-goto-inference">去推理页启停</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 长任务进度态（deploy / pull）—— 由 deploy.js 按需显隐 -->
   <div class="if-card" id="depProgressCard" style="display:none">
     <div class="if-card-hdr">

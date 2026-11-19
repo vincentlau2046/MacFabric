@@ -175,11 +175,124 @@
     });
   };
 
+  /* ── 自启动开关（M2-T3）──
+   * 数据源：snapshot models[].{name,autostart}；POST /admin/models/set-autostart。
+   * 时序契约（Review Focus 3）：
+   *   - 每模型单写在途（_inflight），连点不重复 POST；
+   *   - POST 失败回滚显示快照值并报错；
+   *   - 写成功先按响应值显示，随即无条件发起写后快照（forceRefresh）；
+   *   - 确认读（不早于写后请求的已应用 HTTP 200 快照）到达前显示
+   *     「待回读确认」，轮询不得覆盖（store 序号守卫 + _pending 覆盖显示）；
+   *   - 304 不推进序号、不作确认（store.js）；
+   *   - 受信新快照与写值不同 → 按服务端值显示并提示不一致。 */
+  var _inflight = {};   // model → true
+  var _pending = {};    // model → { value, minSeq }（写后待确认读）
+
+  function escHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function renderAutostart() {
+    var el = $('depAutostart');
+    if (!el) return;
+    var models = store.get('models') || [];
+    if (!models.length) {
+      el.innerHTML = '<p class="if-field-hint">暂无模型。</p>';
+      return;
+    }
+    var rows = models.map(function (m) {
+      var name = m.name || '';
+      var pend = _pending[name];
+      var snapOn = !!m.autostart;
+      var on = pend ? pend.value : snapOn;
+      var badge = pend
+        ? '<span class="badge warn">待回读确认</span>'
+        : (on ? '<span class="badge ok">开</span>' : '<span class="badge">关</span>');
+      var busy = _inflight[name] ? ' disabled' : '';
+      var btn = '<button type="button" class="btn btn-sec btn-sm" data-action="autostart-toggle"' +
+        ' data-model="' + escHtml(name) + '" data-cur="' + (on ? '1' : '0') + '"' + busy + '>' +
+        (on ? '关闭自启动' : '开启自启动') + '</button>';
+      return '<tr><td class="mono">' + escHtml(name) + '</td><td>' + badge + '</td><td>' + btn + '</td></tr>';
+    }).join('');
+    el.innerHTML = '<table class="if-table"><thead><tr><th>模型</th><th>自启动</th><th>操作</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table>';
+  }
+
+  function renderAutostartHint() {
+    var hint = $('depAutostartHint');
+    if (hint) {
+      var names = Object.keys(_pending);
+      hint.textContent = names.length
+        ? '待回读确认：' + names.join('、') + ' — 已下发，等待服务端快照确认（确认前轮询不会覆盖显示）。'
+        : '';
+    }
+  }
+
+  function doAutostartToggle(name, cur) {
+    if (_inflight[name]) return;   // 每模型单写在途
+    var target = !cur;
+    _inflight[name] = true;
+    renderAutostart();
+    fetch('/admin/models/set-autostart', {
+      method: 'POST',
+      headers: UI.adminHeaders(),
+      body: JSON.stringify({ name: name, enabled: target }),
+    }).then(function (res) {
+      return res.json().then(function (j) {
+        delete _inflight[name];
+        if (!res.ok || !j || j.status !== 'ok') {
+          var msg = (j && (j.error || j.message)) || ('HTTP ' + res.status);
+          UI.toast('自启动保存失败：' + msg, 'error');   // 回滚 = 显示快照值
+          renderAutostart();
+          return;
+        }
+        // 写成功：按响应值显示 + 记待确认，再无条件确认读。
+        // 确认读门槛 = 确认读请求自身的发出序号（终审 Important-2）：
+        // 写前在途轮询的序号可能恰为 appliedSeq()+1，若以其为确认读，
+        // 旧值快照会先应用并误报「不一致」— onSeq 在请求发出前同步回调，
+        // 早于任何响应应用。
+        var pend = { value: !!j.autostart, minSeq: Infinity };
+        _pending[name] = pend;
+        renderAutostart();
+        renderAutostartHint();
+        UI.toast(name + ' 自启动已保存（下次网关启动生效）', 'ok');
+        store.forceRefreshEx(true, function (seq) { pend.minSeq = seq; });
+      }, function () {
+        delete _inflight[name];
+        UI.toast('自启动保存失败：HTTP ' + res.status + '（非 JSON 响应）', 'error');
+        renderAutostart();
+      });
+    }, function (e) {
+      delete _inflight[name];
+      UI.toast('自启动保存失败：网络错误 ' + (e && e.message ? e.message : ''), 'error');
+      renderAutostart();
+    });
+  }
+
+  /* 确认读解析：任何已应用快照序号 ≥ minSeq 时结算该模型的待确认 */
+  store.on('snapshot_seq', function (seq) {
+    var models = store.get('models') || [];
+    var byName = {};
+    models.forEach(function (m) { byName[m.name] = m; });
+    Object.keys(_pending).forEach(function (name) {
+      var p = _pending[name];
+      if (seq < p.minSeq) return;   // 写后确认读未到（含 304 — 序号不推进）
+      var snapOn = !!(byName[name] && byName[name].autostart);
+      delete _pending[name];
+      if (snapOn !== p.value) {
+        UI.toast(name + ' 服务端回读与写值不一致，已按服务端显示', 'error');
+      }
+    });
+    renderAutostart();
+    renderAutostartHint();
+  });
+
   /* ── 渲染入口 ──
-   *   部署/拉取表单为静态（无 snapshot 数据依赖）；进度卡由 doDeploy/doPull 显隐。
-   *   渲染器仅作注册占位，保持与其他 TAB 一致的 tabRenderers 契约。 */
+   *   部署/拉取表单为静态（无 snapshot 数据依赖）；进度卡由 doDeploy/doPull 显隐。 */
   function renderDeploy() {
-    // 静态表单无需重绘；保留供 store.tab_active 订阅与未来扩展。
+    renderAutostart();
   }
 
   window.renderDeploy = renderDeploy;
@@ -187,6 +300,9 @@
 
   store.on('tab_active', function (tab) {
     if (tab === 'tab-deploy') renderDeploy();
+  });
+  store.on('models', function () {
+    if (store.get('tab_active') === 'tab-deploy') renderAutostart();
   });
 
   /* ── 事件委托（无 inline onclick） ── */
@@ -198,6 +314,12 @@
       var act = btn.getAttribute('data-action');
       if (act === 'deploy') { window.doDeploy(); return; }
       if (act === 'pull') { window.doPull(); return; }
+      if (act === 'autostart-toggle') {
+        doAutostartToggle(btn.getAttribute('data-model'),
+                          btn.getAttribute('data-cur') === '1');
+        return;
+      }
+      if (act === 'autostart-goto-inference') { store.switchTab('tab-inference'); return; }
     });
   }
 })();
