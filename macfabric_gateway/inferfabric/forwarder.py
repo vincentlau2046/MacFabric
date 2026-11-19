@@ -134,6 +134,11 @@ def send_json(handler, body_d, status=200, extra_headers=None):
         handler.end_headers()
         handler.wfile.write(body)
         handler.wfile.flush()
+        # Connect（F10）单响应守卫用：body 错误响应已发出，路由层不再重发
+        try:
+            handler._responded = True
+        except AttributeError:
+            pass  # 个别假 handler 用 __slots__；守卫层 getattr 默认即 False
     except (BrokenPipeError, ConnectionResetError, OSError):
         pass
 
@@ -150,12 +155,14 @@ def read_body(handler):
         if size == 0:
             return {}
         if size > 100 * 1024 * 1024:  # 100MB limit (matches engine capability)
-            send_json(handler, {"error": "payload too large (max 100MB)"}, 413)
+            send_json(handler, {"error": "payload too large (max 100MB)"}, 413,
+                      extra_headers={"Cache-Control": "no-store"})
             return None
         raw = handler.rfile.read(size)
         return json.loads(raw)
     except (json.JSONDecodeError, ValueError) as e:
-        send_json(handler, {"error": f"Invalid JSON: {e}"}, 400)
+        send_json(handler, {"error": f"Invalid JSON: {e}"}, 400,
+                  extra_headers={"Cache-Control": "no-store"})
         return None
 
 

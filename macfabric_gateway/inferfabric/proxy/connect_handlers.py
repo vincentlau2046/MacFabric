@@ -99,9 +99,10 @@ def _gate(h, *, write: bool) -> bool:
         return False
     origin = h.headers.get("Origin")
     if origin is not None:
-        ok_schemes = ("http://", "https://")
-        origin_ok = any(origin == s + a for a in _authorities()
-                        for s in ok_schemes)
+        # 评审 I1：同源 = Origin 与请求自身 Host（已验证的回环 authority）
+        # 全等，且 scheme 为 http（监听只有 http）。两个都过白名单的别名
+        # （127.0.0.1 vs localhost）互不同源，各自独立过白名单不算同源。
+        origin_ok = origin == "http://" + host
     else:
         origin_ok = not write        # POST 必须显式携带同源 Origin
     if not origin_ok:
@@ -126,6 +127,13 @@ def _send_error(h, code: str, message: str) -> None:
                  _CODE_STATUS.get(code, 500), extra_headers=_NO_STORE)
 
 
+def _body_already_answered(h) -> bool:
+    """评审 I2：body 读取层（read_body 400/413，或 async shim 已锁头）已经
+    发出过响应时，路由绝不再发第二个响应。"""
+    return bool(getattr(h, "_responded", False)
+                or getattr(h, "_headers_locked", False))
+
+
 def _read_json(h) -> dict | None:
     # forwarder.read_body 已解析 JSON（畸形 JSON 时自带 400）——这里只做形态守卫
     try:
@@ -133,6 +141,15 @@ def _read_json(h) -> dict | None:
     except Exception:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _transaction_error(h, client: str, exc: Exception) -> None:
+    """评审 I2：ConnectError 按固定映射回码；其余异常统一 500 io_error、
+    no-store、不向客户端泄漏内部细节（消息只含 client 与固定文案）。"""
+    if isinstance(exc, ConnectError):
+        _send_error(h, exc.code, str(exc))
+        return
+    _send_error(h, "io_error", f"{client}: internal transaction error")
 
 
 def _key_matches(key_id: str, api_key: str) -> bool:
@@ -151,8 +168,15 @@ def _key_matches(key_id: str, api_key: str) -> bool:
 
 def _send_inspect(h) -> None:
     mgr = _get_manager()
-    h._send_json({"clients": [mgr.inspect(c) for c in CLIENTS]},
-                 extra_headers=_NO_STORE)
+    try:
+        clients = [mgr.inspect(c) for c in CLIENTS]
+    except ConnectError as exc:
+        _send_error(h, exc.code, str(exc))
+        return
+    except Exception:
+        _send_error(h, "io_error", "internal inspection error")
+        return
+    h._send_json({"clients": clients}, extra_headers=_NO_STORE)
 
 
 def handle_connect_status(h, pm) -> None:
@@ -166,7 +190,8 @@ def handle_connect_apply(h, pm) -> None:
         return
     data = _read_json(h)
     if data is None:
-        _send_error(h, "invalid_request", "invalid JSON body")
+        if not _body_already_answered(h):
+            _send_error(h, "invalid_request", "invalid JSON body")
         return
     client = data.get("client")
     expected = data.get("expected_revision")
@@ -189,8 +214,8 @@ def handle_connect_apply(h, pm) -> None:
     try:
         result = _get_manager().apply(client, expected_revision=expected,
                                       api_key=api_key)
-    except ConnectError as exc:
-        _send_error(h, exc.code, str(exc))
+    except Exception as exc:
+        _transaction_error(h, client, exc)
         return
     h._send_json(result, extra_headers=_NO_STORE)
 
@@ -200,7 +225,8 @@ def handle_connect_rollback(h, pm) -> None:
         return
     data = _read_json(h)
     if data is None:
-        _send_error(h, "invalid_request", "invalid JSON body")
+        if not _body_already_answered(h):
+            _send_error(h, "invalid_request", "invalid JSON body")
         return
     client = data.get("client")
     expected = data.get("expected_revision")
@@ -212,7 +238,7 @@ def handle_connect_rollback(h, pm) -> None:
         return
     try:
         result = _get_manager().rollback(client, expected_revision=expected)
-    except ConnectError as exc:
-        _send_error(h, exc.code, str(exc))
+    except Exception as exc:
+        _transaction_error(h, client, exc)
         return
     h._send_json(result, extra_headers=_NO_STORE)

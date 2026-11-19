@@ -143,8 +143,10 @@ def test_missing_file_rollback_removes_only_managed_file(tmp_path, client):
 
 
 @pytest.mark.parametrize("client", ["claude", "codex"])
-def test_apply_creates_missing_directory_then_rollback_keeps_dir(tmp_path, client):
-    from inferfabric.platform.clients import ConnectManager
+def test_apply_missing_client_directory_rejected_no_side_effects(tmp_path, client):
+    """评审 I4：计划 = 只在已存在的客户端目录下创建配置；缺目录即拒绝，
+    且拒绝（含 stale revision）不产生任何文件系统副作用。"""
+    from inferfabric.platform.clients import ConnectError, ConnectManager
     home = tmp_path / "home-md"
     home.mkdir()
     codex_home = tmp_path / "codex-md"
@@ -154,16 +156,17 @@ def test_apply_creates_missing_directory_then_rollback_keeps_dir(tmp_path, clien
     before = m.inspect(client)
     assert before["state"] == "missing_directory"
 
-    applied = m.apply(client, expected_revision="absent", api_key=KEY)
-    assert applied["state"] == "managed"
-    p = _target(tmp_path, client, tag="-md")
-    assert p.exists()
-    assert stat.S_IMODE(p.parent.stat().st_mode) <= 0o700
-    assert stat.S_IMODE(p.stat().st_mode) <= 0o600
-
-    rolled = m.rollback(client, expected_revision=applied["revision"])
-    assert not p.exists()
-    assert p.parent.is_dir()                                   # 回退只删文件不删目录
+    # 正确 revision（absent）也拒绝：缺目录不是可自动修复的状态
+    with pytest.raises(ConnectError) as ei:
+        m.apply(client, expected_revision="absent", api_key=KEY)
+    assert ei.value.code == "conflict"
+    # stale revision 同样拒绝，且两次拒绝都不建目录/不写状态
+    with pytest.raises(ConnectError):
+        m.apply(client, expected_revision="stale", api_key=KEY)
+    anchor = (tmp_path / "home-md" / ".claude") if client == "claude" \
+        else codex_home
+    assert not anchor.exists()                                 # 零副作用
+    assert not (tmp_path / "state-md" / "connect").exists()    # 无备份目录
 
 
 # ── 3. stale revision / 外部编辑 / symlink：绝不写入 ─────────────
@@ -316,3 +319,176 @@ def test_atomic_failure_retains_recoverable_original_and_private_modes(
             path = os.path.join(root, f)
             if not os.path.islink(path):
                 assert stat.S_IMODE(os.stat(path).st_mode) <= 0o600, path
+
+
+# ── 6. 评审修复：事务内重验 / 跨实例串行 / 备份完整性 / 重应用崩溃可回退 ──
+
+def test_external_edit_during_transaction_rejected_no_overwrite(
+        tmp_path, monkeypatch):
+    """评审 C1：构建/备份期间外部编辑 → 提交前重验必须拒绝，绝不覆盖。"""
+    from inferfabric.platform.clients import ConnectError
+    m = _mgr(tmp_path, "claude")
+    p = _seed(tmp_path, "claude", CLAUDE_ORIGINAL)
+    rev0 = m.inspect("claude")["revision"]
+
+    real_build = m._build
+
+    def _sneaky_build(client, current, api_key):
+        # 模拟外部编辑器在事务中段保存
+        data = json.loads(current.decode())
+        data["plugins"] = {"external": True}
+        p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        return real_build(client, current, api_key)
+
+    monkeypatch.setattr(m, "_build", _sneaky_build)
+    with pytest.raises(ConnectError) as ei:
+        m.apply("claude", expected_revision=rev0, api_key=KEY)
+    assert ei.value.code == "conflict"
+    monkeypatch.undo()
+
+    raw = p.read_text()
+    assert json.loads(raw)["plugins"] == {"external": True}    # 外部编辑保留
+    assert not (tmp_path / "state" / "connect").exists()       # 未落任何备份
+
+
+def test_concurrent_apply_from_two_managers_second_conflicts(tmp_path):
+    """评审 C1：每请求新建 manager（threaded/async 各自实例）也必须串行 —
+    同一 revision 的第二个 apply 冲突，不得双双通过校验。"""
+    import threading
+    from inferfabric.platform.clients import ConnectError, ConnectManager
+    m1 = _mgr(tmp_path, "claude")
+    # 第二个请求的新实例：同 home/state（threaded 与 async server 各自 new）
+    m2 = ConnectManager(home=tmp_path / "home", state_dir=tmp_path / "state",
+                        gateway_origin=ORIGIN, codex_home=None)
+    p = _seed(tmp_path, "claude", CLAUDE_ORIGINAL)
+    rev0 = m1.inspect("claude")["revision"]
+
+    inside = threading.Event()
+    release = threading.Event()
+    real_build = m1._build
+
+    def _gated_build(client, current, api_key):
+        inside.set()
+        release.wait(timeout=5)
+        return real_build(client, current, api_key)
+
+    results = {}
+
+    def _first():
+        m1._build = _gated_build
+        try:
+            results["first"] = m1.apply("claude",
+                                        expected_revision=rev0, api_key=KEY)
+        except ConnectError as exc:
+            results["first"] = exc.code
+
+    def _second():
+        try:
+            m2.apply("claude", expected_revision=rev0, api_key=KEY)
+            results["second"] = "ok"
+        except ConnectError as exc:
+            results["second"] = exc.code
+
+    t1 = threading.Thread(target=_first)
+    t1.start()
+    assert inside.wait(timeout=5)                              # 第一个已持锁
+    t2 = threading.Thread(target=_second)
+    t2.start()                                                 # 在锁上排队
+    release.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert results["first"] and results["first"] != "conflict"  # 第一个成功
+    assert results["second"] == "conflict"                     # 串行等待后冲突
+    assert json.loads(p.read_text())["env"]["ANTHROPIC_AUTH_TOKEN"] == KEY
+
+
+def test_reapply_interrupted_still_rollbackable_to_original(tmp_path):
+    """评审 C2：重应用在替换前中断 → 记录必须保留先前托管 revision，
+    一键回退到首次原件仍然可用（不得出现三不认状态）。"""
+    from inferfabric.platform.clients import ConnectError
+    import inferfabric.platform.clients as clients_mod
+    m = _mgr(tmp_path, "claude")
+    p = _seed(tmp_path, "claude", CLAUDE_ORIGINAL)
+    rev0 = m.inspect("claude")["revision"]
+    m.apply("claude", expected_revision=rev0, api_key=KEY)
+    rev1 = m.inspect("claude")["revision"]
+
+    real_replace = clients_mod.os.replace
+
+    def _boom(src, dst):
+        raise OSError("simulated replace failure on reapply")
+
+    clients_mod.os.replace = _boom
+    try:
+        with pytest.raises(ConnectError) as ei:
+            m.apply("claude", expected_revision=rev1, api_key=KEY + "2")
+        assert ei.value.code == "io_error"
+    finally:
+        clients_mod.os.replace = real_replace
+
+    # 中断后：文件仍是旧托管内容，inspect 报 managed（可回退）
+    cur = m.inspect("claude")
+    assert cur["state"] == "managed", cur
+    assert cur["revision"] == rev1
+    rolled = m.rollback("claude", expected_revision=rev1)
+    assert rolled["state"] == "unmanaged"
+    assert p.read_bytes() == CLAUDE_ORIGINAL.encode()          # 回到首次原件
+
+
+def test_rollback_rejects_corrupt_backup_target_unchanged(tmp_path):
+    """评审 C2：备份字节损坏 → 完整性校验拒绝回退，目标不被垃圾覆盖。"""
+    from inferfabric.platform.clients import ConnectError
+    m = _mgr(tmp_path, "claude")
+    p = _seed(tmp_path, "claude", CLAUDE_ORIGINAL)
+    rev0 = m.inspect("claude")["revision"]
+    applied = m.apply("claude", expected_revision=rev0, api_key=KEY)
+
+    backup = tmp_path / "state" / "connect" / "claude" / "original.bin"
+    backup.write_bytes(b"CORRUPTED-BACKUP-BYTES")              # 篡改备份
+
+    with pytest.raises(ConnectError) as ei:
+        m.rollback("claude", expected_revision=applied["revision"])
+    assert ei.value.code == "conflict"
+    managed = p.read_text()
+    assert json.loads(managed)["env"]["ANTHROPIC_AUTH_TOKEN"] == KEY  # 未被覆盖
+
+
+def test_reapply_never_truncates_first_original_backup(tmp_path):
+    """评审 C2：重复托管不覆盖首次原件（含权限不放宽）。"""
+    m = _mgr(tmp_path, "claude")
+    p = _seed(tmp_path, "claude", CLAUDE_ORIGINAL)
+    rev0 = m.inspect("claude")["revision"]
+    m.apply("claude", expected_revision=rev0, api_key=KEY)
+
+    backup = tmp_path / "state" / "connect" / "claude" / "original.bin"
+    first = backup.read_bytes()
+    os.chmod(backup, 0o644)                                    # 人为放宽
+
+    m.apply("claude", expected_revision=m.inspect("claude")["revision"],
+            api_key=KEY + "2")
+    assert backup.read_bytes() == first                        # 首次原件原样
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600        # 权限已收紧
+
+
+def test_rejected_rollback_leaves_target_and_backup_untouched(tmp_path):
+    """评审 Minor：被拒绝的 rollback 后目标字节与备份记录均不变。"""
+    from inferfabric.platform.clients import ConnectError
+    m = _mgr(tmp_path, "claude")
+    p = _seed(tmp_path, "claude", CLAUDE_ORIGINAL)
+    rev0 = m.inspect("claude")["revision"]
+    m.apply("claude", expected_revision=rev0, api_key=KEY)
+    rev1 = m.inspect("claude")["revision"]
+
+    record = tmp_path / "state" / "connect" / "claude" / "record.json"
+    backup = tmp_path / "state" / "connect" / "claude" / "original.bin"
+    rec_before = record.read_bytes()
+    bak_before = backup.read_bytes()
+    target_before = p.read_bytes()
+
+    with pytest.raises(ConnectError):
+        m.rollback("claude", expected_revision="stale-revision")
+    assert p.read_bytes() == target_before                     # 目标字节未动
+    target_now = m.inspect("claude")["revision"]
+    assert target_now == rev1                                  # 目标未动
+    assert record.read_bytes() == rec_before                   # 记录未动
+    assert backup.read_bytes() == bak_before                   # 备份未动

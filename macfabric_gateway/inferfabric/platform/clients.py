@@ -45,6 +45,10 @@ _ERROR_CODES = frozenset(
 
 _CODING_PROVIDER = "inferfabric"
 
+# 评审 C1：threaded/async server 每请求各自 new 一个 manager，实例锁锁不住
+# 跨实例并发 — 事务串行按 client 用模块级锁，进程内所有实例共享。
+_MODULE_LOCKS = {c: threading.Lock() for c in CLIENTS}
+
 
 class ConnectError(Exception):
     """固定 code 的 Connect 失败；消息不含配置内容。"""
@@ -77,14 +81,41 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def _write_private(path: Path, data: bytes) -> None:
-    """直接写 0600 文件并 fsync（备份记录/字节用，不走 replace）。"""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+def _write_private_new(path: Path, data: bytes) -> None:
+    """创建新 0600 文件并 fsync（评审 C2：O_EXCL — 绝不截断既有文件；
+    已存在时仅收紧权限，内容保持首次原件）。"""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return
     try:
         os.write(fd, data)
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _replace_private(path: Path, data: bytes) -> None:
+    """原子替换 0600 文件（评审 C2：record.json 不许原地截断重写）。"""
+    tmp = path.parent / f".{path.name}.tmp-{secrets.token_hex(6)}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 class ConnectManager:
@@ -96,8 +127,6 @@ class ConnectManager:
         self._codex_home = Path(codex_home) if codex_home is not None else None
         self._origin = gateway_origin
         self._backup_root = Path(state_dir) / "connect"
-        self._locks: dict[str, threading.Lock] = {}
-        self._locks_guard = threading.Lock()
 
     # ── 公共接口 ─────────────────────────────────────────────────
 
@@ -130,10 +159,8 @@ class ConnectManager:
             raise ConnectError("invalid_request", f"unknown client: {client!r}")
 
     def _lock(self, client: str) -> threading.Lock:
-        with self._locks_guard:
-            if client not in self._locks:
-                self._locks[client] = threading.Lock()
-            return self._locks[client]
+        # 模块级锁：跨实例（threaded/async 各自 new 的 manager）同 client 串行
+        return _MODULE_LOCKS[client]
 
     def _paths(self, client: str) -> tuple[Path, tuple[str, ...]]:
         """返回 (anchor, 相对成分)；anchor 是可信服务输入，不检查自身符号链接。"""
@@ -176,23 +203,43 @@ class ConnectManager:
             cur = d
         return existing, None, cur
 
-    def _ensure_dirs(self, client: str) -> None:
-        """apply 用：缺失的 anchor/中间目录以 0700 创建；已有成分安全检查。"""
-        existing, missing_from, _ = self._walk_dirs(client)
-        if missing_from is None:
-            return
-        anchor, parts = self._paths(client)
-        chain = (anchor,) + tuple(anchor.joinpath(*parts[:i + 1])
-                                  for i in range(len(parts) - 1))
-        for d in chain[missing_from:]:
-            try:
-                os.mkdir(d, 0o700)
-            except FileExistsError:
-                continue  # 并发创建；安全检查已在 _walk_dirs 兜底
-            except OSError as exc:
-                raise ConnectError("io_error", f"{client}: cannot create directory") from exc
-            _fsync_dir(d.parent)
-        _ = existing
+    def _require_dirs(self, client: str) -> None:
+        """评审 I4：只在已存在的客户端目录下写配置 — 目录链缺失即 conflict，
+        拒绝路径零副作用（不建目录、不写状态）。"""
+        _, missing_from, _ = self._walk_dirs(client)
+        if missing_from is not None:
+            raise ConnectError(
+                "conflict",
+                f"{client}: client directory does not exist — start the "
+                f"client once, then connect")
+
+    def _read_target(self, client: str, target: Path) -> tuple[str, bytes | None]:
+        """评审 C1：一次 lstat + read 同时取 revision 与字节（同一份已验证
+        文件）；缺失 → ("absent", None)；符号链接/非常规 → ("nonregular", None)。"""
+        try:
+            st = target.lstat()
+        except FileNotFoundError:
+            return _ABSENT, None
+        except OSError:
+            return _NONREGULAR, None
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+            return _NONREGULAR, None
+        try:
+            data = target.read_bytes()
+        except OSError as exc:
+            raise ConnectError(
+                "io_error", f"{client}: cannot read configuration") from exc
+        return _sha256(data), data
+
+    def _recheck(self, client: str, target: Path, cur: str) -> None:
+        """评审 C1：提交前重验 — 构建/备份期间目标被外部改动 → conflict，
+        绝不覆盖（合同不承诺锁住外部编辑器，但检测到即拒绝）。"""
+        now = self._rev(target)
+        if now != cur:
+            raise ConnectError(
+                "conflict",
+                f"{client}: configuration changed during transaction, "
+                f"re-check and retry")
 
     def _rev(self, target: Path) -> str:
         """目标文件 revision：缺失 "absent"；非常规文件 "nonregular"；否则 sha256。"""
@@ -237,34 +284,57 @@ class ConnectManager:
         if not rec.get("original_exists"):
             return b""
         try:
-            return (self._record_dir(client) / "original.bin").read_bytes()
+            data = (self._record_dir(client) / "original.bin").read_bytes()
         except OSError as exc:
             raise ConnectError("io_error", f"{client}: cannot read backup bytes") from exc
+        # 评审 C2：回退前校验备份完整性 — 损坏备份绝不写回目标
+        expect = rec.get("original_sha256")
+        if expect and _sha256(data) != expect:
+            raise ConnectError(
+                "conflict", f"{client}: backup integrity check failed")
+        return data
 
     def _save_record(self, client: str, *, pre: str, post: str,
-                     original_exists: bool, original_bytes: bytes,
-                     original_mode: int | None) -> None:
-        """备份先于替换持久化；重复托管不覆盖首次原件之外的信息以外的语义——
-        original 字节只在首次（或上一次未落地）时写入。"""
+                     prior_post: str | None, original_exists: bool,
+                     original_bytes: bytes, original_mode: int | None,
+                     write_original: bool) -> None:
+        """备份先于替换持久化（评审 C2 修订）：
+        - original.bin 只在首次创建（O_EXCL，绝不截断既有原件）；
+        - record.json 原子替换，且带 prior_post（上一次托管 revision）—
+          重应用在替换前中断时，cur == prior_post 仍识别为托管、可回退；
+        - 新建目录时 fsync 父目录链，保证崩溃后目录项在场。"""
         d = self._record_dir(client)
         try:
+            created = not d.exists()
             d.mkdir(parents=True, mode=0o700, exist_ok=True)
             # parents=True 中间层按 umask 生成，逐级收紧到 0700
             os.chmod(d, 0o700)
             os.chmod(self._backup_root, 0o700)
-            if original_exists:
-                _write_private(d / "original.bin", original_bytes)
+            if created:
+                try:
+                    _fsync_dir(self._backup_root.parent)
+                    _fsync_dir(self._backup_root)
+                except OSError:
+                    pass  # 目录项 fsync 尽力；文件本体已 fsync
+            if original_exists and write_original:
+                _write_private_new(d / "original.bin", original_bytes)
+            elif original_exists:
+                try:
+                    os.chmod(d / "original.bin", 0o600)
+                except OSError:
+                    pass
             rec = {
                 "client": client,
                 "pre_revision": pre,
                 "post_revision": post,
+                "prior_post": prior_post,
                 "original_exists": original_exists,
                 "original_mode": original_mode,
                 "original_sha256": _sha256(original_bytes) if original_exists else None,
                 "managed_origin": self._origin,
             }
-            _write_private(d / "record.json",
-                           json.dumps(rec, indent=2).encode("utf-8"))
+            _replace_private(d / "record.json",
+                             json.dumps(rec, indent=2).encode("utf-8"))
             _fsync_dir(d)
         except OSError as exc:
             raise ConnectError("io_error", f"{client}: cannot persist backup") from exc
@@ -286,7 +356,7 @@ class ConnectManager:
     # ── 原子写入 ─────────────────────────────────────────────────
 
     def _atomic_write(self, client: str, target: Path, data: bytes,
-                      mode: int) -> None:
+                      mode: int, expect_rev: str | None = None) -> None:
         tmp = target.parent / f".{target.name}.connect-tmp-{secrets.token_hex(6)}"
         try:
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
@@ -296,6 +366,16 @@ class ConnectManager:
             finally:
                 os.close(fd)
             os.chmod(tmp, mode)
+            if expect_rev is not None and self._rev(target) != expect_rev:
+                # 评审 C1：替换前最后一刻重验（窗口收窄到一次 hash + replace）
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise ConnectError(
+                    "conflict",
+                    f"{client}: configuration changed during transaction, "
+                    f"re-check and retry")
             os.replace(tmp, target)
         except OSError as exc:
             try:
@@ -390,12 +470,21 @@ class ConnectManager:
 
     # ── 事务本体 ─────────────────────────────────────────────────
 
+    @staticmethod
+    def _managed_revs(rec: dict) -> frozenset:
+        """记录在案、可识别为托管内容的 revision 集（含 prior_post —
+        评审 C2：重应用中断后旧托管内容仍可识别、可回退）。"""
+        revs = {rec["post_revision"]}
+        if rec.get("prior_post"):
+            revs.add(rec["prior_post"])
+        return frozenset(revs)
+
     def _inspect_locked(self, client: str) -> dict:
         target = self._target(client)
         rev = self._rev(target)
         rec = self._load_record(client)
         if rec is not None:
-            if rev == rec["post_revision"]:
+            if rev in self._managed_revs(rec):
                 tgt = ("this_gateway"
                        if rec.get("managed_origin") == self._origin else "other")
                 return {"client": client, "state": "managed",
@@ -461,44 +550,57 @@ class ConnectManager:
     def _apply_locked(self, client: str, expected_revision: str,
                       api_key: str) -> dict:
         target = self._target(client)
-        self._ensure_dirs(client)
-        cur = self._rev(target)
+        # 评审 I4：前置校验全部先行，拒绝路径零副作用（不建目录/不写状态）
+        self._require_dirs(client)
+        # 评审 C1：一次 lstat+read 同取 revision 与字节（同一份已验证文件）
+        cur, current = self._read_target(client, target)
         if cur != expected_revision:
             raise ConnectError(
                 "conflict",
                 f"{client}: configuration changed since inspection, re-check and retry")
         rec = self._load_record(client)
-        if rec is not None and cur in (rec["post_revision"], rec["pre_revision"]):
-            # 已托管（重复托管）或上次 apply 未落地：保留首次原件
+        if rec is not None and (cur in self._managed_revs(rec)
+                                or cur == rec["pre_revision"]):
+            # 已托管（重复托管 / prior_post 中断态）或上次 apply 未落地：
+            # 保留首次原件；prior_post 记录本次替换前的托管 revision
             original_exists = bool(rec["original_exists"])
-            original_bytes = self._original_bytes(client, rec)
+            original_bytes = (self._original_bytes(client, rec)
+                              if original_exists else b"")
             original_mode = rec.get("original_mode")
             pre = rec["pre_revision"]
+            # prior_post = 当前磁盘上的托管 revision（评审 C2：重应用中断后
+            # 再重试，中断态 revision 必须始终被下一份记录识别）
+            prior_post = (cur if cur != rec["pre_revision"]
+                          else rec.get("prior_post"))
+            write_original = False
         else:
             if cur == _NONREGULAR:
                 raise ConnectError(
                     "conflict", f"{client}: target is not a regular file")
-            if cur == _ABSENT:
-                original_exists, original_bytes, original_mode = False, b"", None
-            else:
-                st = target.stat()
+            original_exists = cur != _ABSENT
+            original_bytes = current or b""
+            if original_exists:
+                st = target.lstat()
                 if st.st_uid != os.geteuid():
                     raise ConnectError(
                         "conflict",
                         f"{client}: configuration file not owned by service user")
-                original_exists = True
-                original_bytes = target.read_bytes()
                 original_mode = stat.S_IMODE(st.st_mode)
+            else:
+                original_mode = None
             pre = cur
-        current = self._read_current(client, target)
+            prior_post = None
+            write_original = original_exists
         new_bytes = self._build(client, current, api_key)
         post = _sha256(new_bytes)
-        # 备份（含 pre/post revision）先于替换持久化；original 只保留首次
-        self._save_record(client, pre=pre, post=post,
+        # 构建后重验 + 备份（含 pre/post/prior_post）先于替换持久化
+        self._recheck(client, target, cur)
+        self._save_record(client, pre=pre, post=post, prior_post=prior_post,
                           original_exists=original_exists,
                           original_bytes=original_bytes,
-                          original_mode=original_mode)
-        self._atomic_write(client, target, new_bytes, 0o600)
+                          original_mode=original_mode,
+                          write_original=write_original)
+        self._atomic_write(client, target, new_bytes, 0o600, expect_rev=cur)
         return self._inspect_locked(client)
 
     def _rollback_locked(self, client: str, expected_revision: str) -> dict:
@@ -507,18 +609,21 @@ class ConnectManager:
         if rec is None:
             raise ConnectError(
                 "invalid_request", f"{client}: no managed change to roll back")
-        self._ensure_dirs(client)
         cur = self._rev(target)
         if cur != expected_revision:
             raise ConnectError(
                 "conflict",
                 f"{client}: configuration changed since inspection, re-check and retry")
-        if cur == rec["post_revision"]:
+        if cur in self._managed_revs(rec):
             if rec["original_exists"]:
-                original = self._original_bytes(client, rec)
+                # 仅在确需写回原件时要求目录链在（拒绝路径零副作用）
+                self._require_dirs(client)
+                original = self._original_bytes(client, rec)  # 含完整性校验
                 mode = rec.get("original_mode") or 0o600
-                self._atomic_write(client, target, original, mode)
-            else:
+                self._atomic_write(client, target, original, mode,
+                                   expect_rev=cur)
+            elif cur != _ABSENT:
+                self._recheck(client, target, cur)
                 try:
                     target.unlink()
                 except OSError as exc:

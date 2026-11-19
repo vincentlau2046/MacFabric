@@ -82,13 +82,57 @@
 - 测试占位主机 `evil`/`elsewhere` 触发 test_no_network_dependency guard →
   改用白名单占位（evil.example / example.com），白名单未扩充。
 
+## 独立评审与修复通道（收尾门）
+
+独立评审（fresh reviewer，范围 8364e84..88e3e7d）判定 No，2 Critical /
+4 Important / 3 Minor。重定级与处置：
+
+**已修（RED→GREEN + 全量绿，commit 见 fix 提交）**：
+- **C1 事务内重验 + 跨实例串行**：模块级 per-client 锁（threaded/async 各自
+  new 的 manager 全部串行）；一次 lstat+read 同取 revision 与字节；构建后
+  `_recheck` + `os.replace` 前 `expect_rev` 双重重验；外部编辑在事务中被
+  检测即 conflict，绝不覆盖。
+- **C2 备份私有性/崩溃安全**：original.bin O_EXCL 首次创建绝不截断（权限
+  放宽自动收紧）；record.json 原子替换；回退前 sha256 完整性校验（损坏
+  备份拒绝回退不写垃圾）；记录新增 `prior_post`（当前磁盘托管 revision）—
+  重应用在替换前中断后，inspect 仍识别 managed、一键回退可用；新建目录
+  fsync 父目录链。
+- **I1 Origin 同源收紧**：Origin 必须与请求自身 Host（已验证回环 authority）
+  全等且 scheme 为 http — 别名交叉（127.0.0.1 vs localhost）与 https 全拒。
+- **I2 适配器合同收口**：body 层已发响应（read_body 400/413 / shim 锁头）
+  时路由层不再发第二个响应（`_responded` 标记 + `_headers_locked` 守卫）；
+  threaded read_body 错误响应与 async `_json_response` 统一 no-store；
+  status/apply/rollback 的非门禁异常统一映射带 code 的单响应，不泄漏内部
+  细节。
+- **I4 按计划对齐缺目录语义**：apply/rollback 前置校验，客户端目录缺失即
+  conflict、零副作用（不建目录/不写状态）— 计划原文"只创建已存在客户端
+  目录下的配置"；原"缺目录自动创建"测试替换为拒绝测试。
+
+**裁定不修（Ruling）**：I3 direct Responses 云路由 `cloud:` 前缀 provider
+查注册表失配 + 未提交无响应两处为**基线缺陷**（Task 4 之前已存在，非本
+分支回归）；计划 Task 4 明确要求"记录此类差异、单独修复"。已记录，修复合入
+另行立项；Codex CLI 验收证明配置加载与池路径请求完成，直连云分支验收随之
+补齐。
+
+**Deferred minors（ledger 台账）**：合同套 overstate pinning（transport
+closure 直调非 run_attempts / priority 突变锚点）；test_connect_admin 不断言
+被拒 key 后目标字节（已补 rejected_rollback 侧）；outbound 参数化仅 OpenAI；
+manifest #9 行含 T4/T5 文件（已有单列说明）；浏览器 harness 不在评审范围 +
+Linux 未验；dashboard 401 提示丢失 enable-auth hint。SSE golden 尾部空行 =
+事件终止符（逐字节断言的一部分），`.gitattributes` 对 golden/*.sse 显式
+豁免 whitespace 检查。
+
+**修复后全量**：`../.venv/bin/python -m pytest tests -q` → **634 passed,
+4 warnings in 51.67s**（存档 fix-suite.txt；623 + 11 个评审修复新测试）。
+
 ## 全量与遗留
 
-- 最终全量（收尾门）：`macfabric_gateway` 下
-  `../.venv/bin/python -m pytest tests -q` → **623 passed, 4 warnings in 50.77s**
-  （完整输出存档 `.superpowers/sdd/2026-11-19-m3-connect-responses-account-pool/final-suite.txt`；
-  warnings 为既有 pytest 弃用提示，非本分支引入）。
-- `git diff --check` clean（无空白错误）。
+- 最终全量（评审修复后）：`macfabric_gateway` 下
+  `../.venv/bin/python -m pytest tests -q` → **634 passed, 4 warnings in 51.67s**
+  （存档 `.superpowers/sdd/2026-11-19-m3-connect-responses-account-pool/fix-suite.txt`；
+  此前基线 623 passed 见 final-suite.txt；warnings 为既有 pytest 弃用提示）。
+- `git diff --check` clean（工作树与 8364e84..HEAD 提交范围均无空白错误；
+  golden SSE 尾部空行为 SSE 事件终止符，经 .gitattributes 显式豁免）。
 - 沙箱终态：网关（8998）与 recorder（8997）进程均已停止、端口无监听；
   `~/.claude/jobs/f1f58533/tmp/m3-accept/` 留存合成 key、种子配置、recorder
   日志，**不含任何真实凭据**。

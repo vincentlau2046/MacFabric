@@ -354,3 +354,134 @@ def test_async_shim_passes_peer_address():
     src = _P(async_server.__file__).read_text(encoding="utf-8")
     assert "_peer_address" in src
     assert "get_extra_info" in src
+
+
+# ── 6. 评审修复：Origin 同源收紧 / 单响应 / 错误面收口 ───────────
+
+def test_origin_must_equal_request_host_and_http_scheme(wired):
+    """评审 I1：Origin 必须与请求自身 Host（已验证的回环 authority）全等
+    且 scheme 为 http — 两个都过白名单的别名互不同源，https 不可能。"""
+    # Host 127.0.0.1 + Origin localhost：都在别名集内但非同源 → 403
+    h = _call_apply(headers=_post_headers(origin="http://localhost:8999"),
+                    peer=("127.0.0.1", 5000))
+    assert _last(h)[1] == 403
+    # https scheme → 403（监听只有 http）
+    h = _call_apply(headers=_post_headers(origin="https://" + HOST),
+                    peer=("127.0.0.1", 5000))
+    assert _last(h)[1] == 403
+    # 与 Host 全等的 http origin → 通过门禁（到 F7 校验层）
+    h = _call_apply(headers=_post_headers(), peer=("127.0.0.1", 5000))
+    assert _last(h)[1] in (200, 400)                           # 门禁已过
+
+
+class _HBodyResponded(_H):
+    """真实契约：read_body 在畸形/超限 JSON 时自带 400/413 并已发出响应。"""
+
+    def _read_body(self):
+        self._send_json({"error": "Invalid JSON: x"}, 400,
+                        extra_headers={"Cache-Control": "no-store"})
+        self._responded = True
+        return None
+
+
+def test_body_error_yields_exactly_one_response(wired):
+    """评审 I2：body 层已发过错误响应时，路由不得再发第二个响应。"""
+    h = _HBodyResponded(headers=_post_headers(),
+                        body=_apply_body(key_id=wired["kid"],
+                                         api_key=wired["token"]),
+                        peer=("127.0.0.1", 5000))
+    connect_handlers.handle_connect_apply(h, None)
+    assert len(h._sent) == 1                                   # 只有一次响应
+    assert _last(h)[1] == 400
+    assert _last(h)[2].get("Cache-Control") == "no-store"
+
+    h = _HBodyResponded(headers=_post_headers(), peer=("127.0.0.1", 5000))
+    connect_handlers.handle_connect_rollback(h, None)
+    assert len(h._sent) == 1
+
+
+def test_forwarder_read_body_errors_carry_no_store():
+    """评审 I2：threaded 侧 read_body 的 400/413 错误响应必须 no-store
+    （async shim 的 _json_response 同理，由源码钉住）。"""
+    import io as _io
+    from inferfabric.forwarder import read_body
+
+    class _FH:
+        path = "/admin/connect/apply"
+        wfile = _io.BytesIO()
+
+        def __init__(self, cl, body):
+            self.headers = {"Content-Length": cl}
+            self.rfile = _io.BytesIO(body)
+            self.sent = []
+
+        def send_response(self, s):
+            self.sent.append(("status", s))
+
+        def send_header(self, k, v):
+            self.sent.append(("hdr", k, v))
+
+        def end_headers(self):
+            pass
+
+    h = _FH("6", b"{nope!")
+    assert read_body(h) is None
+    assert ("status", 400) in h.sent
+    assert ("hdr", "Cache-Control", "no-store") in h.sent
+
+    h = _FH(str(200 * 1024 * 1024), b"")
+    assert read_body(h) is None
+    assert ("status", 413) in h.sent
+    assert ("hdr", "Cache-Control", "no-store") in h.sent
+
+
+def test_async_json_error_responses_no_store():
+    """评审 I2：async shim 的 JSON 错误响应（413/404/500）统一 no-store。"""
+    from pathlib import Path as _P
+    import inferfabric.proxy.async_server as async_server
+    src = _P(async_server.__file__).read_text(encoding="utf-8")
+    assert 'no-store' in src.split("def _json_response")[1].split("def ")[0]
+
+
+def test_status_and_transaction_errors_sanitized(wired, monkeypatch):
+    """评审 I2：status/apply/rollback 的非门禁异常一律映射为带 code 的
+    单一错误响应，不向客户端泄漏内部细节。"""
+    from inferfabric.platform.clients import ConnectError
+
+    class _Boom:
+        def inspect(self, client):
+            raise ConnectError("conflict", "backup record unreadable")
+
+        def apply(self, *a, **k):
+            raise RuntimeError("internal detail: /secret/path")
+
+        def rollback(self, *a, **k):
+            raise RuntimeError("internal detail")
+
+    monkeypatch.setattr(connect_handlers, "_get_manager", lambda: _Boom())
+
+    h = _H(headers={"X-Admin-Token": ADMIN, "Host": HOST},
+           peer=("127.0.0.1", 5000))
+    connect_handlers.handle_connect_status(h, None)
+    obj, status, headers = _last(h)
+    assert status == 409
+    assert headers.get("Cache-Control") == "no-store"
+    assert obj["code"] == "conflict"
+
+    h = _call_apply(headers=_post_headers(),
+                    body=_apply_body(key_id=wired["kid"],
+                                     api_key=wired["token"]),
+                    peer=("127.0.0.1", 5000))
+    obj, status, headers = _last(h)
+    assert status == 500
+    assert headers.get("Cache-Control") == "no-store"
+    assert "secret" not in json.dumps(obj)                     # 不泄漏内部细节
+
+    h = _H(headers=_post_headers(), body=json.dumps(
+        {"client": "claude", "expected_revision": "absent",
+         "confirmed": True}).encode(), peer=("127.0.0.1", 5000))
+    connect_handlers.handle_connect_rollback(h, None)
+    obj, status, headers = _last(h)
+    assert status == 500
+    assert headers.get("Cache-Control") == "no-store"
+    assert "secret" not in json.dumps(obj)
