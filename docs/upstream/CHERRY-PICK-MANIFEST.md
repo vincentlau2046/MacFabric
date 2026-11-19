@@ -49,6 +49,15 @@
 | # | 特性域 | pick 分支 | commit 范围 | 新增文件 | 触碰上游文件 | 验收测试 | 状态 |
 |---|---|---|---|---|---|---|---|
 | 1 | F1 三协议入口 | pick/protocol-bridges | 待切 | anthropic_translate.py、anthropic_bridge.py、responses_bridge.py | chat_handlers/handler（装配点） | tests/unit/test_anthropic_translate.py + golden 录制件 | 待摘取 |
+
+> **Responses 合同单列**（M3 T4，2026-11-19，commit `5f51f20`）：responses_bridge
+> 另有独立原生优先合同套 `test_responses_bridge.py`（20 用例：非流式/SSE 直连原生、
+> `RESPONSES_UNSUPPORTED_STATUSES` 恰好一次 Chat 兜底、committed 永不兜底、
+> 两个文本突变负对照）+ 确定性录制件 `tests/golden/responses_native_stream.sse`。
+> 摘取 responses_bridge 时该合同必须随带（负对照钉住原生优先/兜底 gate 两个
+> 锚点，防止上游合并时静默翻转优先级）；golden 为确定性生成件而非网络录制。
+> 依赖：F1 桥三件套的 responses 侧现以本合同为验收基准，原「golden 录制件」
+> 一栏不含此合同。
 | 2 | F2 平台资源账本 | pick/platform-layer | 移植自 40bb02e..`d392007`，落为上游基线 2 commits：`7cc392a`（platform 包+4 套测试）+ `331c315`（5 导入点装配） | platform/ 全包 7 文件 + test_platform_*.py 4 文件 | manager/gpu_state/health/model_lifecycle/model_discovery（5 处导入点注入） | unit 1894 绿 + integration 118 绿（darwin 原生 + IFF_FORCE_PLATFORM=linux mock 双跑） | 已提交 PR：[InferFabric#2](https://github.com/vincentlau2046/InferFabric/pull/2)（2026-11-18） |
 | 3 | F4 能力包 | pick/capability-packs | 待切 | packs/、pack_handlers.py、jobs.py | handler.py admin 面、chat_handlers（503 闸） | test_packs_*.py（11 文件）+ test_jobs.py | 待摘取 |
 | 4 | F5 模型池 v2 | pick/pool-v2 | `5feff43`（池 v2 核心+传输+命名+前置 hunk）+ `60f9689`（测试契约更新），已 rebase 到 main `7ab0cf8`（PR #1 合入后，2026-11-18） | test_pool_deadline_recovery / test_pool_health_policy / test_pool_prefix_fabric / test_pool_transport_contract（E 桶用例拆出归 #12） | model_pool/ 6 文件（A 池v2核心+B 命名v2+C 单飞调用侧+D 结构化传输）+ proxy/chat_handlers.py（`_forward_request_ex` 注入+池分支门）+ proxy/handler.py（路由门+/v1/models 发号，2 处 1 行）+ proxy/sse_buffer.py（观测位 hunk，B1 核销）+ ratelimit.py（observe effective_timeout hunk，B1 核销，D24 措辞已入 PR）+ security/auth_facade.py + security/admin.py（pools 前缀门各 1 行）+ dashboard 两件 | 4 套移植测试 + vendor 测试套更新到 v2 契约（dispatch 缝线 `_forward_request_ex`、池键 flash、fabric- 命名、面板 DOM/CAS），unit+integration 2034 绿（darwin 原生）；**依赖 PR #1 先合入**（C 调用侧单飞） | **已合入**：[InferFabric#4](https://github.com/vincentlau2046/InferFabric/pull/4)（2026-11-18 13:01 approve with rebase，main=`52baf04`+`8bdec97`+`fd1c017`） |
@@ -56,6 +65,8 @@
 
 > **F6 制作记录**（inferfabric-pr session）：
 > ① 单飞测试中"池 dispatch 调用侧 background=True"断言用例移出，随 F5 pool-v2 摘取；② **floor 兜底补前缀键 hunk 已撤出**——与上游既有契约测试 `TestShortNameCollisionContract`（碰撞整条跳过）冲突，属行为变更非纯修复，是否上游化待上游责任人在 PR #1 讨论区裁决（PR 描述"Not included"节已说明）；③ `test_r9_anomaly_collector.py::test_query_since` 为上游既有 flaky（pristine 10 连跑失败 3 次），与 F6 无关；④ fabric-* 池命名从 F6/B2 剔除归 F5（Q1 裁决）。
+
+> **F6 出站账号池占位单列**（M3 T5，2026-11-19，commit `f15a755`）：本条目（云聚合修复）与 M3 的 F6 出站账号池是**两回事**——后者只交付 `outbound_credentials.select_outbound_api_key(*, provider_name, configured_api_key)` 恒等透传 + forwarder 单点接线（设计文档 specs/2026-11-19-outbound-account-pool-design.md）。**不宣称账号池可用**：无多账号、无配额路由、无会话亲和，出站 key/路径/重试/空 key 语义逐字节不变；若上游化，随带 test_outbound_credentials.py 7 用例即可，属行为无关的接口预留，是否值得上游化由上游责任人裁决。
 | 6 | F7 安全门禁 | pick/security-fixes | 待切 | — | security/*、db.py、handler.py security 面 | test_admin_auth.py | 待摘取 |
 >
 > **F2 制作注记**（主 session）：范围已扩展至 `d392007`——终审 Important-1 修复落在 procguard.py（launchctl/systemctl 返回码校验 + systemd enable --now + guard_for_profile 强制显式 label，防覆写生产 plist）。**摘取必须包含该修复**，否则上游拿到的是 fail-silent 版 install。
@@ -66,7 +77,7 @@
 > **F2 评审修复**（inferfabric-pr session，2026-11-18，REQUEST-CHANGES 响应已推送 `81de082` + PR 评论逐项说明）：① `ledger_mode` 落为真解析字段（ModelConfig 新字段 + 模板 emit `ledger_mode:`，ModeOf 读实值，RESIDENT 层激活）；② switch() 准入闸移到 already-running 检查后（含时序回归测试）；③ pid_on_port 恢复 v1 契约（timeout=5、异常传播 fail-visible，双后端直测）；④ auto_deploy 已配置即早退；测试 nits 全收（reload 遥留/Path.home/直测补齐）。fork 侧同修由 peer 执行保 parity。
 | 7 | F8 守护与隔离 | （随 2 platform-layer） | 已随 PR #2 `7cc392a` 带入（procguard fail-visible 版） | procguard.py | —（launchd/systemd 脚本上游等价物未带，fork 的 gateway-launchd.sh 留 M 类） | test_platform_vram_procguard_engines.py（随 PR #2） | 已提交 PR：随 [InferFabric#2](https://github.com/vincentlau2046/InferFabric/pull/2) |
 | 8 | F9 Dashboard 新页 | pick/dashboard-pages | 本地已实施（feat/m2-dashboard，基线 `11455a4`..`89e740e`，10 commits 2026-11-19）：T1 packs 页 `bf7a610`、T2 security 页+一次性回显 `c6a713a`、T3 deploy autostart `fe3ad69`、T4 cloud 属性浮窗 `f4b235a`、T5 overview 内存账本 `89e740e` | 新增：fragments/{packs,security}.html + js/{packs,security}.js；增量：base.html/__init__.py 注册、deploy.js/fragments、cloud.js 属性浮窗、store.js 客户端请求序号守卫、overview.js/fragments 账本卡、style.css | handler.py（T2 明文路由 no-store + IntegrityError→400；T5 snapshot 加 memory_ledger）、manager.py（T5 memory_ledger_snapshot 只读投影 + 共享活跃登记抽取）、cloud_discovery.py（T4 修复 _serialize_providers 丢 context_window/max_output_tokens、truthy 价格门丢 0）、cloud.js 六键 tag | test_dashboard_packs_page.py、test_dashboard_security_page.py、test_dashboard_security_responses.py、test_dashboard_deploy_autostart.py、test_dashboard_cloud_attrs.py、test_memory_ledger_snapshot.py；fork 全量 470 绿；QA：docs/qa/2026-11-19-m2-dashboard.md（真实沙箱 HTTP + Playwright 文本断言分记） | 本地实施完成，**交付候选待报批**；切 pick 前须逐项验上游接口：packs 依赖 F4（条目 #3 待摘）、security 对照 F7 核对上游实际缺的路由/字段、autostart（/admin/models/set-autostart）、cloud attrs（provider-models tag 六键）、ledger（memory_ledger_snapshot 依赖统一内存账本）——各验后再切，不承诺能直接摘取；**Connect 不在 M2 产出（M3 F10）** |
-| 9 | F10 Connect 托管 | pick/connect-clients | 未实施 | M3 产出 platform/clients.py | dashboard 注册点 | M3 验收 | 未实施 |
+| 9 | F10 Connect 托管 | pick/connect-clients | 本地已实施（feat/m3-connect，基线 `8364e84`..`f15a755`，5 commits 2026-11-19）：T1 ConnectManager `6eb1939`、T2 /admin/connect/* `f687077`、T3 dashboard 页 `0e217cd`、T4 Responses 合同 `5f51f20`、T5 出站占位 `f15a755` | platform/clients.py、proxy/connect_handlers.py、dashboard/fragments/connect.html + js/connect.js、tests/{unit/test_connect_clients,test_connect_admin,test_dashboard_connect,test_responses_bridge,test_outbound_credentials}.py、golden/responses_native_stream.sse、specs/2026-11-19-outbound-account-pool-design.md | security/key_store.py（+active_key_id 1 方法）、proxy/handler.py（3 路由注册）、proxy/async_server.py（_peer_address 注入）、dashboard/{__init__,base}.html 注册、forwarder.py（出站 selector 接线 2 处）、requirements.txt（+tomlkit==0.13.3） | 新增 5 套测试（9+13+7+20+7）；fork 全量 623 绿；QA：docs/qa/2026-11-19-m3-connect-responses-account-pool.md（含真实 CLI claude 2.1.328 / codex 0.167.0 协议验收）；上游验收命令 = fork 同名 pytest 套 | 本地实施完成，**交付候选待报批**；切 pick 前须验上游依赖：①F7 key store 需有等效 `active_key_id(token)` 摘要查询（对照上游 F7 条目 #6 实际形态）；②`tomlkit==0.13.3` 安装链（requirements.txt + uv pip，Codex config.toml 保格式写回所需）；③Connect 门禁依赖回环 peer 校验（async shim `_peer_address` 注入，上游 server 形态需核对）；**M3 不作为其他条目的上游化前置** |
 | 10 | F3 引擎矩阵 | （随 2 platform-layer） | 已随 PR #2 `7cc392a` 带入 | engines.py | — | 同 2 | 已提交 PR：随 [InferFabric#2](https://github.com/vincentlau2046/InferFabric/pull/2) |
 
 ## 3. 摘取纪律（重申）

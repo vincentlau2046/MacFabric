@@ -48,6 +48,32 @@
   - 结论：ConnectManager 写出的两种配置形态被真实 CLI 加载并按预期协议发请求；
     无「字符串存在 ≠ 加载成功」风险残留。
 
+## Task 4 — Responses 原生优先合同（responses_bridge）
+
+- 录制件 `tests/golden/responses_native_stream.sse`（created / output_text.delta /
+  completed 三事件确定性 SSE，非网络录制）。
+- RED→GREEN：`tests/unit/test_responses_bridge.py` 20 用例（含既有迁移用例）：
+  - 非流式/SSE 双场景：`/v1/responses` 直连原生（200/committed 不落兜底）；
+    SSE 帧重组与 golden 逐事件一致（chunked）。
+  - `RESPONSES_UNSUPPORTED_STATUSES`（400/404/422/501）→ 恰好一次 Chat 兜底，
+    封装断言走 `json_errors`；committed 后失败**永不**兜底（探测 committed=True
+    + 404，monkeypatch `_probe_native`）。
+  - 两个文本突变负对照（importlib 加载临时突变副本）：翻转原生优先锚点 /
+    打开兜底 gate 锚点 → 各自锚定用例失败，证明合同被钉住。
+- 回归：既有 responses 兜底行为全部保留（SSE 透传、封装格式不变）。
+
+## Task 5 — 出站账号池占位（F6 stub）
+
+- RED→GREEN：`tests/unit/test_outbound_credentials.py` 7 用例：
+  恒等透传（普通/空字符串）、keyword-only 固定参数面（无 extras）、
+  双协议真实回环 stub（OpenAI Bearer / Anthropic x-api-key 原样出站）、
+  每转发恰好调用一次、重试沿用同一选定值、入站 F7 标记不入参、
+  空 key header 语义不变（空 Bearer）。
+- 设计文档 `docs/superpowers/specs/2026-11-19-outbound-account-pool-design.md`：
+  F7 入站 / 模型池 / F6 出站三层分清表、接入点、未来方向（配额路由/
+  账号隔离/会话亲和，均需另立评审）、硬约束（同 attempt 不换 key、
+  committed 不可重放、空 key 语义不变）。
+
 ## 过程修复记录
 
 - `connect_handlers._read_json` 初版把 `_read_body()`（已解析 dict）当字节处理
@@ -58,8 +84,13 @@
 
 ## 全量与遗留
 
-- 全量：`macfabric_gateway` 下 `../.venv/bin/python -m pytest tests -q`
-  → **603 passed**（Task 4/5 完成后复跑数字见下文补记）。
-- 沙箱残留：`~/.claude/jobs/f1f58533/tmp/m3-accept/`（合成 key、种子配置、
-  recorder 日志），不含任何真实凭据；teardown 已停网关/recorder 进程。
-- 未验平台：Linux（本机 macOS only）；CLI 验收仅覆盖 macOS arm64 本机版本。
+- 最终全量（收尾门）：`macfabric_gateway` 下
+  `../.venv/bin/python -m pytest tests -q` → **623 passed, 4 warnings in 50.77s**
+  （完整输出存档 `.superpowers/sdd/2026-11-19-m3-connect-responses-account-pool/final-suite.txt`；
+  warnings 为既有 pytest 弃用提示，非本分支引入）。
+- `git diff --check` clean（无空白错误）。
+- 沙箱终态：网关（8998）与 recorder（8997）进程均已停止、端口无监听；
+  `~/.claude/jobs/f1f58533/tmp/m3-accept/` 留存合成 key、种子配置、recorder
+  日志，**不含任何真实凭据**。
+- 未验平台：Linux（本机 macOS only）；CLI 验收仅覆盖 macOS arm64 本机版本
+  （claude 2.1.328 / codex 0.167.0）。无硬件依赖合同（单测）不依赖平台。
