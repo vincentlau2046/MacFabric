@@ -105,3 +105,35 @@ policy=off 与 enforced=true 并存（legacy 仍在拦截），显示迁移宽�
 
 脚本存档：`~/.claude/jobs/f1f58533/tmp/m2t2-browser-phaseA.js`、
 `m2t2-browser-phaseB.js`（会话临时件）。沙箱已停止（pid kill 确认）。
+
+## T3 deploy 页 autostart 开关
+
+### 单元/合同测试（test_dashboard_deploy_autostart.py，5 tests）
+
+- 组装契约：`depAutostart` 容器入 fragment、`snapshot_seq` 序号守卫内联。
+- 源码契约：set-autostart 端点、UI.adminHeaders、每模型单写在途
+  （_inflight）、写后 forceRefresh 确认读、「待回读确认」、不一致提示、
+  「下次网关启动生效」、推理页导航、无 inline onclick。
+- 全量 `pytest tests -q` → **452 passed**。
+
+### 浏览器行为验收（隔离沙箱 + QA 模型 YAML，18 项断言全绿）
+
+Group 1（真实 HTTP）：初始关 → 开（YAML `autostart: true` 回读）→ 关
+（YAML `autostart: false`）→ 页面重载回读一致；「去推理页启停」导航生效。
+测试模型为 llama_cpp 指向不存在路径，未触发任何真实模型启动。
+
+Group 2-4（stopPolling + 显式响应队列，逐请求确定性控制）：
+- 乱序不反跳：写前旧请求的响应（关）最后到达 → store 序号守卫整包丢弃，
+  界面/store 保持开，恰好 1 次 POST。
+- 失败回滚：POST 500 → toast + 显示回滚到快照值；随后成功路径正常。
+- 连点防重复：250ms 在途窗口内第二击命中禁用按钮，仅 1 次 POST。
+- 确认读暂时失败：force 500 → 「待回读确认」保持；再失败仍保持
+  （快照失败不作确认）；成功且一致 → 解析为开；确认读与写值不一致 →
+  「服务端回读与写值不一致」提示 + 按服务端值显示。
+
+验收中发现并修复 1 个实现 bug：`snapshot_seq` 最初在 `models` 写入前
+set，确认读事件回调读到旧 models，匹配/不一致判定失真（探针阶段暴露，
+非脚本问题）——已把序号推进移到快照状态全部应用完成之后。
+
+脚本存档：`~/.claude/jobs/f1f58533/tmp/m2t3-browser-acceptance.js`
+（会话临时件）。沙箱已停止（pid kill 确认）。

@@ -22,6 +22,10 @@ class StateStore {
     // Snapshot sync metadata
     this._etag = null;   // last etag received from /api/snapshot
     this._lastTs = 0;    // last (monotonic) snapshot timestamp
+    // M2-T3: 客户端请求序号 — 每次快照请求递增；200 应用时推进 _snapSeq。
+    // 迟到（低于已应用序号）的响应整包丢弃，不回写状态或 ETag。
+    this._reqSeq = 0;
+    this._snapSeq = 0;
   }
 
   /* ── Core pub/sub ── */
@@ -69,8 +73,11 @@ class StateStore {
   }
 
   /* ── API polling (single source of truth: /api/snapshot) ── */
+  appliedSeq() { return this._snapSeq; }
+
   async fetchSnapshot(force = false) {
     try {
+      const seq = ++this._reqSeq;
       const headers = {};
       if (this._etag && !force) headers['If-None-Match'] = this._etag;
       const res = await fetch('/api/snapshot', { headers, cache: 'no-store' });
@@ -92,6 +99,10 @@ class StateStore {
       }
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const snap = await res.json();
+
+      // M2-T3: 客户端请求序号守卫 — 迟到的旧请求响应整包丢弃（不回写状态/ETag）。
+      // 304（上方早退）不推进序号，不作写后确认。
+      if (seq < this._snapSeq) return null;
 
       // Out-of-order guard: drop stale responses (ts regressed).
       const stale = !force && snap.ts != null && this._lastTs > 0 && snap.ts <= this._lastTs;
@@ -180,6 +191,11 @@ class StateStore {
         changed: true,
         stale: false,
       });
+
+      // M2-T3: 应用本响应 — 推进已应用序号并广播（deploy autostart 确认读依据）。
+      // 必须在全部状态（含 models）写入之后：订阅方按事件读到的就是本次快照。
+      this._snapSeq = seq;
+      this.set('snapshot_seq', seq);
 
       // Trigger render via batched macrotask
       this._scheduleRender();
