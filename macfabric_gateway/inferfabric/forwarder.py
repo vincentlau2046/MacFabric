@@ -16,6 +16,7 @@ from http.client import HTTPConnection
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError as _HTTPError
 
+from inferfabric import outbound_credentials
 from inferfabric.config import (
     UPSTREAM_LOCAL_RETRIES,
     exponential_backoff,
@@ -300,9 +301,14 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
         # 厂商文档）→ 拼 /v1/messages（Anthropic SDK 行业惯例）
         _ab = provider_cfg.anthropic_base.rstrip('/')
         url = (_ab + "/messages") if _ab.endswith("/v1") else (_ab + "/v1/messages")
+        # F6 出站账号选择（M3 T5 占位）：能力/端点校验通过后、组装鉴权前
+        # 调用一次；默认恒等透传，重试沿用同值（headers 在重试循环外组装）。
+        _outbound_key = outbound_credentials.select_outbound_api_key(
+            provider_name=provider_cfg.name,
+            configured_api_key=provider_cfg.api_key)
         headers = {
             "Content-Type": "application/json",
-            "x-api-key": provider_cfg.api_key,
+            "x-api-key": _outbound_key,
             "User-Agent": _CLOUD_UA,
         }
     else:  # openai
@@ -320,9 +326,13 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
             return CloudResult(status=501, error=err, committed=False)
         _path = (upstream_path or "chat/completions").lstrip("/")
         url = f"{provider_cfg.openai_base.rstrip('/')}/{_path}"
+        # F6 出站账号选择（M3 T5 占位）：同上，单次调用、重试沿用。
+        _outbound_key = outbound_credentials.select_outbound_api_key(
+            provider_name=provider_cfg.name,
+            configured_api_key=provider_cfg.api_key)
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {provider_cfg.api_key}",
+            "Authorization": f"Bearer {_outbound_key}",
             "User-Agent": _CLOUD_UA,
         }
 
