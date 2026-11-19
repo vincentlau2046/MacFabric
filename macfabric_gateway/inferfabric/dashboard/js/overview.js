@@ -383,8 +383,59 @@
   }
 
   /* ── 总览页渲染入口 ── */
+  /* ── 内存账本卡（M2-T5，只读）──
+   * 数据源：snapshot.memory_ledger（ModelManager.memory_ledger_snapshot 投影：
+   * 与准入共享活跃模型基线账面；budget/pressure 取同一设备快照）。
+   * null = 非 unified 或平台快照缺失 → 空态，不伪造 0。
+   * 展示纪律：预算未知或为零不算百分比；超预算不掩盖原值（原样展示，
+   * 百分比仍如实给出）；只读 — 无任何控制动作。 */
+  var PRESSURE_LABEL = { 1: '正常', 2: '警告', 3: '严重' };
+
+  function renderLedger() {
+    var body = $('ovLedgerBody');
+    if (!body) return;
+    var led = store.get('memory_ledger');
+    if (!led) {
+      body.innerHTML = '<p class="muted">统一内存账本不可用（非统一内存平台或设备快照缺失）。</p>';
+      return;
+    }
+    var committed = led.committed_mb;
+    var budget = led.budget_mb;
+    var budgetKnown = budget != null && budget > 0;
+    var pct = budgetKnown && committed != null ? (committed / budget * 100) : null;
+    var over = budgetKnown && committed != null && committed > budget;
+    var pLv = led.pressure_level;
+    var pTxt = pLv != null ? (PRESSURE_LABEL[pLv] || ('等级 ' + pLv)) : '未知';
+    var pCls = pLv === 1 ? 'ok' : (pLv === 2 ? 'warn' : (pLv === 3 ? 'crit' : ''));
+    var rows = (led.entries || []).map(function (e) {
+      return '<tr><td class="mono">' + escHtml(e.name) + '</td>' +
+        '<td class="mono">' + UI.fmtNum(e.mem_baseline_mb) + ' <span class="muted">MB</span></td>' +
+        '<td class="mono">' + escHtml(e.mode || '—') + '</td></tr>';
+    }).join('');
+    body.innerHTML =
+      '<dl class="ov-stats">' +
+        '<div class="ov-stat"><dt>账面占用</dt>' +
+          '<dd class="mono' + (over ? ' ov-ledger-over' : '') + '">' +
+            UI.fmtNum(committed) + ' <span class="muted">MB</span>' +
+            (budgetKnown
+              ? ' / ' + UI.fmtNum(budget) + ' <span class="muted">MB</span>'
+              : ' / <span class="muted">预算未知</span>') +
+          '</dd></div>' +
+        '<div class="ov-stat"><dt>占预算</dt>' +
+          '<dd class="mono">' + (pct == null ? '—' : pct.toFixed(0) + '%') + '</dd></div>' +
+        '<div class="ov-stat"><dt>内存压力</dt>' +
+          '<dd><span class="badge ' + pCls + '">' + escHtml(pTxt) + '</span></dd></div>' +
+      '</dl>' +
+      ((led.entries || []).length
+        ? '<table class="if-table"><thead><tr><th>模型</th><th>基线账面</th><th>模式</th></tr></thead>' +
+          '<tbody>' + rows + '</tbody></table>'
+        : '<p class="muted">当前无活跃模型入账（账面 0 = 空闲真实值，非未知）。</p>') +
+      '<p class="if-field-hint">账面占用 = 活跃模型基线合计（准入账面口径），非进程实测内存，也不代表下一模型可准入额度。</p>';
+  }
+
   function renderOverview() {
     renderActive();
+    renderLedger();
     renderSpark();
     renderAnoms();
   }

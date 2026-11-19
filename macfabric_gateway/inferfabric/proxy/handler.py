@@ -1736,6 +1736,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         )
         dev_tel = pm.telemetry.device_telemetry
         dev_snap = pm.telemetry.get_device_snapshot()
+        # M2-T5: 内存账本只读投影 — 复用上面已获取的 dev_snap（同一探针同一
+        # 时间戳），观测路径不做额外探测；旧 mgr 测试桩缺省兼容为 None。
+        _ledger_fn = getattr(pm.mgr, "memory_ledger_snapshot", None)
+        memory_ledger = _ledger_fn(dev_snap) if callable(_ledger_fn) else None
         device_env = {"snapshot": snapshot_to_dict(dev_snap),
                       "capabilities": capabilities_to_dict(dev_tel.capabilities())}
         legacy = legacy_gpu_fields(dev_snap)
@@ -1779,6 +1783,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         content = {
             "status": status, "system": system, "models": models,
             "device": device_env,
+            "memory_ledger": memory_ledger,
             "history": history, "token_stats": token_stats or {},
             "request_log": request_log, "metrics_24h": metrics_24h or {},
             "local_models": {"discovered": [], "configured": list(pm.mgr._models.keys()),

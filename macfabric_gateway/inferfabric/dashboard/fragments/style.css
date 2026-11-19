@@ -787,6 +787,9 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 
 /* ── 总览页组件 ───────────────────────────────────────────────── */
 
+/* 内存账本卡：超预算原样展示，仅加警示色，不掩盖原值（M2-T5） */
+.ov-ledger-over { color: var(--crit); }
+
 /* 活跃模型卡 stat 网格（dl → 2 列） */
 .ov-stats {
   display: grid;

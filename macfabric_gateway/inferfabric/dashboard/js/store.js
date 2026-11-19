@@ -183,6 +183,8 @@ class StateStore {
       this.set('request_log', snap.request_log || []);
       this.set('metrics_24h', snap.metrics_24h || {});
       this.set('local_models', snap.local_models || { discovered: [], configured: [] });
+      // M2-T5: 内存账本只读投影 — null = 非 unified / 平台快照缺失（缺省兼容）
+      this.set('memory_ledger', snap.memory_ledger || null);
       this.set('sync_meta', {
         etag: this._etag,
         rev: (this._etag || '').slice(1, 9) || '',

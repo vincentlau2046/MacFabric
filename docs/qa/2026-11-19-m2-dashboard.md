@@ -197,3 +197,44 @@ GET/YAML 回读同源验证 update_model_spec 真实语义：
 
 脚本存档：`~/.claude/jobs/f1f58533/tmp/m2t4-browser-acceptance.js`
 （会话临时件）。沙箱已停止（pid kill 确认）。
+
+## T5 overview 内存账本卡（只读投影）
+
+### 单元/合同测试（test_memory_ledger_snapshot.py，11 tests + 既有
+test_device_api_contract.py 12 tests 保持原行为）
+
+- 投影：活跃模型全额记账（baseline 缺省回退 peak_vram_mb）；不在活跃
+  集合的模型不入账（已退出进程的 llama.cpp sleep）；无 25% 睡眠折扣；
+  统一内存但采样字段缺失保留 null、committed 仍可计算；空闲 committed=0；
+  非 unified / 无快照 → None；准入路径不变（目标排除 — 否则会
+  「已在运行」放行；预算探测走原探针）。
+- 接线：handler 把已获取的 dev_snap 显式传入（同一快照对象、不新增探针，
+  dev.calls==1）；旧 mgr 测试桩（无该方法）缺省兼容 memory_ledger=null；
+  memory_ledger 变化进 ETag。
+- 前端契约：store 透传；overview 压力四级文案（正常/警告/严重/未知）、
+  预算未知/零不算百分比、账本卡只读（renderLedger 窗口无 data-action）。
+- RED→GREEN 记录在案；全量 `pytest tests -q` → **470 passed**。
+
+### 真实 HTTP + 浏览器行为验收（隔离沙箱，16 项断言全绿）
+
+Group 1（真实后端，macOS 统一内存 + 播种夹具）：models.d 放 QA 模型
+YAML（mem_baseline_mb 3100，指向不存在路径，未拉起任何进程），StateDB
+直接播种 active_services —— 不为验收重启或拉起宿主模型。卡片展示
+committed 3,100 / 预算 28,672 MB，压力徽章与同响应 device.snapshot
+pressure_level 映射一致，条目行含 qa-ledger-model，卡内无 data-action。
+
+Group 2（stopPolling + 显式响应队列，逐快照定制）：压力 2→警告、
+3→严重、null→未知；预算 0 / null →「预算未知」且不出现百分比、
+committed 原值仍展示；超预算 26,000/24,576 → 原值不掩盖（106% 如实
+给出）；memory_ledger null → 「不可用」空态；非 unified（vram）→
+同样空态。递增 ts 规避 store 乱序守卫（T3 同款坑，脚本侧修正）。
+
+验收中发现的过程性事实（非缺陷）：网关 health_monitor 每 60s reconcile
+会清掉「DB 有但实际未运行」的播种活跃服务 —— Group 1 验收窗口用
+「重启网关 + 立即播种」获得确定性（首跑曾撞上 reconcile 清种）。
+
+隔离核验：写入只落沙箱 `$ROOT/state/` + `models.d/`；生产
+`~/.inferfabric` 在验收窗口内无新写入。
+
+脚本存档：`~/.claude/jobs/f1f58533/tmp/m2t5-browser-acceptance.js`
+（会话临时件）。沙箱已停止（pid kill 确认）。
