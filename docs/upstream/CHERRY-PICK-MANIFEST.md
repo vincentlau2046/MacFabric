@@ -117,6 +117,10 @@
 > - ③ **PR #10**（pick/pull-failfast）：选项 2′ = start path 消费 `ensure_image_pulled` 结构化结果，`status=error` 时**不发 docker run** 直接中止（错误含 stderr 摘要+重试指引）；`ensure_image_pulled` 失败结果新增 `detail`；docker run argv 零改动；3 新 abort 测试 + 3 个存量 start 测试补显式 pull-success 桩（其假 run 从未模拟 docker inspect，潜在问题被 fail-fast 暴露）；全量 2252 绿（darwin+linux）。
 > - ① dashboard `iff remove` 入口：随下一 UI PR（peer 弧线协调），验收门槛=真实浏览器交互测试（维护人明示）。
 > 两 PR 均 §3.1 即时 ready-for-review（#9 评论 6998096851、#10 评论 6998260401）。 维护人回帖确认三条全收并更新矩阵（6998050891），附 PR #10 三点评审清单：本轮已逐点自查（(a) inspect 30s 超时只落入 pull 步骤，非 ok 一律 abort；(b) `_try_adopt` 首行镜像身份校验，不匹配走重建落入闸门、匹配则镜像必然在场且收养路径不发 docker run；(c) 已实现），并将三点取证作为评论贴到 #10（6998455758），不改码等评审。
+>
+> **评审结果**（2026-11-19）：
+> - **PR #10 已合并**（APPROVE-WITH-NITS，rebase 为 `ba9e56f`；clean worktree 2252 绿）。4 个 nit 均非阻塞（过时 docstring、wake 边缘→已记入 #8 follow-up（离线+inspect 瞬时失败会 abort 本可成功的启动；廉价加固=失败后补一次本地 inspect）、2 个测试未断言 retry 提示、闸门块三处重复）；维护人在 #8 关闭矩阵中标记 item 3 **Done**。
+> - **PR #9 REQUEST-CHANGES**（2 Blocking + 3 Nits）→ 已修并推送 `2f19b76`：B1 baseline 收窄为 config 名集合（loader 双双 `models.get()` 按 config 名取键，served-name 键是死条目必须上报，对应测试反置）；B2 两个 CLI 测试 monkeypatch `inferfabric.config.APPLIED_SCENARIOS_FILE`（原测试在真机上被 `~/.inferfabric/active_scenarios.yaml` 泄漏打爆——并更正 PR body 归因：那次 1 failed 是本 PR 的锅而非 r9 flake）；N1 cmd_models 漂移检查 fail-open 包裹；N3 补 list/空侧车形状 + 双文件同漂测试。2256 passed（唯一失败仍为上游 r9 flake），§3.1 评论 6998984651，等复审。
 
 **范式原则（用户原话裁决）**：部署不得影响系统环境；整体卸载/安装必须方便（一键化、容器化拆除）。Mac 侧表达 = 用户态自包含（engines/ 独立二进制 + venv + `python_bin` 显式）；**x86+NVIDIA 侧不是照搬 Mac 路径，而是同一原则的本地表达**——上游既有 Docker（ninfer/sglang）与 conda env 路径需审计：容器/venv 是否项目内自包含、卸载是否引用计数拆除、有无系统级残留（conda 全局、系统 site-packages、/usr/local 二进制）。产出物 = 适配方案 + 对应 pick 分支，先在 PR #1 讨论区或单独 issue 与上游对齐形态再动手。
 
