@@ -179,7 +179,10 @@
     _catalogLoading = true;
     _fetch(URL_CATALOG, {}, function (err, j) {
       _catalogLoading = false;
-      if (err) { UI.toast('目录加载失败：' + err.message, 'error'); return; }
+      if (err) {
+        if (!err.unauthorized) UI.toast('目录加载失败：' + err.message, 'error');
+        return;
+      }
       _catalog = j;
       renderCatalog();
     });

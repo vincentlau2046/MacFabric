@@ -54,13 +54,24 @@ def test_deploy_js_autostart_write_flow():
     # 每模型单写在途（防连点重复 POST）
     assert "_inflight" in src
     # 写后无条件确认读；确认读未到显示「待回读确认」；不一致按服务端显示并提示
-    assert "forceRefresh" in src
+    assert "forceRefreshEx" in src
     assert "待回读确认" in src
     assert "不一致" in src
+    # 确认读门槛 = 确认读请求自身的发出序号（终审 Important-2：写前在途
+    # 轮询的序号可能恰为 appliedSeq()+1，不得充当确认读）
+    assert "minSeq" in src
     # 明示生效时机
     assert "下次网关启动生效" in src
     # 即时 switch/stop 复用推理页导航
     assert "tab-inference" in src
+
+
+def test_store_forceRefreshEx_returns_request_seq():
+    src = _src("store.js")
+    # fetchSnapshotEx 返回 {seq, snap}（本次请求的发出序号 + 应用结果）；
+    # fetchSnapshot 保持旧签名/返回（兼容轮询与既有调用方）
+    assert "fetchSnapshotEx" in src
+    assert "return { seq: seq, snap: snap }" in src
 
 
 def test_deploy_html_autostart_card():

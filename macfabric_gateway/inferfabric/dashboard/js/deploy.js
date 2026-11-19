@@ -248,13 +248,17 @@
           renderAutostart();
           return;
         }
-        // 写成功：按响应值显示 + 记待确认（minSeq = 已应用序号 + 1，
-        // 即任何不早于写后请求的已应用 200 快照都可确认），再无条件确认读
-        _pending[name] = { value: !!j.autostart, minSeq: store.appliedSeq() + 1 };
+        // 写成功：按响应值显示 + 记待确认，再无条件确认读。
+        // 确认读门槛 = 确认读请求自身的发出序号（终审 Important-2）：
+        // 写前在途轮询的序号可能恰为 appliedSeq()+1，若以其为确认读，
+        // 旧值快照会先应用并误报「不一致」— onSeq 在请求发出前同步回调，
+        // 早于任何响应应用。
+        var pend = { value: !!j.autostart, minSeq: Infinity };
+        _pending[name] = pend;
         renderAutostart();
         renderAutostartHint();
         UI.toast(name + ' 自启动已保存（下次网关启动生效）', 'ok');
-        store.forceRefresh();
+        store.forceRefreshEx(true, function (seq) { pend.minSeq = seq; });
       }, function () {
         delete _inflight[name];
         UI.toast('自启动保存失败：HTTP ' + res.status + '（非 JSON 响应）', 'error');

@@ -326,12 +326,8 @@ class ModelManager:
                 (mac_platform.budget_mb() - (mac_platform.mem_used_mb() or 0))
                 if mac_platform.mem_used_mb() is not None else None),
         )
-        for name, m in self._models.items():
-            if name == model.name or name not in self.active_services:
-                continue
-            base2 = getattr(m, "mem_baseline_mb", 0) or getattr(m, "peak_vram_mb", 0)
-            e = ledger.register(name, base2, ModeOf(m))
-            e.state = Lifecycle.READY  # 运行中即占内存
+        # 活跃模型登记与观测路径共享（M2-T5 终审：两条路径同一账面口径）
+        self._register_active_ledger_entries(ledger, exclude=model.name)
         e = ledger.register(model.name, baseline, ModeOf(model))
         return ledger.admit(model.name, force=force)
 

@@ -75,9 +75,18 @@ class StateStore {
   /* ── API polling (single source of truth: /api/snapshot) ── */
   appliedSeq() { return this._snapSeq; }
 
-  async fetchSnapshot(force = false) {
+  /* M2-T3 终审 Important-2：fetchSnapshotEx 返回 {seq, snap} — seq 是本次
+   * 请求的发出序号（在首个 await 前同步分配；onSeq 在发出前同步回调，
+   * 供写后确认读以「确认读请求自身的序号」为门槛，写前在途轮询的序号
+   * 可能恰为 appliedSeq()+1，不得充当确认读）。
+   * fetchSnapshot 保持旧签名/返回（轮询与既有调用方不受影响）。 */
+  async fetchSnapshotEx(force = false, onSeq = null) {
+    var seq = 0;
     try {
-      const seq = ++this._reqSeq;
+      seq = ++this._reqSeq;
+      if (typeof onSeq === 'function') {
+        try { onSeq(seq); } catch (e) { console.warn('[state] onSeq error:', e); }
+      }
       const headers = {};
       if (this._etag && !force) headers['If-None-Match'] = this._etag;
       const res = await fetch('/api/snapshot', { headers, cache: 'no-store' });
@@ -95,14 +104,14 @@ class StateStore {
           changed: false,
           stale: false,
         });
-        return null;
+        return { seq: seq, snap: null };
       }
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const snap = await res.json();
 
       // M2-T3: 客户端请求序号守卫 — 迟到的旧请求响应整包丢弃（不回写状态/ETag）。
       // 304（上方早退）不推进序号，不作写后确认。
-      if (seq < this._snapSeq) return null;
+      if (seq < this._snapSeq) return { seq: seq, snap: null };
 
       // Out-of-order guard: drop stale responses (ts regressed).
       const stale = !force && snap.ts != null && this._lastTs > 0 && snap.ts <= this._lastTs;
@@ -119,7 +128,7 @@ class StateStore {
           changed: false,
           stale: true,
         });
-        return snap;
+        return { seq: seq, snap: snap };
       }
 
       const status = snap.status || {};
@@ -201,7 +210,7 @@ class StateStore {
 
       // Trigger render via batched macrotask
       this._scheduleRender();
-      return snap;
+      return { seq: seq, snap: snap };
     } catch (e) {
       console.warn('[state] snapshot fetch error:', e);
       this.set('api_error', e.message);
@@ -212,21 +221,33 @@ class StateStore {
         changed: false,
         stale: true,
       });
-      return null;
+      return { seq: seq, snap: null };
     }
   }
 
+  async fetchSnapshot(force = false) {
+    const r = await this.fetchSnapshotEx(force);
+    return r ? r.snap : null;
+  }
+
   /* Force a fresh snapshot (manual refresh / post-action refresh).
-   * v2: 按 TAB 注册的渲染器替代 window.refreshPanels。 */
-  async forceRefresh() {
-    const snap = await this.fetchSnapshot(true);
-    if (snap) {
+   * v2: 按 TAB 注册的渲染器替代 window.refreshPanels。
+   * forceRefreshEx 另返回 {seq, snap}（seq = 本次请求发出序号）——
+   * 写后确认读以此为门槛（deploy.js）；forceRefresh 保持旧返回。 */
+  async forceRefreshEx(force = true, onSeq = null) {
+    const r = await this.fetchSnapshotEx(force, onSeq);
+    if (r && r.snap) {
       const fn = window.tabRenderers && window.tabRenderers[this.get('tab_active')];
       if (typeof fn === 'function') {
-        try { fn(snap); } catch (e) { console.warn('[store] tabRenderer error:', e); }
+        try { fn(r.snap); } catch (e) { console.warn('[store] tabRenderer error:', e); }
       }
     }
-    return snap;
+    return r;
+  }
+
+  async forceRefresh() {
+    const r = await this.forceRefreshEx();
+    return r ? r.snap : null;
   }
 
   _scheduleRender() {

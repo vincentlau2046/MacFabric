@@ -51,6 +51,11 @@ def test_packs_js_consumes_full_lifecycle():
     # 卸载双段确认（预览 → 显式 confirm → confirmed:true）
     assert "UI.confirm" in src
     assert "confirmed" in src
+    # 401 专用提示不被覆盖（终审 Important-1）：每个弹通用错误 toast 的
+    # 回调都必须先过 unauthorized 守卫 —— 5 个写回调 + loadCatalog（GET 路径
+    # 曾漏网，401 专用提示被「目录加载失败」毫秒级覆盖）
+    assert src.count("err.unauthorized") >= 6, \
+        "every generic-error toast callback must guard err.unauthorized"
 
 
 def test_packs_js_covers_real_install_stages():

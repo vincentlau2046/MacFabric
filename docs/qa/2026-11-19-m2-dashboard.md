@@ -238,3 +238,35 @@ committed 原值仍展示；超预算 26,000/24,576 → 原值不掩盖（106% �
 
 脚本存档：`~/.claude/jobs/f1f58533/tmp/m2t5-browser-acceptance.js`
 （会话临时件）。沙箱已停止（pid kill 确认）。
+
+## 全分支终审（fresh reviewer）与修复轮
+
+### 终审结论：approve-with-fixes（2 Important + 2 Minor；评审者独立跑全量 470 绿）
+
+### 修复轮（每项 RED→GREEN，全量 471 绿）
+
+1. **Important — packs.js loadCatalog 漏 401 守卫**（QA T1 修过 5 个写回调，
+   GET 路径漏网）：目录加载失败 toast 毫秒级覆盖 401 专用提示。修复为
+   `if (!err.unauthorized)` 守卫；合同测试加 `err.unauthorized` 计数 ≥6 钉住。
+2. **Important — deploy 确认读门槛允许写前在途轮询充当确认读**：
+   `minSeq = appliedSeq()+1` 时，写前已发出在途的轮询（序号恰为 +1）先于
+   确认读应用 → 误报「不一致」+ 界面闪回关。修复：store 新增
+   `fetchSnapshotEx(force, onSeq)`（返回 `{seq, snap}`，onSeq 在请求发出前
+   同步回调）+ `forceRefreshEx`；deploy 以确认读请求自身序号为 minSeq；
+   `fetchSnapshot`/`forceRefresh` 旧签名不变。**浏览器 RED→GREEN 闭环**：
+   专用交错场景脚本先在修复版上绿、临时还原旧实现后精确复现评审描述的
+   失败（误结算 + 误报 toast）、恢复修复并重启网关（dashboard HTML 进程内
+   缓存——改 JS 后必须重启）再绿。
+3. **Minor 4 重定级入修复（计划符合性）**：计划要求「两条路径共享活跃模型
+   登记逻辑」，此前 helper 仅观测路径消费、`_admit_memory` 留有内联副本
+   （漂移风险正是账本功能要防的口径错位）——回接到共享 helper，既有准入
+   测试（目标排除 + 探针策略）作门，保持绿。
+
+### 遗留（deferred minors，未修）
+
+- packs.js `stageLabel` 未知阶段回退 `String(stage)` 未经 escHtml 进
+  innerHTML —— 今天 stage 为服务端枚举无实际注入面，违反自家「动态内容
+  按不可信处理」约定，后续顺手修。
+
+隔离核验：修复轮浏览器验证写入只落沙箱；生产 `~/.inferfabric` 无新写入。
+脚本存档：`~/.claude/jobs/f1f58533/tmp/m2fix-browser.js`（会话临时件）。
