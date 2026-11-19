@@ -137,3 +137,63 @@ set，确认读事件回调读到旧 models，匹配/不一致判定失真（探
 
 脚本存档：`~/.claude/jobs/f1f58533/tmp/m2t3-browser-acceptance.js`
 （会话临时件）。沙箱已停止（pid kill 确认）。
+
+## T4 cloud 策展属性浮窗
+
+### 单元/合同测试（test_dashboard_cloud_attrs.py，7 tests）
+
+- 组装契约：属性入口（`cpm-attrs`）随 cloud.js 真实装配进页面。
+- 源码契约：入口同时出现在发现候选（仅可路由）/ 已声明 spec 行 /
+  事件分派（≥3 处）；tag 动作 + 无变更短路（「无变更」不发 POST）；
+  能力回填以原始声明为准（`=== true`，显式 false 与 null 同渲染、
+  不动即保留）；数值显式清除发 `null`；空串判定 `trim() === ''`
+  （0 ≠ 未设置）；token 数 `Number.isInteger`、价格 `isFinite`；
+  保存失败内联错误 `cpAttrsErr`（输入保留可更正）；无 inline onclick。
+- YAML 落盘回读契约（序列化六键 round-trip，RED→GREEN 见下）。
+- 全量 `pytest tests -q` → **459 passed**。
+
+### 真实 HTTP + 浏览器行为验收（隔离沙箱 + 预置 qa-cloud provider，
+发现关闭、openai_base 指向不可达地址，不连真实 provider；27 项断言全绿）
+
+POST 拦截记录请求体后放行到真实后端（route.continue）——请求体断言与
+GET/YAML 回读同源验证 update_model_spec 真实语义：
+
+- 回填：六键原始声明正确（含 qa-model vision=true 全值回填、qa-x 显式
+  false 渲染为未勾选 + 显式排除提示）。
+- 无改动保存：不发 POST + 「无变更」提示 + 浮窗关闭。
+- 价格改 0：请求体恰为 `{provider,action,model,price_input:0}`（数字 0），
+  GET 回读 0。
+- 重开回填 "0" 后清空：提交 `price_input: null`，GET 回读 null。
+- 非法输入（"abc"）：内联报错、浮窗不关、输入保留、无 POST；
+  更正为 4096 后成功提交并回读。
+- 视觉解除打标：提交 `supports_vision: false`，GET 回读 null（键移除）。
+- 取消：不提交，值不变。
+- 只改价格（qa-x 显式 false）：请求体仅含 price_input 键（不含
+  supports_vision/tools/context/max_output），GET 回读显式 false 保留。
+
+### 验收中发现并修复 1 个后端序列化缺陷（RED→GREEN）
+
+计划验收要求 GET/YAML 双回读。首轮浏览器验收暴露：
+`CloudDiscovery._serialize_providers` 从不写 `context_window` /
+`max_output_tokens`（在 known 排除集内挡住兜底循环，却无显式写出分支），
+且价格用 truthy 门（0 被当未设置丢弃）→ 属性经 save_config 后重启静默
+蒸发。修复：数值属性改 `is not None` 门并补两个 int 键的显式写出；
+新增 `test_cloud_attrs_yaml_roundtrip`（含 0 价 / 0 max_output_tokens /
+显式 false）先失败后通过。修复后浏览器验收重跑 27/27，YAML 回读逐键核对
+正确（写入的 4096 落盘、清除的键消失、qa-x 显式 false 保留）。
+
+### 遗留记录（不在本任务修，均既有行为）
+
+1. `discovery_enabled` 序列化/加载不对称：save_config 写平铺
+   `discovery_enabled: false`，加载只读嵌套 `discovery.enabled` → 关闭
+   发现的 provider 经 save_config 后重启发现重新开启（本轮验收实测复现）。
+2. 序列化 `timeout`/`discovery_interval` 等同样 truthy 门（0 不落盘）——
+   属性编辑器不管这些键，与 T4 无交互。
+3. 前端对 `supports_tools` 无面板入口（7.9.0 退役，字段格式兼容保留），
+   浮窗同样不提供——显式排除唯一入口仍是手编 YAML。
+
+隔离核验：写入只落沙箱 `$ROOT/state/`；生产 `~/.inferfabric` 在验收窗口
+内无新写入（token-stats.json mtime 为生产网关 pid 73943 例行写）。
+
+脚本存档：`~/.claude/jobs/f1f58533/tmp/m2t4-browser-acceptance.js`
+（会话临时件）。沙箱已停止（pid kill 确认）。
