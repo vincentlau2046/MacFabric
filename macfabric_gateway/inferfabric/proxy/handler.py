@@ -3252,9 +3252,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         except ValueError as e:
             self._send_json({"error": str(e)}, 400)
             return
+        except sqlite3.IntegrityError:
+            # 同名冲突（UNIQUE(name) 含已吊销行）：400 让用户改名，而非
+            # 落入 do_POST 的吞异常路径（连接无响应关闭，浏览器侧表现为挂起）
+            self._send_json({"error": f"同名 key 已存在（含已吊销）— 请换一个名称：{name}"}, 400)
+            return
         log.info("API key created via app settings: name=%s id=%s", name, entry.get("id"))
+        # no-store：明文 key 仅本次回显，绝不进共享缓存（M2-T2）
         self._send_json({"status": "ok", "key": token, "name": name,
-                         "note": "明文仅本次返回 — 请立即复制保存"})
+                         "note": "明文仅本次返回 — 请立即复制保存"},
+                        extra_headers={"Cache-Control": "no-store"})
 
     def _handle_security_revoke_key(self, pm):
         """POST /admin/security/keys/revoke {id} — 撤销指定 key。"""
@@ -3321,16 +3328,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 if not pm.auth.store.list_keys():
                     entry, token = pm.auth.store.create_key(key_name, None, None)
                     log.info("API key created from app settings: name=%s", key_name)
+                # no-store：本响应可能携带一次性明文 key（M2-T2）
                 self._send_json({"status": "ok", "policy": "all", "enforced": True,
                                  "key": token,
-                                 "note": None if token else "已有密钥 — 在 /admin/keys 列表管理（明文不再回显）"})
+                                 "note": None if token else "已有密钥 — 在 /admin/keys 列表管理（明文不再回显）"},
+                                extra_headers={"Cache-Control": "no-store"})
             else:
                 if isinstance(pm.auth, SecurityAuth):
                     pm.auth.store.set_policy("off")
-                    self._send_json({"status": "ok", "policy": "off", "enforced": False})
+                    self._send_json({"status": "ok", "policy": "off", "enforced": False},
+                                    extra_headers={"Cache-Control": "no-store"})
                 else:
                     self._send_json({"status": "ok", "policy": None, "enforced": False,
-                                     "note": "鉴权从未启用"})
+                                     "note": "鉴权从未启用"},
+                                    extra_headers={"Cache-Control": "no-store"})
         except (OSError, ValueError, sqlite3.Error) as e:
             log.error("security enable failed: %s", e)
             self._send_json({"error": f"security toggle failed: {e}"}, 500)

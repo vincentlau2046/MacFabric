@@ -57,3 +57,51 @@ error 分支的通用 toast 会立即覆盖它 —— 修复为回调遇
 脚本存档：`~/.claude/jobs/f1f58533/tmp/m2t1-browser-acceptance.js`（会话临时件）。
 
 沙箱已停止（pid kill 确认）。
+
+## T2 security 页（鉴权状态 / 密钥 / 一次性回显）
+
+### 单元/合同测试（test_dashboard_security_page.py + test_dashboard_security_responses.py，11 tests）
+
+- 组装契约：tab-security 真实装配（nav/容器/JS 内联），占位符与失败替身不残留。
+- 源码契约：四端点全集、UI.adminHeaders、tabRenderers['tab-security']、
+  UI.confirm、明文只经 textContent、禁浏览器存储/URL sink、tab_active 监听、
+  无「免鉴权」措辞、401 提示、无 inline onclick。
+- 响应契约（隔离临时密钥库，假 handler 直调 ProxyHandler 方法）：
+  首次启用 / 关闭 / 主动创建三类成功响应均 `Cache-Control: no-store`；
+  status/列表无明文且字段白名单 `{id,name,created_at,revoked}`；
+  库内只存摘要（security.db 字节不含明文）；重名创建 → 400 带指引
+  （RED→GREEN：未捕获 IntegrityError 曾沿 do_POST 吞异常路径无响应关闭连接）。
+- 全量 `pytest tests -q` → **447 passed**。
+
+### 真实 HTTP + 浏览器行为验收（隔离沙箱，两阶段，23 项断言全绿）
+
+Phase A（默认模式，真实后端 + 一次性迟到响应拦截）17 项：
+首次启用一次性回显、三态状态回读（不凭 enable 返回值推断）、已有密钥
+再开启不回显、已保存关闭/Esc/切页均清空明文、迟到响应被代次守卫丢弃
+（迟到 token 不出现在 DOM）、推理鉴权边界（无 key → 401，带 key → 非 401，
+经 POST /v1/chat/completions）、吊销警告（最后一把有「最后一把」警告，
+非最后无）、全吊销后开启被本地拦截（无 enable POST）+ 引导创建替换 key、
+关闭新策略后 off 显示迁移宽限且无「免鉴权」。
+
+Phase B（严格模式 MACFABRIC_ADMIN_REQUIRED=1 + 预置 legacy api_keys.yaml）6 项：
+无 admin token → 401 toast 且状态不渲染；输入 token 切页恢复 →
+policy=off 与 enforced=true 并存（legacy 仍在拦截），显示迁移宽限、
+无「免鉴权」；无 key 推理请求被拒（legacy 生效）；legacy key 通过鉴权。
+
+隔离核验：security.db / api_keys.yaml / security.enabled 只落沙箱
+`$ROOT/state/`；生产 `~/.inferfabric` 在验收窗口内无新写入
+（token-stats.json 的 mtime 为生产网关 pid 73943 的例行写，与沙箱无关）。
+验收用临时 token 文件已删除，QA 记录不含任何明文。
+
+验收中发现并修复 2 个问题：
+1. security.js 初版在 tab 激活分支漏调 loadStatus（渲染入口是
+   store.on('tab_active')，tabRenderers 仅 forceRefresh 调用）。
+2. 后端 `_handle_security_create_key` 只 catch ValueError，重名触发
+   IntegrityError 后沿 do_POST 通用路径被吞、连接无响应关闭（浏览器侧
+   表现为请求挂起）——补 catch 返回 400（RED→GREEN）。
+
+遗留（不在本任务修）：`do_POST`/`do_GET`/`do_DELETE` 通用异常路径吞异常
+不发响应是既有模式（handler.py:663/681/695），建议后续统一补 500 响应。
+
+脚本存档：`~/.claude/jobs/f1f58533/tmp/m2t2-browser-phaseA.js`、
+`m2t2-browser-phaseB.js`（会话临时件）。沙箱已停止（pid kill 确认）。
