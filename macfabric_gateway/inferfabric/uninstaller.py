@@ -154,19 +154,31 @@ def find_model_yaml(models_dir, name: str, cfg=None) -> Path | None:
 
 
 def weight_paths(cfg) -> list[str]:
-    """Weight paths a model consumes — reported, never deleted."""
+    """Weight paths a model consumes — reported, never deleted.
+
+    Covers the path-bearing engine configs only (vllm/sglang model_dir,
+    ninfer weight_path, llama_cpp model_path). ollama/tts/asr/comfyui
+    models under-report here by design — their weights live in daemon- or
+    env-managed stores the gateway does not track as files; nothing is
+    silently destroyed either way (weights are never deleted by this tool).
+    """
     paths: list[str] = []
     vllm = getattr(cfg, "vllm", None)
     sglang = getattr(cfg, "sglang", None)
     ninfer = getattr(cfg, "ninfer", None)
+    llama = getattr(cfg, "llama_cpp", None)
     for sub in (vllm, sglang):
         model_dir = getattr(sub, "model_dir", None) if sub is not None else None
         if model_dir:
             from inferfabric.config import MODEL_BASE
             paths.append(str(Path(MODEL_BASE) / model_dir))
-    wp = getattr(ninfer, "weight_path", None) if ninfer is not None else None
-    if wp:
-        paths.append(str(Path(wp).expanduser()))
+    for sub in (ninfer, llama):
+        # ninfer.weight_path / llama_cpp.model_path are explicit file paths
+        # (a llama_cpp GGUF may live anywhere), not MODEL_BASE-relative dirs.
+        # sub may be None; getattr(None, …, None) resolves to None.
+        wp = getattr(sub, "weight_path", None) or getattr(sub, "model_path", None)
+        if wp:
+            paths.append(str(Path(wp).expanduser()))
     return paths
 
 
@@ -339,9 +351,10 @@ def purge_pool_candidates(pools_path, model_names: set[str], *, host=None,
         payload.pop("revision", None)
         payload["expected_revision"] = live_rev
         try:
-            # Fork 提前修（上游 PR #11）：server 经 POST 路由 model-pools 更新
-            # （同步 server 无 do_PUT），PUT 会 501 使活 registry purge 必挂。
-            # 上游 PR #11 合入后此处与上游逐字收敛。
+            # The server routes the model-pools update via POST (the sync
+            # server only routes GET/POST; expected_revision travels in the
+            # body). PUT was a PR #7 regression: no do_PUT exists server-side,
+            # so the live-registry purge 501'd every time.
             _s, res = _admin_request("POST", "/admin/model-pools", host=host,
                                      port=port, token=token, payload=payload,
                                      timeout=timeout)
