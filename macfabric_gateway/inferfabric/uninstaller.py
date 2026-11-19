@@ -339,7 +339,10 @@ def purge_pool_candidates(pools_path, model_names: set[str], *, host=None,
         payload.pop("revision", None)
         payload["expected_revision"] = live_rev
         try:
-            _s, res = _admin_request("PUT", "/admin/model-pools", host=host,
+            # Fork 提前修（上游 PR #11）：server 经 POST 路由 model-pools 更新
+            # （同步 server 无 do_PUT），PUT 会 501 使活 registry purge 必挂。
+            # 上游 PR #11 合入后此处与上游逐字收敛。
+            _s, res = _admin_request("POST", "/admin/model-pools", host=host,
                                      port=port, token=token, payload=payload,
                                      timeout=timeout)
         except urllib.error.HTTPError as e:
