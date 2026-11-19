@@ -1,135 +1,118 @@
 # M2 Dashboard 对齐实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan inline once approved. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** App 功能在 Dashboard 有等价操作路径（§6.3 五项）：packs 页、security 页、deploy autostart 开关、cloud 属性浮窗、overview 内存账本卡。
+**状态：评审修订稿，待用户复核；未授权开始实施。**
 
-**Architecture:** 沿用上游 fragments/js 模式（无构建链）：fragment 只放容器卡、JS IIFE 注入 DOM、事件委托、`UI.adminHeaders()` 鉴权、`window.tabRenderers` 注册。新页只进新文件（上游摘取零冲突）；`base.html`/`dashboard/__init__.py` 仅注入点级注册改动；overview 账本走真账本快照（manager 只读方法 + `/api/snapshot` 扩字段，用户裁决 2026-11-19）。
+**Goal:** 在 Dashboard 承接 App 的五项操作或观测能力。顺序不变：T1 packs → T2 security → T3 deploy autostart → T4 cloud 属性浮窗 → T5 overview 账本。
 
-**Tech Stack:** 原生 JS（ES5 风格 IIFE）+ 既有 style.css 通用类；Python 侧 pytest（source-contract 模式 + 账本快照单测）。
+**Architecture:** 保留上游 fragments/JS 模式、现有 store 和管理态请求方式；新增页面只在 `base.html` 与 `dashboard/__init__.py` 注册，现有页做局部增量。后端不新增路由：T2 只给既有明文响应加防缓存头，T5 只给既有 `/api/snapshot` 加只读账本投影。
 
-**Spec:** docs/superpowers/specs/2026-11-18-python-gateway-refocus-design.md §6.3/§9/§10；差距盘点（2026-11-19 Explore 报告，五项端点/文件级证据）。
+**Tech Stack:** 原生 JS/HTML/CSS、pytest、Playwright 浏览器行为验收（不引入前端构建链或生产依赖）。
+
+**Spec:** `docs/superpowers/specs/2026-11-18-python-gateway-refocus-design.md` §6.3、§9、§10、§12；本稿落实 M2 方案评审意见。实际接口以当前 fork 代码为准；历史计划基线为 `06d4a26`，以实施前的实测结果为回归基线。
 
 ## Global Constraints
 
-- M2 不新增后端端点（裁决 6）；overview 账本=扩既有 `/api/snapshot` payload（用户裁决 2026-11-19），非新端点。
-- 面向上游化：文案跟上游既有风格（中文注释/标签，上游即中文）；新功能进新文件；触碰上游文件限注入点级并在 manifest 标注。
-- 前端无构建链：ES5 兼容 IIFE、`'use strict'`、字符串拼接 + `escHtml`、事件委托（无 inline onclick）。
-- 鉴权：packs/security 全部写操作经 `UI.adminHeaders()`（`X-Admin-Token`）；一次性回显（security key、明文）只展示一次，UI 提示"立即复制保存"。
-- None 语义：账本/遥测数据缺失显示 `—`，绝不显示 0 或伪造百分比（DeviceTelemetry 契约延续）。
-- 测试：每任务先写失败测试（source-contract 或单测），RED→GREEN；沙箱验证 `MACFABRIC_STATE_DIR=<tmp> EDGE_PROXY_PORT=8998`；全量回归 `cd macfabric_gateway && ../.venv/bin/python -m pytest tests/ -q`。
-- 回归基线：当前 main `3f3f392`，431 tests 绿。
+- 不新增 HTTP 路由，不改鉴权策略、模型准入策略或压力处置逻辑。账本是真实的**准入账面占用**，不是设备实测用量。未知值显示 `—`，不伪造 0；真实 0 原样显示。
+- 沿用同源请求、`UI.adminHeaders()`、既有组件与页面风格；新增事件用监听器或委托，动态内容按不可信数据处理。严格模式下管理接口的 GET 和写请求均可返回 401，提示查看顶栏 admin token，禁止自动重试写请求。
+- 实施获准后在独立功能分支 `feat/m2-dashboard` 上按顺序执行；阶段提交只包含对应任务的文件。任何推送、合入主线、打 tag、部署生产均不由计划复核自动授权。
+- 本文的产品路径均相对 `macfabric_gateway/`，计划、QA 和 manifest 路径相对仓库根。
 
 ## Review Focus
 
-1. **账本快照语义漂移**：snapshot 的 committed 必须 = `resident_total_mb()` 同一算法（SLEEPING=baseline//4、STOPPED 不计）；快照重建若与 `_admit_memory`（manager.py:307-336）的注册口径不一致（如把非 active 模型记为 READY），UI 数字会与准入行为矛盾——Task 5 测试必须钉住两者共用同一构造路径。
-2. **`dashboard/__init__.py` 硬编码清单漏改**：JS_MODULES 与 fragment 元组任一漏加 → 占位符静默残留或 JS 不加载（graceful degradation 会掩盖错误）——每新页任务的合同测试须断言两清单含新名。
-3. **admin token 缺失时的失败形态**：严格模式下 packs/security 写操作无 token → 401，页面须 toast 明确"需要 admin token"，不得静默空转。
-4. **一次性回显的复制安全**：security key 明文若被 innerHTML 注入后可再次读取（DOM 残留），关闭浮层须清空节点。
-5. **autostart 开关竞态**：snapshot 3s 轮询回填会覆盖用户刚点的开关状态——乐观更新后须以本地 pending 状态压制下一次轮询回填（或以响应值为准 + 失败回滚）。
+1. **T1 误导或误删**：真实阶段完整覆盖；预览失败或用户取消时零写入；确认明确说明最终候选引用以服务端执行时为准。
+2. **T2 登录态与明文**：策略 off 不等于旧鉴权 off；全吊销不等于首次启用；切页后迟到的明文响应不能重新弹出；两条可能返回明文的响应均 `no-store`。
+3. **T3 旧轮询回写**：提交前发出的轮询就算最后到达，也不能在保存成功后覆盖已确认的值。
+4. **T4 未编辑字段**：空表单、显式清空、价格 0 和能力解除打标是不同操作；保留原有的显式 `false`，不被打开再保存抹掉。
+5. **T5 账本口径漂移**：活跃成员与基线计算同准入；设备预算和压力来自 handler 已有快照；不把推算的卸载顺序显示成实际动作。
+
+## 前置检查与共用验证约定
+
+- [ ] **核实基线。** 确认分支、工作树与 Python 环境；检查 :8998 是否空闲，确认可用的浏览器验收工具与临时数据路径；不占用现有服务端口，不停止无关进程。
+- [ ] **跑全量基线。** 从仓库根执行 `cd macfabric_gateway && ../.venv/bin/python -m pytest tests/ -q`，记录命令、提交、退出码、用例数和已知失败。后续每任务用同一命令回归；历史绿灯不能代替本次基线。
+- [ ] **准备隔离验收。** 每次沙箱使用独立私有临时根，设置 `MACFABRIC_STATE_DIR=<tmp>/state`、`MACFABRIC_MODELS_DIR=<tmp>/models.d`、`EDGE_PROXY_HOST=127.0.0.1`、`EDGE_PROXY_PORT=8998`；`IFF_DATA_DIR` 已由 `config.py` 从 `MACFABRIC_STATE_DIR` 派生。启动前核验实际配置路径、监听、包目录及测试模型/缓存是否在隔离边界；清掉继承的生产凭据，不复制生产 DB 或 YAML，不启动真实生产模型或执行宿主清理。真实安装集成测试使用本机小包与桩引擎；不能确保隔离则停在可控桩测试，不把未跑路径记为通过。
+
+**验证方式：** 每个任务先写回归断言并看到预期 RED，再实现、定向 GREEN、全量回归。页面组装用 `get_html()` 合同测试；交互用真实浏览器加载沙箱 Dashboard 并操作 DOM，必要时用 Playwright 路由拦截精确控制延迟、状态码和数据。拦截用例验证 UI，不能代替真实 HTTP 合同验收。实施时在 `docs/qa/2026-11-19-m2-dashboard.md` 保存复跑步骤、请求/界面断言、结果及未覆盖项；不保留任何明文 key、admin token 或含秘密的 trace。长链验收以实际 pytest 摘要、浏览器断言结果和 QA 记录为终态，并设置失败、超时或进程退出提醒。
 
 ---
 
 ### Task 1: packs 页（能力包生命周期）
 
-**Files:**
-- Create: `macfabric_gateway/inferfabric/dashboard/fragments/packs.html`
-- Create: `macfabric_gateway/inferfabric/dashboard/js/packs.js`
-- Modify: `macfabric_gateway/inferfabric/dashboard/base.html`（nav 按钮 + `<!-- FRAGMENT:packs -->` + `<!-- JS:packs -->` 占位）
-- Modify: `macfabric_gateway/inferfabric/dashboard/__init__.py`（`JS_MODULES` + fragment 元组各加 `"packs"`）
-- Modify: `macfabric_gateway/inferfabric/dashboard/fragments/style.css`（进度条/包卡类，仅当通用类不够）
-- Test: `macfabric_gateway/tests/unit/test_dashboard_packs_page.py`
+**Files:** 新增 `inferfabric/dashboard/fragments/packs.html`、`inferfabric/dashboard/js/packs.js`；修改 `inferfabric/dashboard/base.html`、`inferfabric/dashboard/__init__.py`，必要时改 `inferfabric/dashboard/fragments/style.css`；测试 `tests/unit/test_dashboard_packs_page.py`。
 
-**Interfaces:**
-- Consumes: `GET /admin/packs/catalog`、`GET /admin/packs/status`（进行中条目含 stage 实时覆盖）、`POST /admin/packs/install {pack_id}`（202/409/404）、`POST /admin/packs/custom {name,url,capability,sha256?}`、`GET /admin/packs/uninstall-preview?pack_id=`、`POST /admin/packs/uninstall {pack_id,confirmed}`、`GET|POST /admin/packs/policy`（形状见 pack_handlers.py:184-564）。
-- Produces: `window.tabRenderers['tab-packs']`；nav 第 8 项"能力包"。
+**Interfaces:** `GET /admin/packs/catalog`、`GET /admin/packs/status`、`POST /admin/packs/install {pack_id}`、`POST /admin/packs/custom {name,url,capability,sha256?}`、`GET /admin/packs/uninstall-preview?pack_id=…` 返回 `{affected_pools:[{pool,candidate_id,model_name}]}`、`POST /admin/packs/uninstall {pack_id,confirmed}`、`GET|POST /admin/packs/policy`（`max_model_parameters_b`、`system_reserved_memory_mb`）。新页为 `tab-packs`，注册 `window.tabRenderers['tab-packs']`。
 
-- [ ] **Step 1: 失败测试** `test_dashboard_packs_page.py`：① `get_html()` 产物含 `tab-packs` 容器、nav 项、`packs.js` 内联（断言 `"packs" in dashboard.JS_MODULES` 且 fragment 元组含 packs，占位符 `FRAGMENT:packs`/`JS:packs` 不残留）；② packs.js 源含 `admin/packs/catalog`、`admin/packs/status`、`admin/packs/install`、`admin/packs/uninstall`、`admin/packs/policy`、`UI.adminHeaders`、`tabRenderers['tab-packs']`、`UI.confirm`（卸载双段确认）、stage→中文标签映射含全部 6 态（preflight/downloading/verifying/isolated_healthcheck/writing_config/installed/failed）；③ 无 inline `onclick=`。
-- [ ] **Step 2: 跑测试确认 RED**（新页不存在 → ①②失败）。
-- [ ] **Step 3: 实现**：fragment 容器卡（catalog 表 + status 进度区 + policy 卡 + 自定义包表单）；packs.js 轮询 status（仅 tab 激活时，2s）+ catalog 惰性加载；install/uninstall/custom 走 confirm→POST→toast；进度条用 stage 百分比映射（CSS 宽度）。
-- [ ] **Step 4: 测试 GREEN + 全量回归**。
-- [ ] **Step 5: 沙箱验收**（:8998）：catalog 200、policy GET/POST 往返、install 未知包 404 形态、Dashboard 页面 HTML 含 tab-packs。
-- [ ] **Step 6: Commit** `feat(dashboard): packs page — catalog/install/uninstall/policy UI`。
+- [ ] **写回归用例。** `test_packs_page_is_assembled`：nav、真实容器和脚本均在 `get_html()` 产物中，且没有残留占位或加载失败替身。浏览器用例：严格模式管理 GET/POST 401 有提示；卸载预览失败或用户取消时没有 POST；确认时仅发送一次带 `confirmed:true` 的 POST，并正确处理错误响应。
+- [ ] **验 RED。** 运行 `../.venv/bin/python -m pytest tests/unit/test_dashboard_packs_page.py -q`；确认页面组装/入口断言因功能缺失而失败。
+- [ ] **实现页面。** 展示 catalog、装机/自定义安装、状态、policy 和卸载；status 只在 tab 激活时每 2 秒刷新，不叠加请求。按服务端真实阶段显示 `preflight`、`staging`、`downloading`、`verifying`、`preparing_runtime`、`writing_config`、`isolated_healthcheck`、`gateway_reload`、`installed`、`failed`；未知阶段中性回退。不显示下载百分比或字节数。卸载先 GET 预览，再显式确认，列出当前候选并告知执行时以服务器重新计算的引用为准；预览失败不提交，提交期间防双击，不自动重试。
+- [ ] **验定向 GREEN。** 重跑本任务 pytest，预期退出 0。
+- [ ] **验沙箱行为。** 浏览器跑预览失败／取消／确认、401 恢复、安装阶段与失败态；对隔离包验安装之后状态变化、卸载与列表回读，policy 做 GET→POST→GET 回读，确认所有写操作只影响临时目录。
+- [ ] **验全量回归。** 跑共用 pytest 命令，预期无新增失败。
+- [ ] **做本地阶段提交。** `feat(dashboard): add packs lifecycle page`。
 
-### Task 2: security 页（安全密钥设置）
+### Task 2: security 页（状态、密钥、一次性回显）
 
-**Files:**
-- Create: `macfabric_gateway/inferfabric/dashboard/fragments/security.html`
-- Create: `macfabric_gateway/inferfabric/dashboard/js/security.js`
-- Modify: `base.html`、`dashboard/__init__.py`（同 Task 1 注册模式）
-- Test: `macfabric_gateway/tests/unit/test_dashboard_security_page.py`
+**Files:** 新增 `inferfabric/dashboard/fragments/security.html`、`inferfabric/dashboard/js/security.js`；修改 `inferfabric/dashboard/base.html`、`inferfabric/dashboard/__init__.py`、`inferfabric/proxy/handler.py`（仅响应头）；测试 `tests/unit/test_dashboard_security_page.py`、`tests/unit/test_dashboard_security_responses.py`。
 
-**Interfaces:**
-- Consumes: `GET|POST /admin/security/status`（`{active,policy,enforced,key_count,keys[]}`）、`POST /admin/security/enable {enforce,key_name?}`（首次启用明文 key 仅本次响应）、`POST /admin/security/keys {name?}`（同上）、`POST /admin/security/keys/revoke {id}`。
-- Produces: `window.tabRenderers['tab-security']`；nav 第 9 项"安全"。
+**Interfaces:** `GET /admin/security/status` → `{active,policy,enforced,key_count,keys:[{id,name,created_at,revoked}]}`；`POST /admin/security/enable {enforce,key_name?}`、`POST /admin/security/keys {name?}` 可能返回 `key`，这两条路由的成功响应使用 `Cache-Control: no-store`；`POST /admin/security/keys/revoke {id}`。新页为 `tab-security`，注册 `window.tabRenderers['tab-security']`。`active` 表示密钥存储可用，`policy` 表示新策略，`enforced` 表示实际鉴权状态；`key_count` 仅表示未吊销记录数，不承诺密钥一定有效。
 
-- [ ] **Step 1: 失败测试**：① 注册断言（同 Task 1 模式）；② security.js 源含四端点路径、`UI.adminHeaders`、enable 前有 `UI.confirm`（enforce=true 影响所有客户端）；③ 一次性回显契约：key 展示节点渲染后源码含"仅本次/复制"提示且有关闭清空逻辑（断言 `textContent=''` 或节点移除调用存在）；④ 无 inline onclick。
-- [ ] **Step 2: RED。**
-- [ ] **Step 3: 实现**：状态卡（active/policy/key_count + 密钥表格 id/name/created_at/revoked + 吊销按钮）、启用/停用卡（enforce 开关 + key_name 输入）、明文 key 模态（复制按钮 + 关闭清空）。
-- [ ] **Step 4: GREEN + 全量回归。**
-- [ ] **Step 5: 沙箱验收**：status 200；enable（enforce=false）往返；revoke 未知 id 404 形态。
-- [ ] **Step 6: Commit** `feat(dashboard): security page — key lifecycle + one-time reveal UI`。
+- [ ] **写回归用例。** `test_security_page_is_assembled`；`test_security_secret_responses_are_no_store`（隔离临时密钥库，分别断言首次启用与主动创建的响应头，状态/列表不含明文）。浏览器用例：首次启用后只回显一次；关闭、Esc、切页、迟到响应均不留明文在 DOM；`policy=off` 与 `enforced=true` 同时存在时不显示“免鉴权”；全吊销时引导创建替换 key；最后一把未吊销 key 的吊销有警告；严格模式 401 有提示。
+- [ ] **验 RED。** 运行 `../.venv/bin/python -m pytest tests/unit/test_dashboard_security_page.py tests/unit/test_dashboard_security_responses.py -q`；预期失败在新增页面与 `no-store` 断言。
+- [ ] **实现页面与响应头。** 策略变更后重读 status，不凭 `/enable` 的返回值推断实际是否鉴权。已初始化且未吊销数为零时，启用前引导先建新 key；从未初始化时走后端已有的首次发 key 流程。明文使用 `textContent` 临时显示，仅主动复制，不写浏览器存储、全局状态、toast、日志或 URL；所有离开路径清空并丢弃迟到的回显。只为两条既有成功响应加 `no-store`，不改后端策略。
+- [ ] **验定向 GREEN。** 重跑本任务 pytest，预期退出 0。
+- [ ] **验沙箱行为。** 全新临时库走浏览器首次开启→回显→关闭/切页→状态回读；验证临时推理请求未带 key 被拒，带新 key 通过鉴权；再覆盖创建、吊销及旧鉴权仍生效的分支。浏览器测试只记录非秘密断言。
+- [ ] **验全量回归。** 跑共用 pytest 命令，预期无新增失败。
+- [ ] **做本地阶段提交。** `feat(dashboard): add security settings and one-time key reveal`。
 
-### Task 3: deploy 页 autostart 开关
+### Task 3: deploy 页 autostart
 
-**Files:**
-- Modify: `macfabric_gateway/inferfabric/dashboard/js/deploy.js`、`fragments/deploy.html`、`fragments/style.css`（开关样式，如无通用类）
-- Test: `macfabric_gateway/tests/unit/test_dashboard_deploy_autostart.py`
+**Files:** 修改 `inferfabric/dashboard/js/deploy.js`、`inferfabric/dashboard/fragments/deploy.html`、`inferfabric/dashboard/js/store.js`（仅快照回写时序），必要时改 `inferfabric/dashboard/fragments/style.css`；测试 `tests/unit/test_dashboard_deploy_autostart.py`。
 
-**Interfaces:**
-- Consumes: snapshot `models[]`（`{name, autostart, ...}`，manager.py:249）；`POST /admin/models/set-autostart {name, enabled}`（`{status:"ok",model,autostart}` / 404 / 500）。
-- Produces: deploy 页模型自启列表/开关列；`window.tabRenderers['tab-deploy']` 内新增渲染段。
+**Interfaces:** snapshot `models[].{name,autostart}`；`POST /admin/models/set-autostart {name,enabled:bool}` → `{status:"ok",model,autostart}`。按钮注明“下次网关启动生效”；即时 switch/stop 复用推理页操作，从部署页提供导航，不再造一套按钮。
 
-- [ ] **Step 1: 失败测试**：① deploy.js 源含 `set-autostart`、`autostart` 状态回填（从 snapshot models[].autostart）、pending 压制逻辑（Review Focus 5：断言存在 pending-set 结构或在响应确认前不回填的分支）；② `UI.adminHeaders` 用于 POST；③ fragments/deploy.html 有承载容器。
-- [ ] **Step 2: RED。**
-- [ ] **Step 3: 实现**：deploy 页新增"自启动"卡：模型行 + 开关；点击→乐观置 pending→POST→成功以响应值落定/失败回滚+toast；轮询回填跳过 pending 项。
-- [ ] **Step 4: GREEN + 全量回归。**
-- [ ] **Step 5: 沙箱验收**：set-autostart 对真实/临时模型往返（enabled true→false），404 形态。
-- [ ] **Step 6: Commit** `feat(dashboard): autostart toggles on deploy page`。
+- [ ] **写回归用例。** `test_deploy_autostart_is_assembled`。浏览器用例：初始关，先扣住一个返回旧值的快照；点开并让 POST 成功，先交付一个写后新快照（开），最后交付被扣的快照（关），界面和 store 不得反跳。再覆盖 POST 失败回滚、连点防重复、写成功但确认读暂时失败。
+- [ ] **验 RED。** 运行 `../.venv/bin/python -m pytest tests/unit/test_dashboard_deploy_autostart.py -q`；预期失败在入口/承载容器。
+- [ ] **实现开关与确认读。** 每模型单写在途，POST 失败回滚并显示错误；成功以响应值暂时展示，发起无条件写后快照。store 为快照打客户端请求序号，轮询与强刷都不得把低于最近已应用序号的响应写回状态或 ETag；开关在拿到不早于写后请求的已应用 HTTP 200 快照前不被轮询覆盖；304 不作确认。写后读失败显示“待回读确认”，允许再次读取，不宣称回滚或自动重试写入；受信的新快照不同则按服务端回读值显示并提示不一致。
+- [ ] **验定向 GREEN。** 重跑本任务 pytest，预期退出 0。
+- [ ] **验沙箱行为。** 浏览器执行乱序与失败案例；使用临时模型 YAML 实测 `false→true→false`，强刷及页面重载回读一致；点击导航到推理页能找到既有 switch/stop。测试配置不触发真实模型启动。
+- [ ] **验全量回归。** 跑共用 pytest 命令，预期无新增失败。
+- [ ] **做本地阶段提交。** `feat(dashboard): add deploy autostart controls`。
 
-### Task 4: cloud 页属性浮窗
+### Task 4: cloud 策展属性浮窗
 
-**Files:**
-- Modify: `macfabric_gateway/inferfabric/dashboard/js/cloud.js`（浮窗 UI + tag-with-attrs 提交）、`fragments/style.css`（浮窗类）
-- Test: `macfabric_gateway/tests/unit/test_dashboard_cloud_attrs.py`
+**Files:** 修改 `inferfabric/dashboard/js/cloud.js`，必要时改 `inferfabric/dashboard/fragments/style.css`；测试 `tests/unit/test_dashboard_cloud_attrs.py`。
 
-**Interfaces:**
-- Consumes: providers GET 回填的 `model_specs[{id,supports_vision,supports_tools,context_window,max_output_tokens,price_input,price_output,...}]`（handler.py:2929-2942）；`POST /admin/cloud/provider-models {provider, action:"tag", model, supports_vision?, supports_tools?, context_window?, max_output_tokens?, price_input?, price_output?}`。
-- Produces: 策展面板行内"属性"按钮 → 浮窗（六字段表单，回填现值）→ 保存发 tag action。
+**Interfaces:** 从 `GET /admin/cloud/providers` 的 `model_specs` 回填 `supports_vision`、`supports_tools`、`context_window`、`max_output_tokens`、`price_input`、`price_output`；调用 `POST /admin/cloud/provider-models {provider,action:"tag",model,...changedFields}`。请求字段缺省＝保留；数值字段显式 `null`＝清除；能力 `false`＝解除打标，而不是保存“明确不支持”。
 
-- [ ] **Step 1: 失败测试**：① cloud.js 源含 `context_window`、`price_input`、`max_output_tokens`、`supports_vision`、`supports_tools`（现状零命中 → RED）；② tag 提交体含 `action:"tag"` 与六键；③ 浮窗复用 `UI.confirm`/模态既有模式或自绘（断言关闭清空）。
-- [ ] **Step 2: RED。**
-- [ ] **Step 3: 实现**：策展面板每个已启用模型行加"属性"入口；浮窗六字段（vision/tools checkbox，四个数值 number 输入，空=不修改）；保存 → tag → 刷新该 provider 面板。
-- [ ] **Step 4: GREEN + 全量回归。**
-- [ ] **Step 5: 沙箱验收**：对临时 provider 配置 tag 一个 context_window 值 → GET 回读一致。
-- [ ] **Step 6: Commit** `feat(dashboard): model attribute editor popover on cloud curation panel`。
+- [ ] **写回归用例。** `test_cloud_attributes_entry_is_assembled`。浏览器用例：打开后无改动保存不发 POST；只改价格时原有显式能力 `false` 和其他属性不动；价格 `0` 按数字提交，显式清空提交 `null`；取消不提交，错误后保留输入可更正。
+- [ ] **验 RED。** 运行 `../.venv/bin/python -m pytest tests/unit/test_dashboard_cloud_attrs.py -q`；预期缺少属性编辑入口。
+- [ ] **实现浮窗。** 保留现有策展行和协议 chip，给可路由条目加属性入口。以原始声明回填，只发送变更；数值区区分未设置、0、显式清除，token 数为整数、价格为有限数字；能力复用“打标／解除打标”语义，已有显式 `false` 不动即保留，UI 不新增写入显式排除的途径。保存成功回读该 provider；失败显示错误，不宣称保存成功。
+- [ ] **验定向 GREEN。** 重跑本任务 pytest，预期退出 0。
+- [ ] **验沙箱行为。** 用禁用外部发现的临时 provider 在浏览器走不改、编辑、显式清空，检查请求体及 GET/YAML 回读；不连接真实 provider。
+- [ ] **验全量回归。** 跑共用 pytest 命令，预期无新增失败。
+- [ ] **做本地阶段提交。** `feat(dashboard): add cloud model attribute editor`。
 
-### Task 5: overview 内存账本卡（真账本快照）
+### Task 5: overview 真账本快照（只读）
 
-**Files:**
-- Modify: `macfabric_gateway/inferfabric/manager.py`（新增只读快照方法）
-- Modify: `macfabric_gateway/inferfabric/proxy/handler.py`（snapshot payload 加 `memory_ledger` 字段，注入点级）
-- Modify: `macfabric_gateway/inferfabric/dashboard/js/store.js`（归一化）、`js/overview.js`（账本卡）、`fragments/overview.html`、`fragments/style.css`
-- Test: `macfabric_gateway/tests/unit/test_memory_ledger_snapshot.py`
+**Files:** 修改 `inferfabric/manager.py`、`inferfabric/proxy/handler.py`、`inferfabric/dashboard/js/store.js`、`inferfabric/dashboard/js/overview.js`、`inferfabric/dashboard/fragments/overview.html`，必要时改 `inferfabric/dashboard/fragments/style.css`；测试 `tests/unit/test_memory_ledger_snapshot.py`，复用 `tests/unit/test_device_api_contract.py` 的 handler 测试夹具。
 
-**Interfaces:**
-- Produces: `ModelManager.memory_ledger_snapshot() -> dict | None`，返回 `{"available": True, "budget_mb": int|None, "committed_mb": int, "entries": [{"name","mem_baseline_mb","mode","state"}], "pressure_level": int|None, "eviction_plan": [str]}`；非 macOS 或探测不可用 → `None`（前端显示 `—`/空态，绝不伪造 0 预算——观测语义走 `probe.budget_given_total`，准入语义的 0 兜底不外泄）。
-- Consumes: 与 `_admit_memory`（manager.py:307-336）同一构造路径（`UnifiedMemoryLedger` + `mac_platform.budget_mb()`/`mem_used_mb()`）；`pressure_level` 取自 device telemetry 快照（与 `/api/snapshot` device 信封同一读数——one probe one timestamp 契约）。
-- snapshot 字段：`content["memory_ledger"] = getattr(pm.mgr, "memory_ledger_snapshot", lambda: None)()`（getattr 守卫，旧测试桩不受影响）。
+**Interfaces:** `ModelManager.memory_ledger_snapshot(device_snapshot: DeviceSnapshot | None) -> dict | None`。统一内存平台返回 `{"budget_mb": int|null, "committed_mb": int, "entries": [{"name": str, "mem_baseline_mb": int, "mode": str}], "pressure_level": int|null}`；其他平台或无可用的平台快照返回 `null`。预算和压力直接取 `/api/snapshot` 已取得的 `dev_snap.memory_budget_mb`、`dev_snap.pressure_level`；支持统一内存但采样字段缺失时保留该字段 `null`，不抹掉可计算的账面占用。`committed_mb` 是**活跃模型基线账面合计**，新目标准入时原样排除目标本身；此字段既不是进程实测内存，也不是下一模型的可准入额度。
 
-- [ ] **Step 1: 失败测试** `test_memory_ledger_snapshot.py`：① macOS 桩下 `memory_ledger_snapshot()` 返回 dict：committed = active 模型 baseline 之和（READY 全额）、SLEEPING 记 baseline//4（register 后手动改 state 验证）、非 active 模型不出现在 entries；② `budget_mb` 缺失（mem_total None）→ None 而非 0；③ 非 macOS（IS_MACOS=False 桩）→ None；④ pressure_level 透传 device telemetry 读数，eviction_plan = `pressure_eviction_plan(level)`（level=2 → 空表，level=3 → on_demand 优先序列）；⑤ handler 合同：`/api/snapshot` payload 含 `memory_ledger` 键且 None 安全（沿用 test_device_api_contract 的 `_Shell` 模式）。
-- [ ] **Step 2: RED。**
-- [ ] **Step 3: 实现**：manager 快照方法（复用 _admit_memory 的 ledger 构造，抽取共享私有构造函数 `_build_memory_ledger()` 供两处调用，防口径漂移——Review Focus 1）；handler 注入一行；store 归一化 + overview 账本卡（预算条 committed/B、逐模型 resident 行、压力灯 <3 绿/3 橙/>3 红 + eviction_plan 提示行）。
-- [ ] **Step 4: GREEN + 全量回归（重点：既有 manager/handler 测试无回归）。**
-- [ ] **Step 5: 沙箱验收**：:8998 `/api/snapshot` 含 memory_ledger；macOS 真机 committed>0、budget=B；Dashboard overview 渲染账本卡。
-- [ ] **Step 6: Commit** `feat(dashboard): memory ledger card on overview — true committed/B + pressure`。
+- [ ] **写回归用例。** `test_memory_ledger_projection_uses_admission_baselines`：活跃模型全额记账，`mem_baseline_mb` 缺省回退 `peak_vram_mb`；不在活跃集合的模型不入账（含已退出进程的 llama.cpp sleep）；不因 sleep 标记打 25% 折扣，准入的目标排除、结果及探针策略不变。`test_snapshot_memory_ledger_reuses_device_sample`：handler 传同一个快照对象、不新增探针调用，独立覆盖空闲真实 0、未知预算/压力、非 unified、旧 handler 测试桩和新增字段的 ETag 变化。
+- [ ] **验 RED。** 运行 `../.venv/bin/python -m pytest tests/unit/test_memory_ledger_snapshot.py tests/unit/test_device_api_contract.py -q`；账本投影/接线断言失败，现有遥测测试保持原行为。
+- [ ] **实现投影。** 抽出两条路径共享的活跃模型登记逻辑；`_admit_memory` 继续使用原预算探测、目标排除和准入规则；观测路径不调用准入或额外探测。handler 将已获取的 `dev_snap` 显式传入，结果加 `memory_ledger`；store 做缺省兼容，overview 展示账面 `committed / B` 和压力 `1 正常 / 2 警告 / 3 严重 / null 未知`。预算未知或为零不计算百分比；超预算时不掩盖原值。不上报或展示推算的卸载顺序，不触发任何控制动作。
+- [ ] **验定向 GREEN。** 重跑本任务 pytest，预期退出 0。
+- [ ] **验沙箱行为。** macOS 空闲快照比对 `memory_ledger.budget_mb/pressure_level` 与同响应 `device.snapshot`，空闲 `committed=0` 可正常显示；用隔离运行状态夹具提供非零占用，不为验收重启或拉起宿主模型。浏览器检查压力 1/2/3/未知、预算未知/零和非 unified 空态。
+- [ ] **验全量回归。** 跑共用 pytest 命令，预期无新增失败。
+- [ ] **做本地阶段提交。** `feat(dashboard): show admission memory ledger in overview`。
 
 ---
 
-## 验收（M2 完成定义）
+## M2 完成定义与交付边界
 
-§6.3 映射表逐条：packs 下载/装机/卸载/进度有操作路径；security enable/一次性回显可走通；switch/stop/autostart 在 deploy 页齐备；云策展含属性编辑；overview 有账本+压力灯。每项沙箱 HTTP 证据入 docs/qa；全量回归绿；生产发布随下一 tag（release-install 流程）。
+- [ ] QA 逐项记录：能力包阶段、安装和预览卸载；鉴权状态、首次发 key、创建/吊销；部署页 autostart 及到推理页 switch/stop 的路径；云属性保留/修改/清除；overview 账本与压力。注明真实沙箱与浏览器拦截各自的证据，缺项不算通过。
+- [ ] 全分支评审与最终回归通过后，记录本地交付候选并单独报批合入和发布；不把发布或真实 CUDA 验收算作本计划的既成结果。
+- [ ] 更新 `docs/upstream/CHERRY-PICK-MANIFEST.md` 的 UI 条目，记录每项改动与后端依赖。packs 依赖 F4 能力包 API；security 对照 F7 核对上游实际缺的路由/字段；autostart、cloud 属性和 ledger 也各验上游接口后再切 pick，不承诺能直接摘取。不要把 M3 Connect 写成 M2 产物。
 
-## 明确不在本计划内
-
-- Connect 页（M3）；账号池占位（M3）；legacy whisper 裸下载通道 UI；security `/admin/keys` Cookie 会话体系 UI（复用既有 keys 页入口即可）；后端新端点。
+**明确不在本计划内：** Connect 与账号池（M3）、legacy whisper 裸下载 UI、Cookie 版 `/admin/keys` 重做、InferFabric #8 的通用 `iff remove` Dashboard 入口、以调整准入策略或自动处置来配合账本展示、未经另行授权的共享分支推送和生产发布。
