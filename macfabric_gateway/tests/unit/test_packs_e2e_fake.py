@@ -159,7 +159,12 @@ def test_fake_pack_full_lifecycle(tmp_path):
     code, payload = mgr.start_install(PID)
     assert code == 202, payload
     rec = _await_installed(mgr)
-    assert rec.sandbox_degraded is False
+    if sys.platform == "darwin":
+        assert rec.sandbox_degraded is False
+    else:
+        # 非 macOS：SBPL 探测不可用 → 显式降级安装是设计行为（spec §8.3），
+        # 记录必须如实标记 degraded 而非冒充完整隔离
+        assert rec.sandbox_degraded is True
     assert reloaded, "gateway_reload hook 未调用"
 
     # 2. 受控 YAML 生成 + 现有 loader 反序列化（D6 schema 兼容）
