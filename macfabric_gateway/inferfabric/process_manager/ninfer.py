@@ -14,6 +14,10 @@ import subprocess
 from pathlib import Path
 
 from inferfabric.health import wait_http, check_http_status
+from inferfabric.image_manager import (
+    MANAGED_LABEL,
+    ensure_image_pulled,
+)
 from inferfabric.process_manager.base import BaseProcessManager
 
 
@@ -218,13 +222,26 @@ class NInferProcessManager(BaseProcessManager):
                        capture_output=True, check=False)
         time.sleep(2)
 
+        # issue #3 L3b: 显式拉取 + 管理台账（镜像 label 无法 pull 后补写，
+        # "managed" 以容器 label + 台账表达）；issue #8-③（选项 2′）：
+        # 拉取失败即中止启动——不再让 docker run 无超时地隐式重拉。
+        pull = ensure_image_pulled(cfg.docker_image)
+        if pull.get("status") == "error":
+            return {"status": "error",
+                    "message": (f"image pull failed for {cfg.docker_image}: "
+                                f"{pull.get('detail') or 'docker pull failed'} — "
+                                f"retry the start or run: docker pull {cfg.docker_image}")}
+
         weight_path = Path(cfg.weight_path).expanduser()
         weight_dir = str(weight_path.parent)
 
         cmd = [
             "docker", "run", "-d", "--gpus", "all", "--rm",
+            # 管理标签（issue #3 L3b）：网关所启容器一律可辨
+            "--label", MANAGED_LABEL,
             "--log-opt", "max-size=50m", "--log-opt", "max-file=3",
-            "-v", f"{weight_dir}:/workspace",
+            # 权重只读挂载（issue #3 隔离硬化）：容器不得写宿主权重
+            "-v", f"{weight_dir}:/workspace:ro",
             "-p", f"{cfg.port}:8080",
             "--name", container_name,
             "-e", "NVIDIA_DISABLE_REQUIRE=1",
