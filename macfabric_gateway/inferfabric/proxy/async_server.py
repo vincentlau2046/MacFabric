@@ -251,6 +251,14 @@ def _build_shim(request, body, pm, watchdog, wfile, loop):
     h.send_response = _send_response
     h.send_header = _send_header
     h.end_headers = _end_headers
+
+    # Connect（F10）门禁用：对端只信 socket peer（request.transport），
+    # 缺失（或异常）即 None → connect_handlers 拒绝；绝不读转发头。
+    try:
+        h._peer_address = (request.transport.get_extra_info("peername")
+                           if request.transport is not None else None)
+    except Exception:
+        h._peer_address = None
     return h
 
 
