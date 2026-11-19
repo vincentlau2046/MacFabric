@@ -21,7 +21,6 @@ POST /admin/connect/apply、/admin/connect/rollback、GET /admin/connect/status
 from __future__ import annotations
 
 import hmac
-import json
 import os
 from pathlib import Path
 
@@ -128,9 +127,9 @@ def _send_error(h, code: str, message: str) -> None:
 
 
 def _read_json(h) -> dict | None:
+    # forwarder.read_body 已解析 JSON（畸形 JSON 时自带 400）——这里只做形态守卫
     try:
-        raw = h._read_body()
-        data = json.loads(raw.decode("utf-8"))
+        data = h._read_body()
     except Exception:
         return None
     return data if isinstance(data, dict) else None

@@ -256,7 +256,7 @@ def test_malformed_or_conflicting_config_leaves_original_untouched(tmp_path):
     assert pc.read_text() == "[broken\n"
 
     # codex 保留 provider 名冲突：inferfabric 已被占用且指向别处
-    occupied = '[model_providers.inferfabric]\nbase_url = "http://elsewhere:1/v1"\n'
+    occupied = '[model_providers.inferfabric]\nbase_url = "http://example.com:1/v1"\n'
     pc.write_text(occupied, encoding="utf-8")
     with pytest.raises(ConnectError) as ei:
         mc.apply("codex", expected_revision=mc.inspect("codex")["revision"],

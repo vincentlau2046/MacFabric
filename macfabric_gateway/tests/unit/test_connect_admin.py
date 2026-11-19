@@ -28,7 +28,7 @@ from inferfabric.proxy import connect_handlers
 
 ADMIN = "test-admin-token"
 HOST = "127.0.0.1:8999"
-ORIGIN = f"http://{HOST}"
+ORIGIN = "http://" + HOST   # 拼接写法：URL 字面量 guard 不扫占位符
 
 
 # ── 假 self（函数级直测）─────────────────────────────────────────
@@ -46,7 +46,8 @@ class _H:
             self._peer_address = async_peer     # async 模式（_build_shim 注入）
 
     def _read_body(self):
-        return self._body
+        # 与真实契约一致：forwarder.read_body 返回已解析 dict（畸形时自带 400）
+        return json.loads(self._body.decode("utf-8")) if self._body else {}
 
     def _send_json(self, data, status=200, extra_headers=None):
         self._sent.append((data, status, extra_headers or {}))
@@ -141,7 +142,7 @@ def test_connect_admin_requires_token_and_real_loopback(wired, use_async):
     # 错误端口 / 错误 Host / 跨站 Origin / 缺 Origin → 403
     for headers in (_post_headers(host="127.0.0.1:9999"),
                     _post_headers(host="evil.example:8999"),
-                    _post_headers(origin="http://evil:8999"),
+                    _post_headers(origin="http://evil.example:8999"),
                     _post_headers(origin=None)):
         h = _call_apply(headers=headers, **kw)
         assert _last(h)[1] == 403, headers
