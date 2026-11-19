@@ -143,7 +143,17 @@
 
 > **PR #14 复验闭环**（2026-11-19，维护人推送修复 `392d8ea` 后请求 mac端 复跑 sandbox matrix，合入以其结果为门）：mac端 复验矩阵**全绿**（评论 7012278557）——B1 实证修复（3.9.6 下打印 `got 3.9` 正常 exit 1）；B2 实证修复（plist 烘焙 `.venv/bin/python3` 绝对路径，`/usr/bin/env` 消失）；密闭 darwin 全流程绿 + `plutil -lint` OK + exists-skip/--force-service 语义不变；新钩子 `IFF_SKIP_SMOKE`/`IFF_INSTALL_LOG_DIR` 符合预期。**一个非阻塞发现（仅 mac端，不阻 Linux 合入）**：新 `test_install_sh.py` 以 `**os.environ` 派生 install.sh，宿主 shell PATH 的 python3<3.10 时 6 用例假失败（与 B2 同类的环境敏感，落在测试层）；已验证最小修复（测试 env PATH 前置 ≥3.10 stub 垫片 → 7/7 绿），建议上游二选一：钉死子进程解释器或 skip-if-<3.10。N1/N2/N3 处置确认。等 Linux 端合入。 **PR #14 已合并**（rebase 为 `fde96c1`，issue #13 同步关闭；维护人还采纳了非阻塞发现：test 子进程解释器 PATH 垫片钉死 `842b346`，Linux 全量 2269 绿）。mac端 launchd 惯例（绝对解释器烘焙、KeepAlive、用户级日志目录）已反向输入上游并被采纳。
 
-> **fork 侧 install/launchd 收敛裁决项**（PR #14 合并后遗留，待用户/peer 裁决）：fork 有自有生产脚本 `scripts/install-launchd.sh`（label `com.macfabric.gateway`、PROD=`~/Library/MacFabric/prod`、App 设置页 Toggle 集成、uninstall/status）与 `scripts/gateway-launchd.sh`（repo `.venv` 变体、ThrottleInterval=10），上游 install.sh 为 `com.inferfabric.proxy`、`~/Library/Logs/inferfabric`、`--enable-service`/`--force-service`。候选：A=替换 fork 脚本为上游 install.sh（不可行：不感知 fork 包布局 macfabric_gateway/、MACFABRIC_STATE_DIR、prod 目录，且丢失 uninstall/status 与 App 集成）；B=**fork 不动作（推荐）**——fork launchd 脚本属 fork 运维适配层，关键惯例已反向输入上游（B2 修复注释明引 mac端 先例），语义分叉实质收敛，改名/替换是破坏性迁移（现网机器 label/launchctl/App 引用全动）且无安全收益，符合北极星「fork=parity only、适配需正确性理由」；退役时 mac端 直接切上游 install.sh；C=fork 对齐上游 label/日志路径命名（纯 cosmetics，同 B 的破坏性问题，不推荐）。
+> **fork 侧 install/launchd 收敛裁决项**（PR #14 合并后遗留，待用户/peer 裁决）：fork 有自有生产脚本 `scripts/install-launchd.sh`（label `com.macfabric.gateway`、PROD=`~/Library/MacFabric/prod`、App 设置页 Toggle 集成、uninstall/status）与 `scripts/gateway-launchd.sh`（repo `.venv` 变体、ThrottleInterval=10），上游 install.sh 为 `com.inferfabric.proxy`、`~/Library/Logs/inferfabric`、`--enable-service`/`--force-service`。候选：A=替换 fork 脚本为上游 install.sh（不可行：不感知 fork 包布局 macfabric_gateway/、MACFABRIC_STATE_DIR、prod 目录，且丢失 uninstall/status 与 App 集成）；B=**fork 不动作（推荐）**——fork launchd 脚本属 fork 运维适配层，关键惯例已反向输入上游（B2 修复注释明引 mac端 先例），语义分叉实质收敛，改名/替换是破坏性迁移（现网机器 label/launchctl/App 引用全动）且无安全收益，符合北极星「fork=parity only、适配需正确性理由」；退役时 mac端 直接切上游 install.sh；C=fork 对齐上游 label/日志路径命名（纯 cosmetics，同 B 的破坏性问题，不推荐）。 **裁决落定（2026-11-19）**：peer 从 console/UI 集成视角复核无异议（console 只依赖 gateway HTTP API+SSE，不触碰 launchd 标签/PROD 目录/安装脚本约定）→ **B 生效：fork 不动作**；归一版若需开机自启，按 upstream install.sh 约定在 InferFabric 侧补。
+
+## 6. 统一版本叠层 PR（peer 开出，inferfabric-pr 记账，2026-11-19）
+
+| # | PR | 内容 | 叠层 | 状态 |
+|---|---|---|---|---|
+| 15 | [InferFabric#15](https://github.com/vincentlau2046/InferFabric/pull/15) | F7 统一 admin 门（born-token、fail-closed strict 模式、Host/Origin 检查） | base main | open，等上游评审 |
+| 16 | [InferFabric#16](https://github.com/vincentlau2046/InferFabric/pull/16) | F4 capability packs（后端 12 模块+catalog、admin API、卸载状态机、503 gate） | base pick/security-fixes（#15 合并后 retarget main） | open，等上游评审 |
+| 17 | [InferFabric#17](https://github.com/vincentlau2046/InferFabric/pull/17) | F1 协议桥（/v1/responses、Anthropic 翻译、池摘要观测） | base pick/capability-packs（随栈合并 retarget） | open，等上游评审 |
+
+F9 依赖核查（peer 同步）：T5 memory_ledger 被 G1 阻塞；T3 缺 set-autostart handler；T2 需字段级比对。
 
 **范式原则（用户原话裁决）**：部署不得影响系统环境；整体卸载/安装必须方便（一键化、容器化拆除）。Mac 侧表达 = 用户态自包含（engines/ 独立二进制 + venv + `python_bin` 显式）；**x86+NVIDIA 侧不是照搬 Mac 路径，而是同一原则的本地表达**——上游既有 Docker（ninfer/sglang）与 conda env 路径需审计：容器/venv 是否项目内自包含、卸载是否引用计数拆除、有无系统级残留（conda 全局、系统 site-packages、/usr/local 二进制）。产出物 = 适配方案 + 对应 pick 分支，先在 PR #1 讨论区或单独 issue 与上游对齐形态再动手。
 
