@@ -153,7 +153,7 @@
 | 16 | [InferFabric#16](https://github.com/vincentlau2046/InferFabric/pull/16) | F4 capability packs（后端 12 模块+catalog、admin API、卸载状态机、503 gate） | base pick/security-fixes（#15 合并后 retarget main） | open，等上游评审 |
 | 17 | [InferFabric#17](https://github.com/vincentlau2046/InferFabric/pull/17) | F1 协议桥（/v1/responses、Anthropic 翻译、池摘要观测） | base pick/capability-packs（随栈合并 retarget） | open，等上游评审 |
 
-F9 依赖核查（peer 同步）：T5 memory_ledger 被 G1 阻塞；T3 缺 set-autostart handler；T2 需字段级比对。
+F9 依赖核查（peer 同步）：T5 memory_ledger 被 G1 阻塞；T3 缺 set-autostart handler；T2 需字段级比对。 **T2 比对已完成（2026-11-19，inferfabric-pr）**：fork security.js 4 端点 vs 上游 `/admin/keys*`——字段缺口均为薄适配（status 投影可推导、create 返回 `{entry,key}` 超集、revoke 上游 id 32 字符校验可收紧）；**真正裁决点=鉴权前门**：上游走 console 会话（login+CSRF+origin 白名单），fork 走 _admin 门（born-token/localhost）；推荐 F9 映射=方案 a（保留 _admin 门 + F7 gate 后 4 个 security 薄 handler 包装上游 store，b=改造吃 console 会话留上游原生用户）。 **T3 分工落定**：set-autostart handler=gateway 侧补口（fork 有现成实现），归 inferfabric-pr，**等用户 F9 方案 A（T1+T2+T4+T3 现在切）/ B（整体等 G1）裁决后动手**；peer 做 dashboard 前端与叠层接续。
 
 **范式原则（用户原话裁决）**：部署不得影响系统环境；整体卸载/安装必须方便（一键化、容器化拆除）。Mac 侧表达 = 用户态自包含（engines/ 独立二进制 + venv + `python_bin` 显式）；**x86+NVIDIA 侧不是照搬 Mac 路径，而是同一原则的本地表达**——上游既有 Docker（ninfer/sglang）与 conda env 路径需审计：容器/venv 是否项目内自包含、卸载是否引用计数拆除、有无系统级残留（conda 全局、系统 site-packages、/usr/local 二进制）。产出物 = 适配方案 + 对应 pick 分支，先在 PR #1 讨论区或单独 issue 与上游对齐形态再动手。
 
