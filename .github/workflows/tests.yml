@@ -14,7 +14,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: pytest macfabric_gateway/tests/ -q
+      # inferfabric imports resolve via cwd on sys.path (python -m pytest) —
+      # running from repo root without PYTHONPATH fails collection (ModuleNotFoundError)
+      - working-directory: macfabric_gateway
+        run: python -m pytest tests -q
 
   app-contracts:
     runs-on: macos-14

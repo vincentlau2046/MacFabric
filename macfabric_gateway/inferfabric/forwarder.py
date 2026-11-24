@@ -16,6 +16,7 @@ from http.client import HTTPConnection
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError as _HTTPError
 
+from inferfabric import outbound_credentials
 from inferfabric.config import (
     UPSTREAM_LOCAL_RETRIES,
     exponential_backoff,
@@ -133,6 +134,11 @@ def send_json(handler, body_d, status=200, extra_headers=None):
         handler.end_headers()
         handler.wfile.write(body)
         handler.wfile.flush()
+        # Connect（F10）单响应守卫用：body 错误响应已发出，路由层不再重发
+        try:
+            handler._responded = True
+        except AttributeError:
+            pass  # 个别假 handler 用 __slots__；守卫层 getattr 默认即 False
     except (BrokenPipeError, ConnectionResetError, OSError):
         pass
 
@@ -149,12 +155,14 @@ def read_body(handler):
         if size == 0:
             return {}
         if size > 100 * 1024 * 1024:  # 100MB limit (matches engine capability)
-            send_json(handler, {"error": "payload too large (max 100MB)"}, 413)
+            send_json(handler, {"error": "payload too large (max 100MB)"}, 413,
+                      extra_headers={"Cache-Control": "no-store"})
             return None
         raw = handler.rfile.read(size)
         return json.loads(raw)
     except (json.JSONDecodeError, ValueError) as e:
-        send_json(handler, {"error": f"Invalid JSON: {e}"}, 400)
+        send_json(handler, {"error": f"Invalid JSON: {e}"}, 400,
+                  extra_headers={"Cache-Control": "no-store"})
         return None
 
 
@@ -300,9 +308,14 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
         # 厂商文档）→ 拼 /v1/messages（Anthropic SDK 行业惯例）
         _ab = provider_cfg.anthropic_base.rstrip('/')
         url = (_ab + "/messages") if _ab.endswith("/v1") else (_ab + "/v1/messages")
+        # F6 出站账号选择（M3 T5 占位）：能力/端点校验通过后、组装鉴权前
+        # 调用一次；默认恒等透传，重试沿用同值（headers 在重试循环外组装）。
+        _outbound_key = outbound_credentials.select_outbound_api_key(
+            provider_name=provider_cfg.name,
+            configured_api_key=provider_cfg.api_key)
         headers = {
             "Content-Type": "application/json",
-            "x-api-key": provider_cfg.api_key,
+            "x-api-key": _outbound_key,
             "User-Agent": _CLOUD_UA,
         }
     else:  # openai
@@ -320,9 +333,13 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
             return CloudResult(status=501, error=err, committed=False)
         _path = (upstream_path or "chat/completions").lstrip("/")
         url = f"{provider_cfg.openai_base.rstrip('/')}/{_path}"
+        # F6 出站账号选择（M3 T5 占位）：同上，单次调用、重试沿用。
+        _outbound_key = outbound_credentials.select_outbound_api_key(
+            provider_name=provider_cfg.name,
+            configured_api_key=provider_cfg.api_key)
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {provider_cfg.api_key}",
+            "Authorization": f"Bearer {_outbound_key}",
             "User-Agent": _CLOUD_UA,
         }
 
